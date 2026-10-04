@@ -612,6 +612,54 @@ class VaultCache:
             # Bad query syntax in MATCH expression (e.g. unclosed quote)
             return []
 
+    def get_status(self) -> dict[str, Any]:
+        """Return aggregate epistemic health metrics."""
+        conn = self.get_connection()
+        cur = conn.execute("SELECT COUNT(*) FROM notes WHERE layer = 'wiki';")
+        total_wiki = cur.fetchone()[0]
+
+        cur = conn.execute("SELECT COUNT(*) FROM notes WHERE layer = 'raw';")
+        total_raw = cur.fetchone()[0]
+
+        cur = conn.execute(
+            """
+            SELECT COUNT(*) FROM notes r
+            WHERE r.layer = 'raw'
+              AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.raw_path = r.rel_path);
+            """
+        )
+        unprocessed_raw = cur.fetchone()[0]
+
+        cur = conn.execute(
+            "SELECT trust_tier, COUNT(*) as cnt FROM notes WHERE layer = 'wiki' GROUP BY trust_tier;"
+        )
+        tier_counts = {r["trust_tier"] or "unverified": r["cnt"] for r in cur.fetchall()}
+        stale_count = tier_counts.get("stale-verified", 0)
+
+        cur = conn.execute(
+            "SELECT type, COUNT(*) as cnt FROM notes WHERE layer = 'wiki' GROUP BY type;"
+        )
+        type_counts = {r["type"] or "unknown": r["cnt"] for r in cur.fetchall()}
+
+        cur = conn.execute(
+            "SELECT status, COUNT(*) as cnt FROM notes WHERE layer = 'wiki' GROUP BY status;"
+        )
+        status_counts = {r["status"] or "unknown": r["cnt"] for r in cur.fetchall()}
+
+        return {
+            "vault_name": self.vault.config.get("vault_name", "vault"),
+            "root": str(self.vault.root),
+            "total_notes": total_wiki,
+            "total_raw": total_raw,
+            "unprocessed_raw": unprocessed_raw,
+            "unprocessed_raw_sources": unprocessed_raw,
+            "verification_debt": stale_count,
+            "trust_tiers": tier_counts,
+            "types": type_counts,
+            "statuses": status_counts,
+            "integrity": self.vault.config.get("integrity", "mtime_size"),
+        }
+
     def check_fts_integrity(self) -> bool:
         """Run FTS5 internal integrity check."""
         conn = self.get_connection()

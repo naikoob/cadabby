@@ -265,31 +265,7 @@ class McpServer:
 
             elif name == "vault_status":
                 self.cache.scan()
-                conn = self.cache.get_connection()
-
-                cur = conn.execute("SELECT COUNT(*) FROM notes WHERE layer = 'wiki';")
-                total_wiki = cur.fetchone()[0]
-
-                cur = conn.execute(
-                    """
-                    SELECT COUNT(*) FROM notes r
-                    WHERE r.layer = 'raw'
-                      AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.raw_path = r.rel_path);
-                    """
-                )
-                unprocessed = cur.fetchone()[0]
-
-                cur = conn.execute(
-                    "SELECT trust_tier, COUNT(*) as cnt FROM notes WHERE layer = 'wiki' GROUP BY trust_tier;"
-                )
-                tiers = {r["trust_tier"] or "unverified": r["cnt"] for r in cur.fetchall()}
-
-                status_out = {
-                    "total_notes": total_wiki,
-                    "unprocessed_raw_sources": unprocessed,
-                    "verification_debt": tiers.get("stale-verified", 0),
-                    "trust_tiers": tiers,
-                }
+                status_out = self.cache.get_status()
                 return {"content": [{"type": "text", "text": json.dumps(status_out, indent=2)}], "isError": False}
 
             elif name == "vault_lint":

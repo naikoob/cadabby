@@ -267,58 +267,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     vault = Vault(args.vault)
     cache = VaultCache(vault)
     cache.scan()
-    conn = cache.get_connection()
-
-    # Query counts
-    cur = conn.execute("SELECT COUNT(*) FROM notes WHERE layer = 'wiki';")
-    total_wiki = cur.fetchone()[0]
-
-    cur = conn.execute("SELECT COUNT(*) FROM notes WHERE layer = 'raw';")
-    total_raw = cur.fetchone()[0]
-
-    # Unprocessed raw files
-    cur = conn.execute(
-        """
-        SELECT COUNT(*) FROM notes r
-        WHERE r.layer = 'raw'
-          AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.raw_path = r.rel_path);
-        """
-    )
-    unprocessed_raw = cur.fetchone()[0]
-
-    # Trust tiers
-    cur = conn.execute(
-        "SELECT trust_tier, COUNT(*) as cnt FROM notes WHERE layer = 'wiki' GROUP BY trust_tier;"
-    )
-    tier_counts = {r["trust_tier"] or "unverified": r["cnt"] for r in cur.fetchall()}
-
-    # Verification debt
-    stale_count = tier_counts.get("stale-verified", 0)
-
-    # Note types
-    cur = conn.execute(
-        "SELECT type, COUNT(*) as cnt FROM notes WHERE layer = 'wiki' GROUP BY type;"
-    )
-    type_counts = {r["type"] or "unknown": r["cnt"] for r in cur.fetchall()}
-
-    # Note statuses
-    cur = conn.execute(
-        "SELECT status, COUNT(*) as cnt FROM notes WHERE layer = 'wiki' GROUP BY status;"
-    )
-    status_counts = {r["status"] or "unknown": r["cnt"] for r in cur.fetchall()}
-
-    status_data = {
-        "vault_name": vault.config.get("vault_name", "vault"),
-        "root": str(vault.root),
-        "total_notes": total_wiki,
-        "total_raw": total_raw,
-        "unprocessed_raw": unprocessed_raw,
-        "verification_debt": stale_count,
-        "trust_tiers": tier_counts,
-        "types": type_counts,
-        "statuses": status_counts,
-        "integrity": vault.config.get("integrity", "mtime_size"),
-    }
+    status_data = cache.get_status()
 
     if args.json:
         print(json.dumps(status_data, indent=2))
@@ -326,16 +275,19 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     print(f"\n=== Vault Status: {status_data['vault_name']} ===")
     print(f"Path: {vault.root}")
-    print(f"Total Notes: {total_wiki} | Raw Sources: {total_raw} ({unprocessed_raw} unprocessed)")
-    print(f"Verification Debt (stale): {stale_count}")
+    print(
+        f"Total Notes: {status_data['total_notes']} | Raw Sources: {status_data['total_raw']} "
+        f"({status_data['unprocessed_raw']} unprocessed)"
+    )
+    print(f"Verification Debt (stale): {status_data['verification_debt']}")
     print("\nTrust Tiers:")
     for tier in ("human-reviewed", "machine-confirmed", "stale-verified", "unverified"):
-        print(f"  - {tier:<20}: {tier_counts.get(tier, 0)}")
+        print(f"  - {tier:<20}: {status_data['trust_tiers'].get(tier, 0)}")
     print("\nTypes:")
     for t in NOTE_TYPES:
-        print(f"  - {t:<20}: {type_counts.get(t, 0)}")
+        print(f"  - {t:<20}: {status_data['types'].get(t, 0)}")
     print("\nStatuses:")
-    for s, count in status_counts.items():
+    for s, count in status_data["statuses"].items():
         print(f"  - {s:<20}: {count}")
     print()
     return 0
