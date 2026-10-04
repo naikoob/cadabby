@@ -14,7 +14,7 @@ from pathlib import Path
 
 from cadabby.audit import run_vault_audit
 from cadabby.cache import VaultCache
-from cadabby.constants import DIR_RAW, DIR_WIKI, NOTE_TYPES
+from cadabby.constants import DIR_RAW, DIR_WIKI, FILE_CONFIG, NOTE_TYPES
 from cadabby.fsutil import atomic_write
 from cadabby.graph import get_note_graph, resolve_link_target
 from cadabby.indexer import append_vault_log, rotate_vault_log, sync_vault_index
@@ -26,7 +26,19 @@ from cadabby.ops import (
     update_note,
     verify_note,
 )
-from cadabby.vault import Vault
+from cadabby.vault import Vault, find_vault_root
+
+
+def resolve_cli_vault(args: argparse.Namespace) -> Vault:
+    """Resolve vault from CLI arguments or environment, failing fast if not inside a vault."""
+    vault_arg = getattr(args, "vault", None)
+    discovered = find_vault_root(vault_arg)
+    if discovered is None:
+        target_loc = vault_arg or Path.cwd()
+        raise FileNotFoundError(
+            f"No Cadabby vault found at {target_loc} (missing {FILE_CONFIG} or marker). Run 'cadabby init' to create one."
+        )
+    return Vault(root=discovered)
 
 
 def get_assets_dir() -> Path:
@@ -122,7 +134,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 def cmd_sync(args: argparse.Namespace) -> int:
     """Run incremental cache scan and catalog sync."""
-    vault = Vault(args.vault)
+    vault = resolve_cli_vault(args)
     rebuild = getattr(args, "rebuild", False)
     if rebuild:
         cache_path = vault.cache_db_path
@@ -147,7 +159,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
 def cmd_search(args: argparse.Namespace) -> int:
     """Search vault notes with normalized epistemic BM25 ranking."""
-    vault = Vault(args.vault)
+    vault = resolve_cli_vault(args)
     with VaultCache(vault) as cache:
         results = cache.search(
             query=args.query,
@@ -182,7 +194,7 @@ def cmd_search(args: argparse.Namespace) -> int:
 
 def cmd_ground(args: argparse.Namespace) -> int:
     """Retrieve full content and 1-hop graph for specified CIDs."""
-    vault = Vault(args.vault)
+    vault = resolve_cli_vault(args)
     with VaultCache(vault) as cache:
         cache.scan()
         grounded = ground_notes(vault, args.cids, budget_tokens=args.budget_tokens, cache=cache)
@@ -206,7 +218,7 @@ def cmd_ground(args: argparse.Namespace) -> int:
 
 def cmd_scaffold(args: argparse.Namespace) -> int:
     """Scaffold a new note."""
-    vault = Vault(args.vault)
+    vault = resolve_cli_vault(args)
     tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else None
     sources = [s.strip() for s in args.sources.split(",") if s.strip()] if args.sources else None
 
@@ -227,7 +239,7 @@ def cmd_scaffold(args: argparse.Namespace) -> int:
 
 def cmd_update(args: argparse.Namespace) -> int:
     """Update note frontmatter or sections non-destructively."""
-    vault = Vault(args.vault)
+    vault = resolve_cli_vault(args)
     patch = json.loads(args.patch_frontmatter) if args.patch_frontmatter else None
 
     append_sec = None
@@ -255,7 +267,11 @@ def cmd_update(args: argparse.Namespace) -> int:
 
 def cmd_verify(args: argparse.Namespace) -> int:
     """Stamp a content-bound verification attestation."""
-    vault = Vault(args.vault)
+    vault = resolve_cli_vault(args)
+
+    if args.human and args.agent:
+        print("Error: --human and --agent are mutually exclusive.", file=sys.stderr)
+        return 1
 
     if args.human:
         if not sys.stdin.isatty():
@@ -289,7 +305,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 def cmd_status(args: argparse.Namespace) -> int:
     """Print high-level vault status, distribution, and verification debt."""
-    vault = Vault(args.vault)
+    vault = resolve_cli_vault(args)
     with VaultCache(vault) as cache:
         cache.scan()
         status_data = cache.get_status()
@@ -320,7 +336,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_lint(args: argparse.Namespace) -> int:
     """Run six-gate epistemic linting."""
-    vault = Vault(args.vault)
+    vault = resolve_cli_vault(args)
     with VaultCache(vault) as cache:
         findings = run_vault_lint(vault, cache=cache)
 
@@ -349,7 +365,7 @@ def cmd_lint(args: argparse.Namespace) -> int:
 
 def cmd_audit(args: argparse.Namespace) -> int:
     """Run Git provenance audit against human:* endorsements."""
-    vault = Vault(args.vault)
+    vault = resolve_cli_vault(args)
     findings, notice = run_vault_audit(vault, require_signed=args.require_signed)
 
     if notice:
@@ -387,7 +403,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
 
 def cmd_log(args: argparse.Namespace) -> int:
     """Append a timestamped entry to the active log.md ledger (§5.3)."""
-    vault = Vault(args.vault)
+    vault = resolve_cli_vault(args)
     actor = args.actor
     if not actor:
         if sys.stdin.isatty():
@@ -401,7 +417,7 @@ def cmd_log(args: argparse.Namespace) -> int:
 
 def cmd_graph(args: argparse.Namespace) -> int:
     """Display 1-hop and 2-hop neighbors, co-citations, and links for a note (§5.3)."""
-    vault = Vault(args.vault)
+    vault = resolve_cli_vault(args)
     with VaultCache(vault) as cache:
         cache.scan()
         conn = cache.get_connection()
@@ -483,7 +499,7 @@ def cmd_mcp(args: argparse.Namespace) -> int:
     """Run the Model Context Protocol stdio server."""
     from cadabby.mcp import run_mcp_server
 
-    vault = Vault(args.vault)
+    vault = resolve_cli_vault(args)
     return run_mcp_server(vault)
 
 

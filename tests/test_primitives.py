@@ -299,6 +299,51 @@ class TestGraphAndLinkResolution(unittest.TestCase):
             self.assertEqual(results[0].title, "Search Test")
             self.assertGreater(results[0].score, 0.0)
 
+    def test_vault_cache_search_sanitized_ranking_cases(self):
+        # Even with custom malicious single quotes or non-numeric values in ranking config, search works
+        note = self.vault.wiki_dir / "concepts" / "SanitizeTest.md"
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text(
+            "---\ntype: concept\ntitle: Sanitize Test\ndescription: Testing ranking\nstatus: active\n---\n# Sanitize Test\nQuery target.\n",
+            "utf-8",
+        )
+        self.vault.config["ranking"] = {
+            "trust": {"malicious' OR 1=1 --": 2.0, "bad_num": "not_a_float"},
+            "status": {"active'; DROP TABLE notes; --": 1.5},
+        }
+        with VaultCache(self.vault) as cache:
+            cache.scan()
+            results = cache.search("Query")
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].title, "Sanitize Test")
+
+    def test_find_vault_root_precedence(self):
+        env_vault = self.vault_dir / "env_vault"
+        env_vault.mkdir(parents=True, exist_ok=True)
+        (env_vault / FILE_CONFIG).write_text('{"vault_name": "env"}', "utf-8")
+
+        explicit_vault = self.vault_dir / "explicit_vault"
+        explicit_vault.mkdir(parents=True, exist_ok=True)
+        (explicit_vault / FILE_CONFIG).write_text('{"vault_name": "explicit"}', "utf-8")
+
+        old_env = os.environ.get("CADABBY_VAULT")
+        try:
+            os.environ["CADABBY_VAULT"] = str(env_vault)
+
+            # When explicit path is passed, it must take precedence over CADABBY_VAULT
+            found_explicit = find_vault_root(explicit_vault)
+            self.assertEqual(found_explicit, explicit_vault)
+
+            # When explicit path is None, CADABBY_VAULT is used
+            found_env = find_vault_root(None)
+            self.assertEqual(found_env, env_vault)
+        finally:
+            if old_env is not None:
+                os.environ["CADABBY_VAULT"] = old_env
+            else:
+                os.environ.pop("CADABBY_VAULT", None)
+
 
 if __name__ == "__main__":
     unittest.main()
+

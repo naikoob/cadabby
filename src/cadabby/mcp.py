@@ -151,7 +151,10 @@ class McpServer:
         self.close()
 
     def __del__(self) -> None:
-        self.close()
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def handle_initialize(self, params: dict[str, Any]) -> dict[str, Any]:
         """Negotiate capabilities and identify client."""
@@ -176,8 +179,9 @@ class McpServer:
     def handle_tools_list(self) -> dict[str, Any]:
         return {"tools": TOOLS}
 
-    def handle_tools_call(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+    def handle_tools_call(self, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
         """Route tool invocation to underlying engine functions."""
+        args = args or {}
         try:
             if name == "vault_search":
                 res = self.cache.search(

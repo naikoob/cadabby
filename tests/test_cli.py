@@ -139,6 +139,29 @@ class TestCli(unittest.TestCase):
         # Verify active log.md has been reset
         self.assertLess(log_path.stat().st_size, 500)
 
+    def test_cli_fails_fast_outside_vault(self):
+        non_vault_dir = self.dir / "empty-dir"
+        non_vault_dir.mkdir(parents=True, exist_ok=True)
+        args_status = DummyArgs(vault=str(non_vault_dir), json=False)
+        with self.assertRaises(FileNotFoundError) as ctx:
+            cmd_status(args_status)
+        self.assertIn("No Cadabby vault found", str(ctx.exception))
+
+    def test_verify_mutually_exclusive_flags(self):
+        vault_root = self.dir / "verify-excl-vault"
+        args_init = DummyArgs(vault=str(vault_root), name="verify-excl", obsidian=False)
+        cmd_init(args_init)
+
+        args_verify = DummyArgs(
+            vault=str(vault_root),
+            cid="wiki/concepts/Test",
+            human=True,
+            agent="test-agent",
+            method=None,
+        )
+        self.assertEqual(cmd_verify(args_verify), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
+

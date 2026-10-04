@@ -477,23 +477,27 @@ class VaultCache:
                     # Update links from body
                     conn.execute("DELETE FROM links WHERE source_cid = ?;", (cid,))
                     extracted = extract_wikilinks(body)
-                    for link in extracted:
-                        conn.execute(
+                    if extracted:
+                        conn.executemany(
                             """
                             INSERT OR REPLACE INTO links(source_cid, target_raw, target_cid, alias, anchor, occurrences)
                             VALUES (?, ?, NULL, ?, ?, ?);
                             """,
-                            (cid, link.target_raw, link.alias, link.anchor, link.occurrences),
+                            [(cid, link.target_raw, link.alias, link.anchor, link.occurrences) for link in extracted],
                         )
 
                     # Update sources from frontmatter
                     conn.execute("DELETE FROM sources WHERE source_cid = ?;", (cid,))
-                    for src in sources:
-                        if isinstance(src, str):
-                            is_resolved = 1 if (self.vault.root / src).exists() else 0
-                            conn.execute(
+                    if sources:
+                        source_tuples = [
+                            (cid, src, 1 if (self.vault.root / src).exists() else 0)
+                            for src in sources
+                            if isinstance(src, str)
+                        ]
+                        if source_tuples:
+                            conn.executemany(
                                 "INSERT OR REPLACE INTO sources(source_cid, raw_path, resolved) VALUES (?, ?, ?);",
-                                (cid, src, is_resolved),
+                                source_tuples,
                             )
 
                 except FrontmatterParseError as e:
@@ -593,8 +597,16 @@ class VaultCache:
         trust_cfg = ranking_cfg.get("trust") if isinstance(ranking_cfg.get("trust"), dict) else DEFAULT_TRUST_MULTIPLIERS
         status_cfg = ranking_cfg.get("status") if isinstance(ranking_cfg.get("status"), dict) else DEFAULT_STATUS_MULTIPLIERS
 
-        trust_cases = " ".join(f"WHEN '{k}' THEN {float(v)}" for k, v in trust_cfg.items())
-        status_cases = " ".join(f"WHEN '{k}' THEN {float(v)}" for k, v in status_cfg.items())
+        def safe_case(k: Any, v: Any) -> str:
+            clean_k = str(k).replace("'", "''")
+            try:
+                val = float(v)
+            except (ValueError, TypeError):
+                val = 1.0
+            return f"WHEN '{clean_k}' THEN {val}"
+
+        trust_cases = " ".join(safe_case(k, v) for k, v in trust_cfg.items())
+        status_cases = " ".join(safe_case(k, v) for k, v in status_cfg.items())
 
         score_expr = f"""
             (-bm25(notes_fts, {FTS_COLUMN_WEIGHTS[0]}, {FTS_COLUMN_WEIGHTS[1]}, {FTS_COLUMN_WEIGHTS[2]}, {FTS_COLUMN_WEIGHTS[3]}))
@@ -745,3 +757,10 @@ class VaultCache:
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+

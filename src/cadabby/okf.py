@@ -30,15 +30,15 @@ def compute_body_hash(body: str) -> str:
     """
     lines = [line.rstrip() for line in body.splitlines()]
 
-    # Strip leading blank lines
-    while lines and not lines[0]:
-        lines.pop(0)
+    start = 0
+    while start < len(lines) and not lines[start]:
+        start += 1
 
-    # Strip trailing blank lines
-    while lines and not lines[-1]:
-        lines.pop()
+    end = len(lines)
+    while end > start and not lines[end - 1]:
+        end -= 1
 
-    normalized = "\n".join(lines)
+    normalized = "\n".join(lines[start:end])
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     return f"{BODY_HASH_PREFIX}{digest}"
 

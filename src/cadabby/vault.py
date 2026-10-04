@@ -39,17 +39,19 @@ def find_vault_root(start_path: Path | str | None = None) -> Path | None:
     """Walk up the directory hierarchy to locate the vault root.
 
     Precedence:
-    1. CADABBY_VAULT environment variable (if valid directory).
-    2. Directory containing .cadabby.json.
-    3. Directory containing .obsidian.
+    1. Explicit start_path (e.g. from --vault CLI flag).
+    2. CADABBY_VAULT environment variable (if valid directory).
+    3. Directory containing .cadabby.json or .obsidian.
     """
-    env_vault = os.environ.get("CADABBY_VAULT")
-    if env_vault:
-        p = Path(env_vault).resolve()
-        if p.is_dir():
-            return p
-
-    current = Path(start_path or Path.cwd()).resolve()
+    if start_path is not None:
+        current = Path(start_path).resolve()
+    else:
+        env_vault = os.environ.get("CADABBY_VAULT")
+        if env_vault:
+            p = Path(env_vault).resolve()
+            if p.is_dir():
+                return p
+        current = Path.cwd().resolve()
 
     # If start path is a file, start from its parent directory
     if current.is_file():
