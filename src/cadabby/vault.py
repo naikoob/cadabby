@@ -41,26 +41,47 @@ def is_vault_root(path: Path | str) -> bool:
     return (p / FILE_CONFIG).exists() or (p / ".obsidian").is_dir()
 
 
-def vault_search_start(start_path: Path | str | None = None) -> Path:
-    """Resolve where vault discovery begins, in order of precedence.
+def env_vault_root() -> Path | None:
+    """Return the vault root designated by CADABBY_VAULT, if the variable is set.
 
-    1. Explicit start_path (e.g. from --vault CLI flag).
-    2. CADABBY_VAULT environment variable.
-    3. The current working directory.
+    Like --vault, the variable names a root exactly: it is never used as a
+    walk-up starting point, so it cannot silently resolve to an ancestor vault.
     """
+    env_vault = os.environ.get("CADABBY_VAULT")
+    if not env_vault:
+        return None
+    root = Path(env_vault).resolve()
+    if not is_vault_root(root):
+        raise FileNotFoundError(
+            f"CADABBY_VAULT is set to {root}, which is not a Cadabby vault "
+            f"(missing {FILE_CONFIG} or marker). Unset it or point it at a vault root."
+        )
+    return root
+
+
+def vault_search_start(start_path: Path | str | None = None) -> Path:
+    """Resolve where cwd-relative vault discovery begins."""
     if start_path is not None:
         return Path(start_path).resolve()
-    env_vault = os.environ.get("CADABBY_VAULT")
-    return Path(env_vault).resolve() if env_vault else Path.cwd().resolve()
+    return Path.cwd().resolve()
 
 
 def find_vault_root(start_path: Path | str | None = None) -> Path | None:
-    """Walk up the directory hierarchy from the search start to locate the vault root.
+    """Locate the vault root, in order of precedence.
 
-    The hierarchy is walked upward looking for a root marker (.cadabby.json or
-    .obsidian). A start point with no marker above it yields None rather than
-    being accepted as a root.
+    1. Explicit start_path (e.g. from --vault CLI flag), walked upward.
+    2. CADABBY_VAULT environment variable, taken as an exact root.
+    3. The current working directory, walked upward.
+
+    Walking upward looks for a root marker (.cadabby.json or .obsidian). A start
+    point with no marker above it yields None rather than being accepted as a root.
+    Raises FileNotFoundError if CADABBY_VAULT is set but does not name a vault.
     """
+    if start_path is None:
+        env_root = env_vault_root()
+        if env_root is not None:
+            return env_root
+
     current = vault_search_start(start_path)
 
     # If start path is a file, start from its parent directory

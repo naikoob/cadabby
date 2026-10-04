@@ -151,9 +151,10 @@ class McpServer:
         self.close()
 
     def __del__(self) -> None:
+        # Finalizers must not raise; stray stderr tracebacks confuse MCP harnesses.
         try:
             self.close()
-        except OSError:
+        except Exception:  # noqa: BLE001
             pass
 
     def handle_initialize(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -384,6 +385,14 @@ class McpServer:
 
 def run_mcp_server(vault: Vault) -> int:
     """Run stdio JSON-RPC MCP server loop."""
+
+    def write_response(resp: dict[str, Any]) -> None:
+        """Emit a JSON-RPC response with a byte-accurate Content-Length header."""
+        out_bytes = json.dumps(resp).encode("utf-8")
+        header = f"Content-Length: {len(out_bytes)}\r\n\r\n".encode("ascii")
+        sys.stdout.buffer.write(header + out_bytes)
+        sys.stdout.buffer.flush()
+
     with McpServer(vault) as server:
         # Read lines from stdin using binary buffer for exact byte counts
         while True:
@@ -415,6 +424,12 @@ def run_mcp_server(vault: Vault) -> int:
                     continue
 
             if not isinstance(req, dict):
+                # Batches and scalar payloads are unsupported; answer so a
+                # client waiting on a reply fails fast instead of blocking.
+                write_response({"jsonrpc": "2.0", "id": None, "error": {
+                    "code": -32600,
+                    "message": "Invalid Request: batch and non-object payloads are not supported",
+                }})
                 continue
 
             req_id = req.get("id")
@@ -465,10 +480,6 @@ def run_mcp_server(vault: Vault) -> int:
                     "message": f"Method not found: {method}",
                 }
 
-            # Send JSON-RPC response with byte-accurate Content-Length header
-            out_bytes = json.dumps(resp).encode("utf-8")
-            header = f"Content-Length: {len(out_bytes)}\r\n\r\n".encode("ascii")
-            sys.stdout.buffer.write(header + out_bytes)
-            sys.stdout.buffer.flush()
+            write_response(resp)
 
     return 0

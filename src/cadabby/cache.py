@@ -590,8 +590,12 @@ class VaultCache:
         self.scan()
         conn = self.get_connection()
 
-        # Build dynamic multipliers CASE statements from config with fallback to defaults
-        ranking_cfg = self.vault.config.get("ranking", {})
+        # Build dynamic multipliers CASE statements from config with fallback to defaults.
+        # Every level is type-checked: a hand-edited .cadabby.json may hold null or
+        # a scalar anywhere in this subtree.
+        ranking_cfg = self.vault.config.get("ranking")
+        if not isinstance(ranking_cfg, dict):
+            ranking_cfg = {}
         trust_cfg = ranking_cfg.get("trust") if isinstance(ranking_cfg.get("trust"), dict) else DEFAULT_TRUST_MULTIPLIERS
         status_cfg = ranking_cfg.get("status") if isinstance(ranking_cfg.get("status"), dict) else DEFAULT_STATUS_MULTIPLIERS
 
@@ -762,8 +766,11 @@ class VaultCache:
         self.close()
 
     def __del__(self) -> None:
+        # Finalizers must not raise: a partially constructed instance can fail
+        # in close() with AttributeError, which the interpreter would otherwise
+        # print as an "Exception ignored" traceback on stderr.
         try:
             self.close()
-        except (sqlite3.Error, OSError):
+        except Exception:  # noqa: BLE001
             pass
 

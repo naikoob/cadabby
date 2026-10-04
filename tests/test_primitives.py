@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from cadabby.cache import VaultCache
 from cadabby.constants import FILE_CONFIG
@@ -317,8 +318,9 @@ class TestGraphAndLinkResolution(unittest.TestCase):
             self.assertEqual(len(results), 1)
             self.assertEqual(results[0].title, "Sanitize Test")
 
-    def test_vault_cache_search_non_finite_and_empty_ranking(self):
-        # Non-finite multipliers and empty ranking tables must not produce invalid SQL
+    def test_vault_cache_search_malformed_ranking_config(self):
+        # Non-finite, empty, null, and non-mapping ranking config must neither
+        # produce invalid SQL nor raise; search falls back to neutral multipliers.
         note = self.vault.wiki_dir / "concepts" / "NonFiniteTest.md"
         note.parent.mkdir(parents=True, exist_ok=True)
         note.write_text(
@@ -328,6 +330,9 @@ class TestGraphAndLinkResolution(unittest.TestCase):
         for ranking in (
             {"trust": {"human-reviewed": 1e999}, "status": {"active": float("nan")}},
             {"trust": {}, "status": {}},
+            {"trust": None, "status": None},
+            None,
+            "not-a-mapping",
         ):
             with self.subTest(ranking=ranking):
                 self.vault.config["ranking"] = ranking
@@ -337,20 +342,22 @@ class TestGraphAndLinkResolution(unittest.TestCase):
                     self.assertEqual(len(results), 1)
                     self.assertEqual(results[0].title, "Non Finite Test")
 
-    def test_find_vault_root_rejects_unmarked_env_vault(self):
-        # CADABBY_VAULT pointing at a plain directory must not be accepted as a root
-        plain_dir = self.vault_dir / "not_a_vault"
-        plain_dir.mkdir(parents=True, exist_ok=True)
+    def test_find_vault_root_rejects_invalid_env_vault(self):
+        # A set-but-invalid CADABBY_VAULT fails loudly rather than silently
+        # falling back to the cwd or resolving to an enclosing ancestor vault.
+        marked_ancestor = self.vault_dir / "marked_ancestor"
+        unmarked_child = marked_ancestor / "child"
+        unmarked_child.mkdir(parents=True, exist_ok=True)
+        (marked_ancestor / FILE_CONFIG).write_text('{"vault_name": "ancestor"}', "utf-8")
 
-        old_env = os.environ.get("CADABBY_VAULT")
-        try:
-            os.environ["CADABBY_VAULT"] = str(plain_dir)
-            self.assertIsNone(find_vault_root(None))
-        finally:
-            if old_env is not None:
-                os.environ["CADABBY_VAULT"] = old_env
-            else:
-                os.environ.pop("CADABBY_VAULT", None)
+        for label, env_value in (
+            ("nonexistent", str(self.vault_dir / "gone")),
+            ("unmarked child of a vault", str(unmarked_child)),
+        ):
+            with self.subTest(case=label), mock.patch.dict(os.environ, {"CADABBY_VAULT": env_value}):
+                with self.assertRaises(FileNotFoundError) as ctx:
+                    find_vault_root(None)
+                self.assertIn("CADABBY_VAULT", str(ctx.exception))
 
     def test_find_vault_root_precedence(self):
         env_vault = self.vault_dir / "env_vault"
@@ -361,10 +368,7 @@ class TestGraphAndLinkResolution(unittest.TestCase):
         explicit_vault.mkdir(parents=True, exist_ok=True)
         (explicit_vault / FILE_CONFIG).write_text('{"vault_name": "explicit"}', "utf-8")
 
-        old_env = os.environ.get("CADABBY_VAULT")
-        try:
-            os.environ["CADABBY_VAULT"] = str(env_vault)
-
+        with mock.patch.dict(os.environ, {"CADABBY_VAULT": str(env_vault)}):
             # When explicit path is passed, it must take precedence over CADABBY_VAULT
             found_explicit = find_vault_root(explicit_vault)
             self.assertEqual(found_explicit, explicit_vault.resolve())
@@ -372,11 +376,6 @@ class TestGraphAndLinkResolution(unittest.TestCase):
             # When explicit path is None, CADABBY_VAULT is used
             found_env = find_vault_root(None)
             self.assertEqual(found_env, env_vault.resolve())
-        finally:
-            if old_env is not None:
-                os.environ["CADABBY_VAULT"] = old_env
-            else:
-                os.environ.pop("CADABBY_VAULT", None)
 
 
 if __name__ == "__main__":

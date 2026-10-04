@@ -193,6 +193,22 @@ class TestMcpServer(unittest.TestCase):
         # The request following the malformed ones is still answered
         self.assertEqual(responses[3].get("result"), {})
 
+    def test_run_mcp_server_rejects_batch_payload(self):
+        # A batch (array) payload is unsupported, but must be answered so a
+        # client awaiting a reply fails fast instead of blocking forever.
+        requests = [
+            json.dumps([{"jsonrpc": "2.0", "id": 1, "method": "ping"}]),
+            json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}),
+        ]
+        responses = self._drive_server(requests)
+
+        self.assertEqual(len(responses), 2)
+        self.assertIsNone(responses[0]["id"])
+        self.assertEqual(responses[0]["error"]["code"], -32600)
+        # The well-formed request after the batch is still served
+        self.assertEqual(responses[1]["id"], 2)
+        self.assertEqual(responses[1]["result"], {})
+
     def test_run_mcp_server_framing_and_resource_error(self):
         # Build stdin bytes with Content-Length headers containing multi-byte characters and invalid resource read
         req1 = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})

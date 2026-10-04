@@ -38,7 +38,7 @@ To scaffold a complete, production-ready knowledge vault:
 
 ```bash
 # Initialize a new vault with Obsidian integration:
-cadabby init my-vault --obsidian
+cadabby init --vault my-vault --name my-vault --obsidian
 cd my-vault
 ```
 
@@ -207,7 +207,7 @@ Conforming to §5.1-§5.2 of the Technical Specification, Cadabby exposes exactl
 
 | Command | Description | Example |
 | :--- | :--- | :--- |
-| `cadabby init` | Scaffold a new vault with all config & skills | `cadabby init my-vault --obsidian` |
+| `cadabby init` | Scaffold a new vault with all config & skills | `cadabby init --vault my-vault --obsidian` |
 | `cadabby sync` | Scan files, update SQLite cache & rebuild `index.md` | `cadabby sync` |
 | `cadabby status` | Report note counts, trust tiers, and verification debt | `cadabby status` |
 | `cadabby search` | Epistemic BM25 search with trust boosts & domain filters | `cadabby search "attention mechanism" --domain wiki` |
@@ -243,7 +243,7 @@ Status multipliers apply on top of trust tiers:
 ## 8. Development & Testing
 
 ```bash
-# Run all unit and integration tests (96 tests):
+# Run all unit and integration tests (105 tests):
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
