@@ -40,17 +40,14 @@ class TestMcpServer(unittest.TestCase):
         expected = [
             "vault_search",
             "vault_ground",
+            "vault_status",
             "vault_scaffold_note",
             "vault_update_note",
             "vault_verify_note",
-            "vault_sync_indexes",
             "vault_lint",
-            "vault_status",
-            "vault_triage",
-            "vault_archive",
         ]
-        for exp in expected:
-            self.assertIn(exp, tool_names)
+        self.assertEqual(len(tools_res["tools"]), 7)
+        self.assertEqual(set(tool_names), set(expected))
 
     def test_tools_call_search_and_ground(self):
         self.server.handle_initialize({"clientInfo": {"name": "test-agent"}})
@@ -68,7 +65,7 @@ class TestMcpServer(unittest.TestCase):
         self.assertEqual(len(data_ground), 1)
         self.assertEqual(data_ground[0]["cid"], "wiki/entities/SQLite")
 
-    def test_tools_call_scaffold_verify_and_lint(self):
+    def test_tools_call_scaffold_update_verify_status_lint(self):
         self.server.handle_initialize({"clientInfo": {"name": "agent-smith"}})
 
         # Scaffold
@@ -82,6 +79,16 @@ class TestMcpServer(unittest.TestCase):
             },
         )
         self.assertFalse(res_scaffold["isError"])
+
+        # Update note
+        res_update = self.server.handle_tools_call(
+            "vault_update_note",
+            {
+                "cid": "wiki/concepts/Quantum-Computing",
+                "append_section": ["Algorithms", "Shor's algorithm and Grover's algorithm."],
+            },
+        )
+        self.assertFalse(res_update["isError"])
 
         # Verify: should stamp agent-smith and bind hash
         res_verify = self.server.handle_tools_call(
@@ -100,26 +107,6 @@ class TestMcpServer(unittest.TestCase):
         # Lint
         res_lint = self.server.handle_tools_call("vault_lint", {})
         self.assertFalse(res_lint["isError"])
-
-    def test_vault_triage_and_archive(self):
-        self.server.handle_initialize({"clientInfo": {"name": "test-agent"}})
-
-        # Triage an unprocessed raw source
-        res_triage = self.server.handle_tools_call(
-            "vault_triage",
-            {"raw_path": "raw/unprocessed-notes.txt"},
-        )
-        self.assertFalse(res_triage["isError"])
-        data_triage = json.loads(res_triage["content"][0]["text"])
-        self.assertEqual(data_triage["raw_path"], "raw/unprocessed-notes.txt")
-        self.assertIn("concept", data_triage["suggested_types"])
-
-        # Archive a note
-        res_archive = self.server.handle_tools_call(
-            "vault_archive",
-            {"cid": "wiki/comparisons/SQLite-vs-DuckDB", "reason": "Superseded by internal benchmarks"},
-        )
-        self.assertFalse(res_archive["isError"])
 
 
 if __name__ == "__main__":

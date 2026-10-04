@@ -244,7 +244,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         self.assertEqual(note_file.read_text("utf-8"), original_content)
 
     def test_ac10_mcp_capabilities_and_human_refusal(self):
-        """10. cadabby mcp answers initialize & tools/list, exposes 10 tools, and refuses by: human:*."""
+        """10. cadabby mcp answers initialize & tools/list, exposes 7 tools, and refuses by: human:*."""
         demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
         vault_dir = self.root / "demo-vault"
         shutil.copytree(demo_src, vault_dir, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
@@ -256,7 +256,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         self.assertEqual(init_res["serverInfo"]["version"], "0.2.0")
 
         tools_res = server.handle_tools_list()
-        self.assertEqual(len(tools_res["tools"]), 10)
+        self.assertEqual(len(tools_res["tools"]), 7)
 
         # Attempt to verify directly as human:* over MCP: server client_id is forced to agent:<clientInfo>
         res = server.handle_tools_call(

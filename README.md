@@ -95,7 +95,7 @@ my-vault/
    - Call `vault_scaffold_note` to draft `wiki/concepts/Flash-Attention.md` citing `raw/attention-paper.pdf`.
    - Add `[[wikilinks]]` to existing notes.
    - Call `vault_verify_note` stamping the note with `agent:claude-code`.
-   - Call `vault_sync_indexes` to update `index.md` and `log.md`.
+   *(Catalog `index.md` and activity `log.md` are kept up to date implicitly; no manual sync needed).*
 
 ### Workflow B: Using Google Antigravity
 
@@ -125,7 +125,23 @@ my-vault/
 
 ---
 
-## 4. CLI Command Reference
+## 4. MCP Tools (7)
+
+Conforming to §5.1 of the Technical Specification, Cadabby exposes exactly **7 atomic tools** to AI agents:
+
+| Tool | Purpose |
+| :--- | :--- |
+| **`vault_search`** | Epistemic BM25 full-text search with trust tier boosts and metadata filters. |
+| **`vault_ground`** | Retrieves full content and 1-hop graph neighborhood (forward links, backlinks, sources). |
+| **`vault_status`** | Epistemic health snapshot: tier counts, verification debt, and unprocessed `raw/` files. |
+| **`vault_scaffold_note`** | Scaffolds a new typed note with valid OKF frontmatter and generated attribution. |
+| **`vault_update_note`** | Non-destructive frontmatter patch, section append, or section replace with optimistic lock. |
+| **`vault_verify_note`** | Cryptographically binds an `agent:<client_id>` attestation to the body SHA-256 (refuses `human:*`). |
+| **`vault_lint`** | Runs the six normative epistemic lint gates and returns typed diagnostics for self-healing. |
+
+---
+
+## 5. CLI Command Reference
 
 | Command | Description | Example |
 | :--- | :--- | :--- |
@@ -144,7 +160,7 @@ my-vault/
 
 ---
 
-## 5. Epistemic Trust Tiers
+## 6. Epistemic Trust Tiers
 
 | Tier | Multiplier | Description |
 | :--- | :---: | :--- |

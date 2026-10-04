@@ -15,7 +15,6 @@ from cadabby import __version__
 from cadabby.cache import VaultCache
 from cadabby.constants import NOTE_TYPES
 from cadabby.frontmatter import parse_frontmatter
-from cadabby.indexer import sync_vault_index
 from cadabby.lint import run_vault_lint
 from cadabby.ops import ground_notes, scaffold_note, update_note, verify_note
 from cadabby.vault import Vault, cid_to_path, find_vault_root, path_to_cid
@@ -56,8 +55,16 @@ TOOLS = [
         },
     },
     {
+        "name": "vault_status",
+        "description": "Epistemic health summary: note counts by tier and type, verification debt (stale count), unprocessed raw files, broken-link and orphan counts.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
         "name": "vault_scaffold_note",
-        "description": "Create a new note with schema-compliant OKF frontmatter placed in wiki/<plural_type>/.",
+        "description": "Create a note in the wiki/ subdirectory matching its type, with valid OKF frontmatter and generated attribution. Refuses to overwrite.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -73,7 +80,7 @@ TOOLS = [
     },
     {
         "name": "vault_update_note",
-        "description": "Non-destructively patch frontmatter or append/replace sections in an existing note.",
+        "description": "Non-destructive frontmatter patches and content section append/replace-by-heading. Never truncates a file it could not fully parse.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -96,7 +103,7 @@ TOOLS = [
     },
     {
         "name": "vault_verify_note",
-        "description": "Stamp a content-bound verification attestation. Binds strictly to note body hash. Refuses human:*.",
+        "description": "Appends a verification entry stamped by: agent:<client_id>, at: now, and of: the current body hash. Writing human:* over MCP is refused unconditionally.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -107,53 +114,11 @@ TOOLS = [
         },
     },
     {
-        "name": "vault_sync_indexes",
-        "description": "Incrementally rescan the vault, reconcile deletions, and synchronize index.md.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "force": {"type": "boolean", "default": False, "description": "Force full rescan"},
-            },
-        },
-    },
-    {
         "name": "vault_lint",
-        "description": "Execute the six normative epistemic lint gates and return typed diagnostics.",
+        "description": "Runs the six normative epistemic lint gates and returns structured diagnostics so an agent can self-heal its own output.",
         "inputSchema": {
             "type": "object",
             "properties": {},
-        },
-    },
-    {
-        "name": "vault_status",
-        "description": "Report high-level vault status, trust tier distribution, verification debt, and unprocessed sources.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {},
-        },
-    },
-    {
-        "name": "vault_triage",
-        "description": "Analyze an unprocessed raw source and suggest candidate note types and connecting CIDs.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "raw_path": {"type": "string", "description": "Relative path to raw source file"},
-            },
-            "required": ["raw_path"],
-        },
-    },
-    {
-        "name": "vault_archive",
-        "description": "Mark a note as completed or abandoned with an archival rationale section.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "cid": {"type": "string", "description": "Note CID to archive"},
-                "reason": {"type": "string", "description": "Rationale for archiving the note"},
-                "status": {"type": "string", "enum": ["completed", "abandoned"], "default": "completed"},
-            },
-            "required": ["cid", "reason"],
         },
     },
 ]
@@ -284,38 +249,6 @@ class McpServer:
                     "isError": False,
                 }
 
-            elif name == "vault_sync_indexes":
-                cache = VaultCache(self.vault)
-                ins, upd, deleted, total = cache.scan(force=args.get("force", False))
-                rewritten = sync_vault_index(self.vault)
-                return {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": f"Synced {total} files ({ins} inserted, {upd} updated, {deleted} deleted). Catalog rewritten: {rewritten}",
-                        }
-                    ],
-                    "isError": False,
-                }
-
-            elif name == "vault_lint":
-                findings = run_vault_lint(self.vault)
-                out = [
-                    {
-                        "code": f.code,
-                        "severity": f.severity,
-                        "rel_path": f.rel_path,
-                        "line": f.line,
-                        "message": f.message,
-                    }
-                    for f in findings
-                ]
-                has_errors = any(f.severity == "error" for f in findings)
-                return {
-                    "content": [{"type": "text", "text": json.dumps(out, indent=2)}],
-                    "isError": has_errors,
-                }
-
             elif name == "vault_status":
                 cache = VaultCache(self.vault)
                 cache.scan()
@@ -346,51 +279,22 @@ class McpServer:
                 }
                 return {"content": [{"type": "text", "text": json.dumps(status_out, indent=2)}], "isError": False}
 
-            elif name == "vault_triage":
-                raw_path = args["raw_path"]
-                abs_raw = self.vault.abs_path(raw_path)
-                if not abs_raw.exists():
-                    return {
-                        "content": [{"type": "text", "text": f"Raw source not found: {raw_path}"}],
-                        "isError": True,
+            elif name == "vault_lint":
+                findings = run_vault_lint(self.vault)
+                out = [
+                    {
+                        "code": f.code,
+                        "severity": f.severity,
+                        "rel_path": f.rel_path,
+                        "line": f.line,
+                        "message": f.message,
                     }
-
-                # Search for related terms using raw filename stem
-                stem = abs_raw.stem
-                cache = VaultCache(self.vault)
-                related = cache.search(query=stem, limit=5)
-                rec_cids = [r.cid for r in related]
-
-                triage_result = {
-                    "raw_path": raw_path,
-                    "stem": stem,
-                    "suggested_types": ["concept", "entity", "synthesis"],
-                    "related_cids": rec_cids,
-                    "recommended_action": (
-                        f"Scaffold a synthesis or concept note in wiki/ synthesizing '{raw_path}' "
-                        f"and link to related notes: {rec_cids}"
-                    ),
-                }
-                return {"content": [{"type": "text", "text": json.dumps(triage_result, indent=2)}], "isError": False}
-
-            elif name == "vault_archive":
-                cid = args["cid"]
-                reason = args["reason"]
-                status_val = args.get("status", "completed")
-                arch_section = (
-                    "Archival Notice",
-                    f"Archived on {status_val}. Rationale: {reason}",
-                )
-                update_note(
-                    vault=self.vault,
-                    cid_or_path=cid,
-                    frontmatter_patch={"status": status_val},
-                    append_section=arch_section,
-                    actor=self.client_id,
-                )
+                    for f in findings
+                ]
+                has_errors = any(f.severity == "error" for f in findings)
                 return {
-                    "content": [{"type": "text", "text": f"Archived {cid} as '{status_val}': {reason}"}],
-                    "isError": False,
+                    "content": [{"type": "text", "text": json.dumps(out, indent=2)}],
+                    "isError": has_errors,
                 }
 
             else:
