@@ -1,0 +1,16 @@
+{
+  "name": "cadabby",
+  "version": "0.3.0",
+  "description": "Epistemically auditable LLM Wiki engine for humans and AI agents",
+  "author": {
+    "name": "Cadabby Project"
+  },
+  "keywords": [
+    "llm-wiki",
+    "mcp",
+    "knowledge-base",
+    "epistemic-trust",
+    "fts5",
+    "obsidian"
+  ]
+}

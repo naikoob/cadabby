@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 import unittest
@@ -50,6 +51,17 @@ class TestCli(unittest.TestCase):
         self.assertTrue((vault_path / "wiki" / "concepts").is_dir())
         self.assertTrue((vault_path / ".agents" / "skills" / "librarian" / "SKILL.md").exists())
         self.assertTrue((vault_path / ".agents" / "skills" / "technician" / "SKILL.md").exists())
+        self.assertTrue((vault_path / ".agents" / "plugins" / "cadabby" / "plugin.json").exists())
+        self.assertTrue((vault_path / ".agents" / "plugins" / "cadabby" / "mcp_config.json").exists())
+        self.assertTrue((vault_path / ".agents" / "plugins" / "cadabby" / "skills" / "cadabby-wiki" / "SKILL.md").exists())
+        self.assertTrue((vault_path / ".agents" / "plugins" / "cadabby" / "agents" / "librarian" / "agent.md").exists())
+        self.assertTrue((vault_path / ".agents" / "plugins" / "cadabby" / "agents" / "technician" / "agent.md").exists())
+
+        # Verify mcp_config.json specifies the vault-scoped cadabby MCP server
+        mcp_cfg = json.loads((vault_path / ".agents" / "plugins" / "cadabby" / "mcp_config.json").read_text("utf-8"))
+        self.assertIn("cadabby", mcp_cfg.get("mcpServers", {}))
+        self.assertEqual(mcp_cfg["mcpServers"]["cadabby"]["args"], ["-m", "cadabby", "mcp"])
+
         self.assertTrue((vault_path / ".claude" / "commands" / "ingest.md").exists())
         self.assertTrue((vault_path / ".obsidian" / "app.json").exists())
 

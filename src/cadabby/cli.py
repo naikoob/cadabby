@@ -121,7 +121,21 @@ def cmd_init(args: argparse.Namespace) -> int:
             dst_cmd = target_dir / ".claude" / "commands" / cmd_file.name
             copy_template_file(cmd_file, dst_cmd)
 
-    # 6. Optional Obsidian config
+    # 6. Copy Antigravity vault-scoped plugin & MCP configuration to .agents/plugins/cadabby/
+    plugin_src = assets / "plugins" / "cadabby"
+    if not plugin_src.exists():
+        plugin_src = Path(__file__).resolve().parent.parent.parent / "plugins" / "cadabby"
+
+    if plugin_src.exists():
+        dst_plugin = target_dir / ".agents" / "plugins" / "cadabby"
+        for p in sorted(plugin_src.rglob("*")):
+            if p.is_file():
+                rel = p.relative_to(plugin_src)
+                target_file = dst_plugin / rel
+                target_file.parent.mkdir(parents=True, exist_ok=True)
+                copy_template_file(p, target_file)
+
+    # 7. Optional Obsidian config
     if args.obsidian:
         obsidian_dir = target_dir / ".obsidian"
         obsidian_dir.mkdir(parents=True, exist_ok=True)
