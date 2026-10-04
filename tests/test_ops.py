@@ -18,7 +18,7 @@ class TestOps(unittest.TestCase):
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.vault_root = Path(self.tmp_dir.name) / "demo-vault"
         demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
-        shutil.copytree(demo_src, self.vault_root)
+        shutil.copytree(demo_src, self.vault_root, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
         self.vault = Vault(self.vault_root)
 
     def tearDown(self):

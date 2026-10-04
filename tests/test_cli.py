@@ -60,7 +60,7 @@ class TestCli(unittest.TestCase):
     def test_cli_lifecycle_on_demo_vault(self):
         demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
         vault_root = self.dir / "demo-vault"
-        shutil.copytree(demo_src, vault_root)
+        shutil.copytree(demo_src, vault_root, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
 
         # 1. Sync
         args_sync = DummyArgs(vault=str(vault_root), force=False)

@@ -99,7 +99,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         """4. Editing a verified note's body downgrades it to stale-verified and counts as verification debt."""
         demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
         vault_dir = self.root / "demo-vault"
-        shutil.copytree(demo_src, vault_dir)
+        shutil.copytree(demo_src, vault_dir, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
         vault = Vault(vault_dir)
 
         cache = VaultCache(vault)
@@ -129,7 +129,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         """5. Modifying frontmatter without touching the body preserves human-reviewed tier unchanged."""
         demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
         vault_dir = self.root / "demo-vault"
-        shutil.copytree(demo_src, vault_dir)
+        shutil.copytree(demo_src, vault_dir, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
         vault = Vault(vault_dir)
 
         # Modify frontmatter only (add a tag and update description)
@@ -150,7 +150,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         """6. A note renamed on disk leaves no stale row in notes, links, sources, or notes_fts."""
         demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
         vault_dir = self.root / "demo-vault"
-        shutil.copytree(demo_src, vault_dir)
+        shutil.copytree(demo_src, vault_dir, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
         vault = Vault(vault_dir)
 
         cache = VaultCache(vault)
@@ -180,7 +180,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         """7. A human-reviewed note outranks an identically-matching unverified note, and deprecated is demoted."""
         demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
         vault_dir = self.root / "demo-vault"
-        shutil.copytree(demo_src, vault_dir)
+        shutil.copytree(demo_src, vault_dir, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
         vault = Vault(vault_dir)
 
         # Add identical keyword 'hyperparameter' to Epistemic-Trust-Tiers (human-reviewed) and Flash-Attention (unverified)
@@ -209,7 +209,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         """8. Two concurrent writers to different notes succeed without lock contention or corruption."""
         demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
         vault_dir = self.root / "demo-vault"
-        shutil.copytree(demo_src, vault_dir)
+        shutil.copytree(demo_src, vault_dir, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
         vault = Vault(vault_dir)
 
         path1 = scaffold_note(vault, "Concurrency Test One", "concept", "First concurrent note")
@@ -226,7 +226,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         """9. cadabby update with a mismatched expected_hash fails with VAULT_CONFLICT and leaves note unchanged."""
         demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
         vault_dir = self.root / "demo-vault"
-        shutil.copytree(demo_src, vault_dir)
+        shutil.copytree(demo_src, vault_dir, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
         vault = Vault(vault_dir)
 
         note_file = vault.wiki_dir / "concepts" / "Flash-Attention.md"
@@ -247,7 +247,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         """10. cadabby mcp answers initialize & tools/list, exposes 10 tools, and refuses by: human:*."""
         demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
         vault_dir = self.root / "demo-vault"
-        shutil.copytree(demo_src, vault_dir)
+        shutil.copytree(demo_src, vault_dir, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
         vault = Vault(vault_dir)
 
         server = McpServer(vault)
@@ -270,7 +270,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         """11. cadabby audit flags a human attestation whose Git commit author does not match identities map."""
         demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
         vault_dir = self.root / "demo-vault"
-        shutil.copytree(demo_src, vault_dir)
+        shutil.copytree(demo_src, vault_dir, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
         vault = Vault(vault_dir)
 
         # Mock git blame to simulate commit author mismatch
@@ -306,7 +306,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         """12. Agent with only .mcp.json can search, ground, scaffold, update, and verify notes."""
         demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
         vault_dir = self.root / "demo-vault"
-        shutil.copytree(demo_src, vault_dir)
+        shutil.copytree(demo_src, vault_dir, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
         vault = Vault(vault_dir)
 
         server = McpServer(vault)

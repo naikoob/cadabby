@@ -469,32 +469,35 @@ def cmd_mcp(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     """Construct CLI argument parser."""
-    parser = argparse.ArgumentParser(
-        prog="cadabby",
-        description="Epistemically auditable LLM Wiki engine for humans and AI agents.",
-    )
-    parser.add_argument(
+    vault_parent = argparse.ArgumentParser(add_help=False)
+    vault_parent.add_argument(
         "--vault",
         type=Path,
         default=None,
         help="Path to vault root (default: discovered from cwd)",
     )
 
+    parser = argparse.ArgumentParser(
+        prog="cadabby",
+        description="Epistemically auditable LLM Wiki engine for humans and AI agents.",
+        parents=[vault_parent],
+    )
+
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # init
-    p_init = subparsers.add_parser("init", help="Scaffold a new vault")
+    p_init = subparsers.add_parser("init", parents=[vault_parent], help="Scaffold a new vault")
     p_init.add_argument("--name", help="Name of the vault")
     p_init.add_argument("--obsidian", action="store_true", help="Scaffold Obsidian configuration")
     p_init.set_defaults(func=cmd_init)
 
     # sync
-    p_sync = subparsers.add_parser("sync", help="Sync ephemeral cache and index catalog")
+    p_sync = subparsers.add_parser("sync", parents=[vault_parent], help="Sync ephemeral cache and index catalog")
     p_sync.add_argument("--force", action="store_true", help="Force full rescan")
     p_sync.set_defaults(func=cmd_sync)
 
     # search
-    p_search = subparsers.add_parser("search", help="Search vault notes")
+    p_search = subparsers.add_parser("search", parents=[vault_parent], help="Search vault notes")
     p_search.add_argument("query", help="Search query")
     p_search.add_argument("--type", help="Filter by note type")
     p_search.add_argument("--status", help="Filter by note status")
@@ -505,14 +508,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.set_defaults(func=cmd_search)
 
     # ground
-    p_ground = subparsers.add_parser("ground", help="Retrieve full content and 1-hop graph")
+    p_ground = subparsers.add_parser("ground", parents=[vault_parent], help="Retrieve full content and 1-hop graph")
     p_ground.add_argument("cids", nargs="+", help="One or more note CIDs")
     p_ground.add_argument("--budget-tokens", type=int, default=None, help="Token budget")
     p_ground.add_argument("--json", action="store_true", help="Output as JSON")
     p_ground.set_defaults(func=cmd_ground)
 
     # scaffold
-    p_scaffold = subparsers.add_parser("scaffold", help="Scaffold a new note")
+    p_scaffold = subparsers.add_parser("scaffold", parents=[vault_parent], help="Scaffold a new note")
     p_scaffold.add_argument("title", help="Note title")
     p_scaffold.add_argument("--type", required=True, choices=NOTE_TYPES, help="Note type")
     p_scaffold.add_argument("--desc", required=True, help="Note description")
@@ -522,7 +525,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_scaffold.set_defaults(func=cmd_scaffold)
 
     # update
-    p_update = subparsers.add_parser("update", help="Update a note")
+    p_update = subparsers.add_parser("update", parents=[vault_parent], help="Update a note")
     p_update.add_argument("cid", help="Note CID or path")
     p_update.add_argument("--patch-frontmatter", help="JSON frontmatter patch")
     p_update.add_argument("--append-section", help="Heading:Body to append")
@@ -532,7 +535,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_update.set_defaults(func=cmd_update)
 
     # verify
-    p_verify = subparsers.add_parser("verify", help="Stamp content-bound verification")
+    p_verify = subparsers.add_parser("verify", parents=[vault_parent], help="Stamp content-bound verification")
     p_verify.add_argument("cid", help="Note CID or path")
     p_verify.add_argument("--method", help="Verification method")
     p_verify.add_argument("--human", action="store_true", help="Stamp as human:<user> (requires TTY)")
@@ -540,29 +543,29 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify.set_defaults(func=cmd_verify)
 
     # status
-    p_status = subparsers.add_parser("status", help="Report vault status and verification debt")
+    p_status = subparsers.add_parser("status", parents=[vault_parent], help="Report vault status and verification debt")
     p_status.add_argument("--json", action="store_true", help="Output as JSON")
     p_status.set_defaults(func=cmd_status)
 
     # lint
-    p_lint = subparsers.add_parser("lint", help="Run six-gate epistemic linting")
+    p_lint = subparsers.add_parser("lint", parents=[vault_parent], help="Run six-gate epistemic linting")
     p_lint.add_argument("--json", action="store_true", help="Output as JSON")
     p_lint.set_defaults(func=cmd_lint)
 
     # audit
-    p_audit = subparsers.add_parser("audit", help="Audit human verification Git provenance")
+    p_audit = subparsers.add_parser("audit", parents=[vault_parent], help="Audit human verification Git provenance")
     p_audit.add_argument("--require-signed", action="store_true", help="Require signed commits")
     p_audit.add_argument("--json", action="store_true", help="Output as JSON")
     p_audit.set_defaults(func=cmd_audit)
 
     # install
-    p_install = subparsers.add_parser("install", help="Install harness integrations")
+    p_install = subparsers.add_parser("install", parents=[vault_parent], help="Install harness integrations")
     p_install.add_argument("--antigravity", action="store_true", help="Install Antigravity plugin")
     p_install.add_argument("--claude", action="store_true", help="Install Claude Code MCP configuration")
     p_install.set_defaults(func=cmd_install)
 
     # mcp
-    p_mcp = subparsers.add_parser("mcp", help="Run Model Context Protocol stdio server")
+    p_mcp = subparsers.add_parser("mcp", parents=[vault_parent], help="Run Model Context Protocol stdio server")
     p_mcp.set_defaults(func=cmd_mcp)
 
     return parser
