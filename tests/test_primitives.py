@@ -20,6 +20,7 @@ from cadabby.fsutil import (
 )
 from cadabby.vault import (
     Vault,
+    VaultConfigError,
     cid_to_path,
     find_vault_root,
     load_vault_config,
@@ -131,6 +132,18 @@ class TestVault(unittest.TestCase):
         self.assertEqual(cfg["ranking"]["trust"]["human-reviewed"], 3.0)
         # Default value preserved
         self.assertEqual(cfg["ranking"]["trust"]["machine-confirmed"], 1.2)
+
+    def test_load_vault_config_malformed_json_raises(self):
+        cfg_file = self.dir / FILE_CONFIG
+        cfg_file.write_text('{"vault_name": "broken", broken json...}', "utf-8")
+        with self.assertRaises(VaultConfigError):
+            load_vault_config(self.dir)
+
+    def test_load_vault_config_nondict_raises(self):
+        cfg_file = self.dir / FILE_CONFIG
+        cfg_file.write_text('["not", "a", "dict"]', "utf-8")
+        with self.assertRaises(VaultConfigError):
+            load_vault_config(self.dir)
 
     def test_path_and_cid_mappings(self):
         # Wiki note

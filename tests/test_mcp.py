@@ -22,6 +22,7 @@ class TestMcpServer(unittest.TestCase):
         self.server = McpServer(self.vault)
 
     def tearDown(self):
+        self.server.close()
         self.tmp_dir.cleanup()
 
     def test_initialize_and_tools_list(self):
@@ -107,6 +108,29 @@ class TestMcpServer(unittest.TestCase):
         # Lint
         res_lint = self.server.handle_tools_call("vault_lint", {})
         self.assertFalse(res_lint["isError"])
+
+    def test_persistent_cache_reuse_and_context_manager(self):
+        # Cache connection is lazily opened or persistent
+        conn_before = self.server.cache.get_connection()
+        self.assertIsNotNone(conn_before)
+
+        # Invocations of search, status, and lint should reuse this exact connection
+        self.server.handle_tools_call("vault_search", {"query": "SQLite"})
+        self.assertIs(self.server.cache.get_connection(), conn_before)
+
+        self.server.handle_tools_call("vault_status", {})
+        self.assertIs(self.server.cache.get_connection(), conn_before)
+
+        self.server.handle_tools_call("vault_lint", {})
+        self.assertIs(self.server.cache.get_connection(), conn_before)
+
+        # Context manager lifecycle
+        with McpServer(self.vault) as scoped_server:
+            scoped_conn = scoped_server.cache.get_connection()
+            self.assertIsNotNone(scoped_conn)
+
+        # Connection should be closed after exit
+        self.assertIsNone(scoped_server.cache._conn)
 
 
 if __name__ == "__main__":

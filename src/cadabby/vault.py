@@ -60,6 +60,10 @@ def find_vault_root(start_path: Path | str | None = None) -> Path | None:
     return None
 
 
+class VaultConfigError(ValueError):
+    """Raised when .cadabby.json is missing required structure or contains malformed JSON."""
+
+
 def default_vault_config(vault_name: str = "vault") -> dict[str, Any]:
     """Return default vault configuration dictionary."""
     return {
@@ -86,21 +90,28 @@ def load_vault_config(vault_root: Path) -> dict[str, Any]:
 
     if cfg_file.exists():
         try:
-            user_data = json.loads(cfg_file.read_text("utf-8"))
-            if isinstance(user_data, dict):
-                # Deep merge top-level keys and nested dictionaries
-                for k, v in user_data.items():
-                    if k in ("ranking", "obsidian") and isinstance(v, dict):
-                        for sub_k, sub_v in v.items():
-                            if isinstance(sub_v, dict) and isinstance(cfg[k].get(sub_k), dict):
-                                cfg[k][sub_k].update(sub_v)
-                            else:
-                                cfg[k][sub_k] = sub_v
+            content = cfg_file.read_text("utf-8")
+            user_data = json.loads(content)
+        except json.JSONDecodeError as e:
+            raise VaultConfigError(f"Malformed configuration file at {cfg_file}: {e}") from e
+        except OSError as e:
+            raise OSError(f"Could not read configuration file at {cfg_file}: {e}") from e
+
+        if not isinstance(user_data, dict):
+            raise VaultConfigError(
+                f"Invalid configuration format in {cfg_file}: root must be a JSON object, got {type(user_data).__name__}"
+            )
+
+        # Deep merge top-level keys and nested dictionaries
+        for k, v in user_data.items():
+            if k in ("ranking", "obsidian") and isinstance(v, dict):
+                for sub_k, sub_v in v.items():
+                    if isinstance(sub_v, dict) and isinstance(cfg[k].get(sub_k), dict):
+                        cfg[k][sub_k].update(sub_v)
                     else:
-                        cfg[k] = v
-        except Exception:
-            # If config file is unparseable, return defaults with warning/error flag
-            pass
+                        cfg[k][sub_k] = sub_v
+            else:
+                cfg[k] = v
 
     return cfg
 

@@ -129,7 +129,22 @@ class McpServer:
 
     def __init__(self, vault: Vault):
         self.vault = vault
+        self.cache = VaultCache(self.vault)
         self.client_id = "agent:unknown"
+
+    def close(self) -> None:
+        """Close persistent cache connection."""
+        if hasattr(self, "cache") and self.cache is not None:
+            self.cache.close()
+
+    def __enter__(self) -> McpServer:
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        self.close()
 
     def handle_initialize(self, params: dict[str, Any]) -> dict[str, Any]:
         """Negotiate capabilities and identify client."""
@@ -157,8 +172,7 @@ class McpServer:
         """Route tool invocation to underlying engine functions."""
         try:
             if name == "vault_search":
-                cache = VaultCache(self.vault)
-                res = cache.search(
+                res = self.cache.search(
                     query=args["query"],
                     type_=args.get("type"),
                     status=args.get("status"),
@@ -250,9 +264,8 @@ class McpServer:
                 }
 
             elif name == "vault_status":
-                cache = VaultCache(self.vault)
-                cache.scan()
-                conn = cache.get_connection()
+                self.cache.scan()
+                conn = self.cache.get_connection()
 
                 cur = conn.execute("SELECT COUNT(*) FROM notes WHERE layer = 'wiki';")
                 total_wiki = cur.fetchone()[0]
@@ -280,7 +293,7 @@ class McpServer:
                 return {"content": [{"type": "text", "text": json.dumps(status_out, indent=2)}], "isError": False}
 
             elif name == "vault_lint":
-                findings = run_vault_lint(self.vault)
+                findings = run_vault_lint(self.vault, cache=self.cache)
                 out = [
                     {
                         "code": f.code,
@@ -312,66 +325,65 @@ class McpServer:
 
 def run_mcp_server(vault: Vault) -> int:
     """Run stdio JSON-RPC MCP server loop."""
-    server = McpServer(vault)
+    with McpServer(vault) as server:
+        # Read lines from stdin
+        while True:
+            line = sys.stdin.readline()
+            if not line:
+                break
 
-    # Read lines from stdin
-    while True:
-        line = sys.stdin.readline()
-        if not line:
-            break
-
-        line = line.strip()
-        if not line:
-            continue
-
-        # Check for Content-Length header framing
-        if line.lower().startswith("content-length:"):
-            try:
-                length = int(line.split(":", 1)[1].strip())
-                # Read through any remaining header lines until empty line
-                while True:
-                    hdr = sys.stdin.readline()
-                    if hdr in ("\r\n", "\n", ""):
-                        break
-                payload_str = sys.stdin.read(length)
-                req = json.loads(payload_str)
-            except Exception:
-                continue
-        else:
-            try:
-                req = json.loads(line)
-            except json.JSONDecodeError:
+            line = line.strip()
+            if not line:
                 continue
 
-        req_id = req.get("id")
-        method = req.get("method")
-        params = req.get("params", {})
+            # Check for Content-Length header framing
+            if line.lower().startswith("content-length:"):
+                try:
+                    length = int(line.split(":", 1)[1].strip())
+                    # Read through any remaining header lines until empty line
+                    while True:
+                        hdr = sys.stdin.readline()
+                        if hdr in ("\r\n", "\n", ""):
+                            break
+                    payload_str = sys.stdin.read(length)
+                    req = json.loads(payload_str)
+                except Exception:
+                    continue
+            else:
+                try:
+                    req = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
 
-        # Handle notifications (no response needed)
-        if req_id is None:
-            continue
+            req_id = req.get("id")
+            method = req.get("method")
+            params = req.get("params", {})
 
-        resp: dict[str, Any] = {"jsonrpc": "2.0", "id": req_id}
+            # Handle notifications (no response needed)
+            if req_id is None:
+                continue
 
-        if method == "initialize":
-            resp["result"] = server.handle_initialize(params)
-        elif method == "tools/list":
-            resp["result"] = server.handle_tools_list()
-        elif method == "tools/call":
-            tool_name = params.get("name", "")
-            tool_args = params.get("arguments", {})
-            resp["result"] = server.handle_tools_call(tool_name, tool_args)
-        elif method == "ping":
-            resp["result"] = {}
-        else:
-            resp["error"] = {
-                "code": -32601,
-                "message": f"Method not found: {method}",
-            }
+            resp: dict[str, Any] = {"jsonrpc": "2.0", "id": req_id}
 
-        # Send JSON-RPC response
-        out_line = json.dumps(resp)
-        sys.stdout.write(f"Content-Length: {len(out_line)}\r\n\r\n{out_line}")
-        sys.stdout.flush()
+            if method == "initialize":
+                resp["result"] = server.handle_initialize(params)
+            elif method == "tools/list":
+                resp["result"] = server.handle_tools_list()
+            elif method == "tools/call":
+                tool_name = params.get("name", "")
+                tool_args = params.get("arguments", {})
+                resp["result"] = server.handle_tools_call(tool_name, tool_args)
+            elif method == "ping":
+                resp["result"] = {}
+            else:
+                resp["error"] = {
+                    "code": -32601,
+                    "message": f"Method not found: {method}",
+                }
+
+            # Send JSON-RPC response
+            out_line = json.dumps(resp)
+            sys.stdout.write(f"Content-Length: {len(out_line)}\r\n\r\n{out_line}")
+            sys.stdout.flush()
 
     return 0

@@ -34,7 +34,7 @@ class LintFinding:
     message: str
 
 
-def run_vault_lint(vault: Vault) -> list[LintFinding]:
+def run_vault_lint(vault: Vault, cache: VaultCache | None = None) -> list[LintFinding]:
     """Execute the six normative lint gates against the vault.
 
     1. Schema Integrity
@@ -45,9 +45,9 @@ def run_vault_lint(vault: Vault) -> list[LintFinding]:
     6. Verification Integrity
     """
     # Ensure cache is fresh
-    cache = VaultCache(vault)
-    cache.scan()
-    conn = cache.get_connection()
+    active_cache = cache if cache is not None else VaultCache(vault)
+    active_cache.scan()
+    conn = active_cache.get_connection()
 
     findings: list[LintFinding] = []
 
