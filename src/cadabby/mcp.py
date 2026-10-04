@@ -1,0 +1,473 @@
+"""Model Context Protocol (MCP 2024-11-05) JSON-RPC 2.0 stdio server.
+
+Conforms strictly to Cadabby Technical Specification §5, §6.2.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+from typing import Any
+
+from cadabby import __version__
+from cadabby.cache import VaultCache
+from cadabby.constants import NOTE_TYPES
+from cadabby.frontmatter import parse_frontmatter
+from cadabby.indexer import sync_vault_index
+from cadabby.lint import run_vault_lint
+from cadabby.ops import ground_notes, scaffold_note, update_note, verify_note
+from cadabby.vault import Vault, cid_to_path, find_vault_root, path_to_cid
+
+TOOLS = [
+    {
+        "name": "vault_search",
+        "description": "Full-text BM25 search across wiki notes boosted by epistemic trust tiers and note status.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query terms"},
+                "type": {"type": "string", "enum": list(NOTE_TYPES), "description": "Filter by note type"},
+                "status": {"type": "string", "description": "Filter by note status"},
+                "trust": {"type": "string", "description": "Filter by trust tier (human-reviewed, machine-confirmed, etc.)"},
+                "limit": {"type": "integer", "default": 20, "description": "Max results to return"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "vault_ground",
+        "description": "Retrieve full note markdown content and 1-hop link/backlink/source graph for specified CIDs.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "cids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of note CIDs to retrieve",
+                },
+                "budget_tokens": {
+                    "type": "integer",
+                    "description": "Optional token budget. Truncates cleanly at section boundaries if exceeded.",
+                },
+            },
+            "required": ["cids"],
+        },
+    },
+    {
+        "name": "vault_scaffold_note",
+        "description": "Create a new note with schema-compliant OKF frontmatter placed in wiki/<plural_type>/.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Title of the note"},
+                "type": {"type": "string", "enum": list(NOTE_TYPES), "description": "Note type"},
+                "description": {"type": "string", "description": "One-line descriptive summary"},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "List of tags"},
+                "sources": {"type": "array", "items": {"type": "string"}, "description": "Paths to raw sources"},
+                "body": {"type": "string", "description": "Initial markdown body text"},
+            },
+            "required": ["title", "type", "description"],
+        },
+    },
+    {
+        "name": "vault_update_note",
+        "description": "Non-destructively patch frontmatter or append/replace sections in an existing note.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "cid": {"type": "string", "description": "Note CID or relative path"},
+                "patch_frontmatter": {"type": "object", "description": "Dictionary of frontmatter fields to patch"},
+                "append_section": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "[heading, section_body] to append to note",
+                },
+                "replace_section": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "[heading, new_section_body] to replace in note",
+                },
+                "expected_hash": {"type": "string", "description": "Expected file hash for concurrency safety"},
+            },
+            "required": ["cid"],
+        },
+    },
+    {
+        "name": "vault_verify_note",
+        "description": "Stamp a content-bound verification attestation. Binds strictly to note body hash. Refuses human:*.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "cid": {"type": "string", "description": "Note CID or relative path"},
+                "method": {"type": "string", "default": "automated-check", "description": "Verification method"},
+            },
+            "required": ["cid"],
+        },
+    },
+    {
+        "name": "vault_sync_indexes",
+        "description": "Incrementally rescan the vault, reconcile deletions, and synchronize index.md.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "force": {"type": "boolean", "default": False, "description": "Force full rescan"},
+            },
+        },
+    },
+    {
+        "name": "vault_lint",
+        "description": "Execute the six normative epistemic lint gates and return typed diagnostics.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "vault_status",
+        "description": "Report high-level vault status, trust tier distribution, verification debt, and unprocessed sources.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "vault_triage",
+        "description": "Analyze an unprocessed raw source and suggest candidate note types and connecting CIDs.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "raw_path": {"type": "string", "description": "Relative path to raw source file"},
+            },
+            "required": ["raw_path"],
+        },
+    },
+    {
+        "name": "vault_archive",
+        "description": "Mark a note as completed or abandoned with an archival rationale section.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "cid": {"type": "string", "description": "Note CID to archive"},
+                "reason": {"type": "string", "description": "Rationale for archiving the note"},
+                "status": {"type": "string", "enum": ["completed", "abandoned"], "default": "completed"},
+            },
+            "required": ["cid", "reason"],
+        },
+    },
+]
+
+
+class McpServer:
+    """JSON-RPC 2.0 stdio MCP Server implementation."""
+
+    def __init__(self, vault: Vault):
+        self.vault = vault
+        self.client_id = "agent:unknown"
+
+    def handle_initialize(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Negotiate capabilities and identify client."""
+        client_info = params.get("clientInfo", {})
+        client_name = client_info.get("name", "unknown")
+        # Sanitize client name for actor string
+        safe_name = re.sub(r"[^\w.-]", "-", client_name).strip("-") or "client"
+        self.client_id = f"agent:{safe_name}"
+
+        return {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {
+                "tools": {},
+            },
+            "serverInfo": {
+                "name": "cadabby",
+                "version": __version__,
+            },
+        }
+
+    def handle_tools_list(self) -> dict[str, Any]:
+        return {"tools": TOOLS}
+
+    def handle_tools_call(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        """Route tool invocation to underlying engine functions."""
+        try:
+            if name == "vault_search":
+                cache = VaultCache(self.vault)
+                res = cache.search(
+                    query=args["query"],
+                    type_=args.get("type"),
+                    status=args.get("status"),
+                    trust=args.get("trust"),
+                    limit=args.get("limit", 20),
+                )
+                data = [
+                    {
+                        "cid": r.cid,
+                        "title": r.title,
+                        "description": r.description,
+                        "type": r.type,
+                        "status": r.status,
+                        "trust_tier": r.trust_tier,
+                        "score": round(r.score, 4),
+                        "snippet": r.snippet,
+                    }
+                    for r in res
+                ]
+                return {"content": [{"type": "text", "text": json.dumps(data, indent=2)}], "isError": False}
+
+            elif name == "vault_ground":
+                grounded = ground_notes(self.vault, args["cids"], budget_tokens=args.get("budget_tokens"))
+                return {"content": [{"type": "text", "text": json.dumps(grounded, indent=2)}], "isError": False}
+
+            elif name == "vault_scaffold_note":
+                path = scaffold_note(
+                    vault=self.vault,
+                    title=args["title"],
+                    type_=args["type"],
+                    description=args["description"],
+                    tags=args.get("tags"),
+                    sources=args.get("sources"),
+                    body=args.get("body", ""),
+                    actor=self.client_id,
+                )
+                rel = self.vault.rel_path(path)
+                return {
+                    "content": [{"type": "text", "text": f"Scaffolded note: {rel} (CID: {path_to_cid(rel)})"}],
+                    "isError": False,
+                }
+
+            elif name == "vault_update_note":
+                app_sec = None
+                if args.get("append_section"):
+                    s = args["append_section"]
+                    app_sec = (s[0], s[1]) if len(s) > 1 else (s[0], "")
+
+                rep_sec = None
+                if args.get("replace_section"):
+                    s = args["replace_section"]
+                    rep_sec = (s[0], s[1]) if len(s) > 1 else (s[0], "")
+
+                path = update_note(
+                    vault=self.vault,
+                    cid_or_path=args["cid"],
+                    frontmatter_patch=args.get("patch_frontmatter"),
+                    append_section=app_sec,
+                    replace_section=rep_sec,
+                    expected_hash=args.get("expected_hash"),
+                    actor=self.client_id,
+                )
+                rel = self.vault.rel_path(path)
+                return {
+                    "content": [{"type": "text", "text": f"Updated note: {rel}"}],
+                    "isError": False,
+                }
+
+            elif name == "vault_verify_note":
+                res = verify_note(
+                    vault=self.vault,
+                    cid_or_path=args["cid"],
+                    actor=self.client_id,
+                    method=args.get("method", "automated-check"),
+                    is_human_authorized=False,
+                )
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                f"Attested {res['cid']} by {res['actor']} "
+                                f"with content-binding {res['of'][:16]}... "
+                                f"-> derived trust tier: '{res['trust_tier']}'"
+                            ),
+                        }
+                    ],
+                    "isError": False,
+                }
+
+            elif name == "vault_sync_indexes":
+                cache = VaultCache(self.vault)
+                ins, upd, deleted, total = cache.scan(force=args.get("force", False))
+                rewritten = sync_vault_index(self.vault)
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"Synced {total} files ({ins} inserted, {upd} updated, {deleted} deleted). Catalog rewritten: {rewritten}",
+                        }
+                    ],
+                    "isError": False,
+                }
+
+            elif name == "vault_lint":
+                findings = run_vault_lint(self.vault)
+                out = [
+                    {
+                        "code": f.code,
+                        "severity": f.severity,
+                        "rel_path": f.rel_path,
+                        "line": f.line,
+                        "message": f.message,
+                    }
+                    for f in findings
+                ]
+                has_errors = any(f.severity == "error" for f in findings)
+                return {
+                    "content": [{"type": "text", "text": json.dumps(out, indent=2)}],
+                    "isError": has_errors,
+                }
+
+            elif name == "vault_status":
+                cache = VaultCache(self.vault)
+                cache.scan()
+                conn = cache.get_connection()
+
+                cur = conn.execute("SELECT COUNT(*) FROM notes WHERE layer = 'wiki';")
+                total_wiki = cur.fetchone()[0]
+
+                cur = conn.execute(
+                    """
+                    SELECT COUNT(*) FROM notes r
+                    WHERE r.layer = 'raw'
+                      AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.raw_path = r.rel_path);
+                    """
+                )
+                unprocessed = cur.fetchone()[0]
+
+                cur = conn.execute(
+                    "SELECT trust_tier, COUNT(*) as cnt FROM notes WHERE layer = 'wiki' GROUP BY trust_tier;"
+                )
+                tiers = {r["trust_tier"] or "unverified": r["cnt"] for r in cur.fetchall()}
+
+                status_out = {
+                    "total_notes": total_wiki,
+                    "unprocessed_raw_sources": unprocessed,
+                    "verification_debt": tiers.get("stale-verified", 0),
+                    "trust_tiers": tiers,
+                }
+                return {"content": [{"type": "text", "text": json.dumps(status_out, indent=2)}], "isError": False}
+
+            elif name == "vault_triage":
+                raw_path = args["raw_path"]
+                abs_raw = self.vault.abs_path(raw_path)
+                if not abs_raw.exists():
+                    return {
+                        "content": [{"type": "text", "text": f"Raw source not found: {raw_path}"}],
+                        "isError": True,
+                    }
+
+                # Search for related terms using raw filename stem
+                stem = abs_raw.stem
+                cache = VaultCache(self.vault)
+                related = cache.search(query=stem, limit=5)
+                rec_cids = [r.cid for r in related]
+
+                triage_result = {
+                    "raw_path": raw_path,
+                    "stem": stem,
+                    "suggested_types": ["concept", "entity", "synthesis"],
+                    "related_cids": rec_cids,
+                    "recommended_action": (
+                        f"Scaffold a synthesis or concept note in wiki/ synthesizing '{raw_path}' "
+                        f"and link to related notes: {rec_cids}"
+                    ),
+                }
+                return {"content": [{"type": "text", "text": json.dumps(triage_result, indent=2)}], "isError": False}
+
+            elif name == "vault_archive":
+                cid = args["cid"]
+                reason = args["reason"]
+                status_val = args.get("status", "completed")
+                arch_section = (
+                    "Archival Notice",
+                    f"Archived on {status_val}. Rationale: {reason}",
+                )
+                update_note(
+                    vault=self.vault,
+                    cid_or_path=cid,
+                    frontmatter_patch={"status": status_val},
+                    append_section=arch_section,
+                    actor=self.client_id,
+                )
+                return {
+                    "content": [{"type": "text", "text": f"Archived {cid} as '{status_val}': {reason}"}],
+                    "isError": False,
+                }
+
+            else:
+                return {
+                    "content": [{"type": "text", "text": f"Unknown tool: {name}"}],
+                    "isError": True,
+                }
+
+        except Exception as e:
+            return {
+                "content": [{"type": "text", "text": f"Error executing {name}: {str(e)}"}],
+                "isError": True,
+            }
+
+
+def run_mcp_server(vault: Vault) -> int:
+    """Run stdio JSON-RPC MCP server loop."""
+    server = McpServer(vault)
+
+    # Read lines from stdin
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            break
+
+        line = line.strip()
+        if not line:
+            continue
+
+        # Check for Content-Length header framing
+        if line.lower().startswith("content-length:"):
+            try:
+                length = int(line.split(":", 1)[1].strip())
+                # Read through any remaining header lines until empty line
+                while True:
+                    hdr = sys.stdin.readline()
+                    if hdr in ("\r\n", "\n", ""):
+                        break
+                payload_str = sys.stdin.read(length)
+                req = json.loads(payload_str)
+            except Exception:
+                continue
+        else:
+            try:
+                req = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+        req_id = req.get("id")
+        method = req.get("method")
+        params = req.get("params", {})
+
+        # Handle notifications (no response needed)
+        if req_id is None:
+            continue
+
+        resp: dict[str, Any] = {"jsonrpc": "2.0", "id": req_id}
+
+        if method == "initialize":
+            resp["result"] = server.handle_initialize(params)
+        elif method == "tools/list":
+            resp["result"] = server.handle_tools_list()
+        elif method == "tools/call":
+            tool_name = params.get("name", "")
+            tool_args = params.get("arguments", {})
+            resp["result"] = server.handle_tools_call(tool_name, tool_args)
+        elif method == "ping":
+            resp["result"] = {}
+        else:
+            resp["error"] = {
+                "code": -32601,
+                "message": f"Method not found: {method}",
+            }
+
+        # Send JSON-RPC response
+        out_line = json.dumps(resp)
+        sys.stdout.write(f"Content-Length: {len(out_line)}\r\n\r\n{out_line}")
+        sys.stdout.flush()
+
+    return 0

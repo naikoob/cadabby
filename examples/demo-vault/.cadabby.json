@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "vault_name": "demo-vault",
+  "raw_text_extensions": [".md", ".markdown", ".txt", ".rst", ".csv"],
+  "integrity": "mtime_size",
+  "ranking": {
+    "trust": {
+      "human-reviewed": 2.0,
+      "machine-confirmed": 1.2,
+      "stale-verified": 1.0,
+      "unverified": 1.0
+    },
+    "status": {
+      "evergreen": 1.0,
+      "active": 1.0,
+      "draft": 0.9,
+      "completed": 0.85,
+      "deprecated": 0.4,
+      "abandoned": 0.4
+    }
+  },
+  "identities": {
+    "human:owner": ["owner@example.com"]
+  },
+  "obsidian": {
+    "materialize_trust_tags": false
+  },
+  "log_rotate_bytes": 262144
+}

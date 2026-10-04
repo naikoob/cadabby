@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -VV)",
+      "Bash(python3 -)",
+      "Bash(grep -nE 'vault_sync_index|vault_log|vault_graph|10 atomic|raw_metadata_json|diagnostics_json|CREATE TABLE IF NOT EXISTS concepts|fts_concepts|3\\\\.10|machine-confirmed`? > `?unverified' SPECIFICATION.md)",
+      "Bash(python3 -c ' *)"
+    ]
+  }
+}
