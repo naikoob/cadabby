@@ -153,7 +153,7 @@ class McpServer:
     def __del__(self) -> None:
         try:
             self.close()
-        except Exception:
+        except OSError:
             pass
 
     def handle_initialize(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -414,9 +414,15 @@ def run_mcp_server(vault: Vault) -> int:
                 except json.JSONDecodeError:
                     continue
 
+            if not isinstance(req, dict):
+                continue
+
             req_id = req.get("id")
             method = req.get("method")
-            params = req.get("params", {})
+            # params may be absent, explicitly null, or (per JSON-RPC) positional
+            params = req.get("params")
+            if not isinstance(params, dict):
+                params = {}
 
             # Handle notifications (no response needed)
             if req_id is None:
@@ -435,9 +441,12 @@ def run_mcp_server(vault: Vault) -> int:
                 except Exception as e:  # noqa: BLE001
                     resp["error"] = {"code": -32603, "message": f"Internal error during tools/list: {e!s}"}
             elif method == "tools/call":
-                tool_name = params.get("name", "")
-                tool_args = params.get("arguments", {})
-                resp["result"] = server.handle_tools_call(tool_name, tool_args)
+                try:
+                    resp["result"] = server.handle_tools_call(
+                        params.get("name", ""), params.get("arguments")
+                    )
+                except Exception as e:  # noqa: BLE001
+                    resp["error"] = {"code": -32603, "message": f"Internal error during tools/call: {e!s}"}
             elif method == "resources/list":
                 try:
                     resp["result"] = server.handle_resources_list()

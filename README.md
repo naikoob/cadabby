@@ -9,6 +9,7 @@ Cadabby is a zero-dependency, local-first engine and Model Context Protocol (MCP
 ## Key Highlights
 
 - **Zero Runtime Dependencies**: Built with 100% pure Python standard library (`CPython >= 3.11`). No pip dependencies.
+- **Multi-Domain Cognitive Architecture**: Partition knowledge into independent cognitive domains (e.g., `customers/`, `projects/`, `wiki/`) governed by localized `AGENTS.md` manifests and schemas.
 - **Disposable SQLite FTS5 Cache**: Ephemeral, high-performance full-text search and 1-hop graph traversals. Delete `.cadabby/cache.db` at any time with zero data loss.
 - **Epistemic Trust Tiers**: Every note carries cryptographically bound attestation (`human-reviewed`, `machine-confirmed`, `stale-verified`, or `unverified`).
 - **Drift-Induced Downgrade**: If an agent or user alters note prose without re-verification, its trust tier automatically downgrades to `stale-verified` (verification debt).
@@ -56,12 +57,16 @@ my-vault/
 │
 ├── raw/                  # Ground truth sources (PDFs, raw text, research papers)
 │
-├── wiki/                 # Curated knowledge graph (5 typed directories)
+├── wiki/                 # Canonical knowledge domain (5 typed subdirectories)
 │   ├── entities/         # Concrete objects, tools, datasets, libraries
 │   ├── concepts/         # Abstract ideas, algorithms, techniques
 │   ├── syntheses/        # Cross-domain integrations and summaries
 │   ├── comparisons/      # Trade-off evaluations (e.g. SQLite-vs-DuckDB)
 │   └── guides/           # Actionable procedures and runbooks
+│
+├── customers/            # (Optional) Custom cognitive domain
+│   ├── AGENTS.md         # Domain constitution & schema rules
+│   └── acme-corp/        # Flexible, unconstrained subdirectory layout
 │
 ├── .agents/skills/       # Reusable skills: librarian and technician
 ├── .claude/commands/     # Claude Code slash commands (/ingest, /vault-status, /vault-lint)
@@ -125,42 +130,99 @@ my-vault/
 
 ---
 
-## 4. MCP Tools (7)
+## 4. Cognitive Domains & Domain Manifests
 
-Conforming to §5.1 of the Technical Specification, Cadabby exposes exactly **7 atomic tools** to AI agents:
+Cadabby supports modular, multi-domain knowledge architectures. While `wiki/` serves as the canonical knowledge base with strictly enforced 5-type directory structures, you can partition knowledge into independent **Cognitive Domains** simply by creating top-level directories (e.g. `customers/`, `projects/`, `research/`, `team/`).
+
+### Creating a Cognitive Domain with `AGENTS.md`
+
+Drop an `AGENTS.md` file into the root of any top-level domain folder to configure validation schemas and define agent directives:
+
+```markdown
+---
+description: Customer accounts, CRM dossiers, and stakeholders
+searchable: true
+schema:
+  allowed_types:
+    - account
+    - stakeholder
+    - interaction
+  require_sources: false
+  enforce_layout: false
+---
+
+# Customers Domain Directives
+
+1. Every customer note must include account tier and primary contact.
+2. Link stakeholder profiles using `[[Stakeholder-Name]]`.
+3. Do not store sensitive secrets or credentials in dossiers.
+```
+
+### Manifest Configuration Options
+
+| Field | Type | Default | Purpose |
+| :--- | :---: | :---: | :--- |
+| `description` | string | `"<Domain> domain"` | Human-readable domain description. |
+| `searchable` | bool | `true` | Whether notes in this domain are indexed and returned in `vault_search`. |
+| `schema.allowed_types` | list[str] | `null` (unrestricted) | Allowed `type:` values in frontmatter. Violations trigger `ENUM_INVALID` in `cadabby lint`. |
+| `schema.require_sources`| bool | `false` | When `true`, notes in this domain must specify non-empty `sources: [...]`. |
+| `schema.enforce_layout` | bool | `false` | When `true`, notes must live in a subfolder matching their `type` (like in `wiki/`). When `false`, arbitrary directory nesting is permitted. |
+
+### Permissive vs. Strict Domains
+- **Permissive Domains** (no `AGENTS.md` or `allowed_types: null`): Any non-empty note type and any folder hierarchy are allowed without triggering lint errors.
+- **Strict Domains** (`allowed_types` specified): Linter enforces valid types, while allowing cross-domain wikilinks (`[[Note-Stem]]`) to resolve smoothly across all domains.
+
+### How AI Agents Consume Domain Directives
+- **MCP Resources**: Cadabby exposes `vault://domains` (inventory of all discovered domains) and `domain://{name}/directives` (the markdown body of `{domain}/AGENTS.md`).
+- **Grounding Enrichment**: When an agent calls `vault_ground` on a note, Cadabby automatically embeds the note's domain definition and localized directives into the response payload.
+
+---
+
+## 5. MCP Architecture (7 Tools & 2 Resources)
+
+Conforming to §5.1-§5.2 of the Technical Specification, Cadabby exposes exactly **7 atomic tools** and **2 dynamic resources** to AI agents:
+
+### Atomic Tools
 
 | Tool | Purpose |
 | :--- | :--- |
-| **`vault_search`** | Epistemic BM25 full-text search with trust tier boosts and metadata filters. |
-| **`vault_ground`** | Retrieves full content and 1-hop graph neighborhood (forward links, backlinks, sources). |
-| **`vault_status`** | Epistemic health snapshot: tier counts, verification debt, and unprocessed `raw/` files. |
-| **`vault_scaffold_note`** | Scaffolds a new typed note with valid OKF frontmatter and generated attribution. |
+| **`vault_search`** | Epistemic BM25 full-text search with trust tier boosts, domain filters, and status multipliers. |
+| **`vault_ground`** | Retrieves full content, localized domain directives, and 1-hop graph neighborhood (links, backlinks, sources). |
+| **`vault_status`** | Epistemic health snapshot: tier counts, domain breakdown, verification debt, and unprocessed `raw/` files. |
+| **`vault_scaffold_note`** | Scaffolds a new typed note in any domain with valid OKF frontmatter and generated attribution. |
 | **`vault_update_note`** | Non-destructive frontmatter patch, section append, or section replace with optimistic lock. |
 | **`vault_verify_note`** | Cryptographically binds an `agent:<client_id>` attestation to the body SHA-256 (refuses `human:*`). |
 | **`vault_lint`** | Runs the six normative epistemic lint gates and returns typed diagnostics for self-healing. |
 
+### Dynamic Resources
+
+| Resource URI | MIME Type | Description |
+| :--- | :--- | :--- |
+| **`vault://domains`** | `application/json` | Real-time inventory of all discovered cognitive domains, descriptions, and schema flags. |
+| **`domain://{domain}/directives`** | `text/markdown` | Localized operational instructions and guidelines from `{domain}/AGENTS.md`. |
+
 ---
 
-## 5. CLI Command Reference
+## 6. CLI Command Reference
 
 | Command | Description | Example |
 | :--- | :--- | :--- |
 | `cadabby init` | Scaffold a new vault with all config & skills | `cadabby init my-vault --obsidian` |
 | `cadabby sync` | Scan files, update SQLite cache & rebuild `index.md` | `cadabby sync` |
 | `cadabby status` | Report note counts, trust tiers, and verification debt | `cadabby status` |
-| `cadabby search` | Epistemic BM25 search with trust boosts | `cadabby search "attention mechanism"` |
+| `cadabby search` | Epistemic BM25 search with trust boosts & domain filters | `cadabby search "attention mechanism" --domain wiki` |
 | `cadabby ground` | Retrieve note content and 1-hop neighborhood | `cadabby ground wiki/concepts/Attention` |
-| `cadabby scaffold` | Scaffold a new typed note | `cadabby scaffold "Transformer" --type concept --desc "Attention model"` |
+| `cadabby scaffold` | Scaffold a new typed note in any domain | `cadabby scaffold "Transformer" --type concept --domain wiki --desc "Attention model"` |
 | `cadabby update` | Patch frontmatter or append/replace sections | `cadabby update wiki/concepts/Transformer --replace-section "Overview:New text"` |
 | `cadabby verify` | Stamp cryptographic attestation on note | `cadabby verify wiki/concepts/Transformer --human` |
-| `cadabby lint` | Run the six normative epistemic linting gates | `cadabby lint` |
+| `cadabby lint` | Run the six normative epistemic linting gates across all domains | `cadabby lint` |
 | `cadabby audit` | Check Git blame provenance of human attestations | `cadabby audit --require-signed` |
 | `cadabby mcp` | Launch the JSON-RPC 2.0 stdio MCP server | `cadabby mcp` |
 | `cadabby install` | Register MCP configs in Antigravity or Claude Code | `cadabby install --antigravity` |
 
 ---
 
-## 6. Epistemic Trust Tiers
+## 7. Epistemic Trust Tiers
 
 | Tier | Multiplier | Description |
 | :--- | :---: | :--- |
@@ -178,10 +240,10 @@ Status multipliers apply on top of trust tiers:
 
 ---
 
-## 6. Development & Testing
+## 8. Development & Testing
 
 ```bash
-# Run all unit and acceptance tests (46 tests):
+# Run all unit and integration tests (96 tests):
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 

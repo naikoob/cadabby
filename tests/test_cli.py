@@ -159,6 +159,20 @@ class TestCli(unittest.TestCase):
             cmd_status(args_status)
         self.assertIn("No Cadabby vault found", str(ctx.exception))
 
+    def test_explicit_vault_does_not_resolve_to_ancestor(self):
+        # An explicit --vault names the root exactly; a typo'd child must not
+        # silently fall back to the enclosing vault.
+        vault_root = self.dir / "ancestor-vault"
+        args_init = DummyArgs(vault=str(vault_root), name="ancestor-vault", obsidian=False)
+        cmd_init(args_init)
+
+        typo_child = vault_root / "typo-child"
+        args_status = DummyArgs(vault=str(typo_child), json=False)
+        with self.assertRaises(FileNotFoundError) as ctx:
+            cmd_status(args_status)
+        self.assertIn("No Cadabby vault found", str(ctx.exception))
+        self.assertFalse((typo_child / ".cadabby").exists())
+
     def test_verify_mutually_exclusive_flags(self):
         vault_root = self.dir / "verify-excl-vault"
         args_init = DummyArgs(vault=str(vault_root), name="verify-excl", obsidian=False)

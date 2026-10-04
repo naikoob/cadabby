@@ -14,7 +14,7 @@ from pathlib import Path
 
 from cadabby.audit import run_vault_audit
 from cadabby.cache import VaultCache
-from cadabby.constants import DIR_RAW, DIR_WIKI, FILE_CONFIG, NOTE_TYPES
+from cadabby.constants import DIR_RAW, DIR_WIKI, NOTE_TYPES
 from cadabby.fsutil import atomic_write
 from cadabby.graph import get_note_graph, resolve_link_target
 from cadabby.indexer import append_vault_log, rotate_vault_log, sync_vault_index
@@ -26,19 +26,19 @@ from cadabby.ops import (
     update_note,
     verify_note,
 )
-from cadabby.vault import Vault, find_vault_root
+from cadabby.vault import Vault
 
 
 def resolve_cli_vault(args: argparse.Namespace) -> Vault:
-    """Resolve vault from CLI arguments or environment, failing fast if not inside a vault."""
+    """Resolve vault from CLI arguments or environment, failing fast if not inside a vault.
+
+    An explicit --vault names the root exactly; without it the vault is
+    discovered by walking up from CADABBY_VAULT or the cwd.
+    """
     vault_arg = getattr(args, "vault", None)
-    discovered = find_vault_root(vault_arg)
-    if discovered is None:
-        target_loc = vault_arg or Path.cwd()
-        raise FileNotFoundError(
-            f"No Cadabby vault found at {target_loc} (missing {FILE_CONFIG} or marker). Run 'cadabby init' to create one."
-        )
-    return Vault(root=discovered)
+    if vault_arg is not None:
+        return Vault.at(vault_arg)
+    return Vault.open()
 
 
 def get_assets_dir() -> Path:

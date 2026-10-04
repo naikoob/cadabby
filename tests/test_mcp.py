@@ -134,20 +134,10 @@ class TestMcpServer(unittest.TestCase):
         # Connection should be closed after exit
         self.assertIsNone(scoped_server.cache._conn)
 
-    def test_run_mcp_server_framing_and_resource_error(self):
-        # Build stdin bytes with Content-Length headers containing multi-byte characters and invalid resource read
-        req1 = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
-        req2 = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "resources/read", "params": {"uri": "cadabby://invalid-uri"}})
-        # req3 contains multi-byte UTF-8 emoji and em-dash
-        req3 = json.dumps({
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "tools/call",
-            "params": {"name": "vault_search", "arguments": {"query": "SQLite 🚀 — database"}},
-        })
-
+    def _drive_server(self, requests):
+        """Feed Content-Length framed requests through run_mcp_server and parse responses."""
         input_chunks = []
-        for r in (req1, req2, req3):
+        for r in requests:
             r_bytes = r.encode("utf-8")
             hdr = f"Content-Length: {len(r_bytes)}\r\n\r\n".encode("ascii")
             input_chunks.append(hdr + r_bytes)
@@ -170,11 +160,7 @@ class TestMcpServer(unittest.TestCase):
             sys.stdin = old_stdin
             sys.stdout = old_stdout
 
-        # Parse responses from stdout buffer
         stdout_bytes = stdout_stream.getvalue()
-        self.assertGreater(len(stdout_bytes), 0)
-
-        # Parse each Content-Length framed response
         responses = []
         idx = 0
         while idx < len(stdout_bytes):
@@ -186,9 +172,40 @@ class TestMcpServer(unittest.TestCase):
             body_start = header_end + 4
             body_bytes = stdout_bytes[body_start : body_start + length]
             self.assertEqual(len(body_bytes), length)
-            resp_obj = json.loads(body_bytes.decode("utf-8"))
-            responses.append(resp_obj)
+            responses.append(json.loads(body_bytes.decode("utf-8")))
             idx = body_start + length
+        return responses
+
+    def test_run_mcp_server_survives_malformed_params(self):
+        # Explicit null/non-dict params must not kill the loop or drop later requests
+        requests = [
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": None}),
+            json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": ["positional"]}),
+            json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "vault_search"}}),
+            json.dumps({"jsonrpc": "2.0", "id": 4, "method": "ping"}),
+        ]
+        responses = self._drive_server(requests)
+
+        self.assertEqual([r["id"] for r in responses], [1, 2, 3, 4])
+        # Missing tool name and missing required arguments surface as tool errors, not crashes
+        for resp in responses[:3]:
+            self.assertTrue(resp["result"]["isError"])
+        # The request following the malformed ones is still answered
+        self.assertEqual(responses[3].get("result"), {})
+
+    def test_run_mcp_server_framing_and_resource_error(self):
+        # Build stdin bytes with Content-Length headers containing multi-byte characters and invalid resource read
+        req1 = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
+        req2 = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "resources/read", "params": {"uri": "cadabby://invalid-uri"}})
+        # req3 contains multi-byte UTF-8 emoji and em-dash
+        req3 = json.dumps({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "vault_search", "arguments": {"query": "SQLite 🚀 — database"}},
+        })
+
+        responses = self._drive_server((req1, req2, req3))
 
         self.assertEqual(len(responses), 3)
         # req1 (initialize)

@@ -6,6 +6,7 @@ Conforms strictly to Cadabby Technical Specification §4.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -96,9 +97,6 @@ class VaultCache:
             self._conn = conn
             self._ensure_schema()
         return self._conn
-
-    def __del__(self) -> None:
-        self.close()
 
     def _ensure_schema(self) -> None:
         """Create or verify database schema version."""
@@ -603,15 +601,20 @@ class VaultCache:
                 val = float(v)
             except (ValueError, TypeError):
                 val = 1.0
+            # inf/nan render as bare identifiers that SQLite cannot parse
+            if not math.isfinite(val):
+                val = 1.0
             return f"WHEN '{clean_k}' THEN {val}"
 
-        trust_cases = " ".join(safe_case(k, v) for k, v in trust_cfg.items())
-        status_cases = " ".join(safe_case(k, v) for k, v in status_cfg.items())
+        def multiplier_expr(column: str, cfg: dict[Any, Any]) -> str:
+            cases = " ".join(safe_case(k, v) for k, v in cfg.items())
+            # An empty CASE body is a syntax error; a neutral multiplier is not
+            return f"CASE {column} {cases} ELSE 1.0 END" if cases else "1.0"
 
         score_expr = f"""
             (-bm25(notes_fts, {FTS_COLUMN_WEIGHTS[0]}, {FTS_COLUMN_WEIGHTS[1]}, {FTS_COLUMN_WEIGHTS[2]}, {FTS_COLUMN_WEIGHTS[3]}))
-            * (CASE n.trust_tier {trust_cases} ELSE 1.0 END)
-            * (CASE n.status {status_cases} ELSE 1.0 END)
+            * ({multiplier_expr("n.trust_tier", trust_cfg)})
+            * ({multiplier_expr("n.status", status_cfg)})
         """
 
         where_clauses = [
@@ -761,6 +764,6 @@ class VaultCache:
     def __del__(self) -> None:
         try:
             self.close()
-        except Exception:
+        except (sqlite3.Error, OSError):
             pass
 

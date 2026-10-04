@@ -18,6 +18,8 @@ This vault implements Andrej Karpathy's 3-layer LLM Wiki architecture:
   - `wiki/syntheses/`: Overviews and cross-domain topic syntheses.
   - `wiki/comparisons/`: Structured trade-off analyses.
   - `wiki/guides/`: Procedural how-tos and runbooks.
+* **Cognitive Domains (Custom Top-Level Directories)**:
+  Additional domain directories (e.g. `customers/`, `projects/`, `team/`) can be created at the vault root. Each domain can contain its own `{domain}/AGENTS.md` manifest specifying schema rules (`allowed_types`, `require_sources`, `enforce_layout`) and localized directives.
 * **`index.md` & `log.md` (System Layer)**:
   - `index.md`: Auto-generated catalog linking all notes and tracking source status. Never hand-edited.
   - `log.md`: Append-only chronological audit ledger.

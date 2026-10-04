@@ -35,23 +35,33 @@ from cadabby.domain import DomainDefinition
 from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter
 
 
-def find_vault_root(start_path: Path | str | None = None) -> Path | None:
-    """Walk up the directory hierarchy to locate the vault root.
+def is_vault_root(path: Path | str) -> bool:
+    """Return True if path is a directory carrying a vault root marker."""
+    p = Path(path)
+    return (p / FILE_CONFIG).exists() or (p / ".obsidian").is_dir()
 
-    Precedence:
+
+def vault_search_start(start_path: Path | str | None = None) -> Path:
+    """Resolve where vault discovery begins, in order of precedence.
+
     1. Explicit start_path (e.g. from --vault CLI flag).
-    2. CADABBY_VAULT environment variable (if valid directory).
-    3. Directory containing .cadabby.json or .obsidian.
+    2. CADABBY_VAULT environment variable.
+    3. The current working directory.
     """
     if start_path is not None:
-        current = Path(start_path).resolve()
-    else:
-        env_vault = os.environ.get("CADABBY_VAULT")
-        if env_vault:
-            p = Path(env_vault).resolve()
-            if p.is_dir():
-                return p
-        current = Path.cwd().resolve()
+        return Path(start_path).resolve()
+    env_vault = os.environ.get("CADABBY_VAULT")
+    return Path(env_vault).resolve() if env_vault else Path.cwd().resolve()
+
+
+def find_vault_root(start_path: Path | str | None = None) -> Path | None:
+    """Walk up the directory hierarchy from the search start to locate the vault root.
+
+    The hierarchy is walked upward looking for a root marker (.cadabby.json or
+    .obsidian). A start point with no marker above it yields None rather than
+    being accepted as a root.
+    """
+    current = vault_search_start(start_path)
 
     # If start path is a file, start from its parent directory
     if current.is_file():
@@ -59,12 +69,18 @@ def find_vault_root(start_path: Path | str | None = None) -> Path | None:
 
     # Traverse upward looking for root markers
     for parent in [current, *current.parents]:
-        if (parent / FILE_CONFIG).exists():
-            return parent
-        if (parent / ".obsidian").is_dir():
+        if is_vault_root(parent):
             return parent
 
     return None
+
+
+def _no_vault_message(location: Path | str) -> str:
+    """Build the canonical 'not a vault' error message."""
+    return (
+        f"No Cadabby vault found at {location} (missing {FILE_CONFIG} or marker). "
+        "Run 'cadabby init' to create one."
+    )
 
 
 class VaultConfigError(ValueError):
@@ -193,12 +209,22 @@ class Vault:
 
     @classmethod
     def open(cls, start_path: Path | str | None = None) -> Vault:
-        """Discover and open a vault from start_path or current working directory."""
+        """Discover and open a vault by walking up from start_path or the cwd."""
         root = find_vault_root(start_path)
         if root is None:
-            raise FileNotFoundError(
-                f"No Cadabby vault found at {start_path or Path.cwd()} (missing {FILE_CONFIG} or marker)"
-            )
+            raise FileNotFoundError(_no_vault_message(vault_search_start(start_path)))
+        return cls(root=root)
+
+    @classmethod
+    def at(cls, path: Path | str) -> Vault:
+        """Open the vault rooted exactly at path, without walking up the hierarchy.
+
+        Used for explicitly designated roots (e.g. --vault) so that a typo'd or
+        non-vault path fails instead of silently resolving to an ancestor vault.
+        """
+        root = Path(path).resolve()
+        if not is_vault_root(root):
+            raise FileNotFoundError(_no_vault_message(root))
         return cls(root=root)
 
     @property
