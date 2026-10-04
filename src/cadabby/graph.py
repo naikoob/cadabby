@@ -57,6 +57,51 @@ def extract_wikilinks(markdown_text: str) -> list[ExtractedLink]:
     return list(links_by_target.values())
 
 
+class LinkTargetIndex:
+    """Precomputed index for O(1) resolution of wikilink targets to canonical CIDs."""
+
+    def __init__(self, known_cids: Sequence[str]):
+        self._exact_map: dict[str, str] = {}
+        self._suffix_map: dict[str, str] = {}
+        self._stem_map: dict[str, str] = {}
+
+        for cid in known_cids:
+            if cid not in self._exact_map:
+                self._exact_map[cid] = cid
+            if cid.startswith("wiki/"):
+                short = cid[5:]
+                if short not in self._exact_map:
+                    self._exact_map[short] = cid
+
+            parts = cid.split("/")
+            for i in range(1, len(parts)):
+                suffix = "/".join(parts[i:])
+                if suffix not in self._suffix_map:
+                    self._suffix_map[suffix] = cid
+
+            stem = parts[-1]
+            if stem not in self._stem_map:
+                self._stem_map[stem] = cid
+
+    def resolve(self, target_stem: str) -> str | None:
+        """Resolve a target stem against the precomputed index in O(1) time."""
+        clean = target_stem.replace("\\", "/").strip("/")
+        if clean.endswith(".md"):
+            clean = clean[:-3]
+
+        # 1. Exact CID or wiki-relative match
+        if clean in self._exact_map:
+            return self._exact_map[clean]
+
+        # 2. Path suffix match
+        if clean in self._suffix_map:
+            return self._suffix_map[clean]
+
+        # 3. Note stem match
+        stem = clean.split("/")[-1]
+        return self._stem_map.get(stem)
+
+
 def resolve_link_target(target_stem: str, known_cids: Sequence[str]) -> str | None:
     """Resolve a target stem or relative path against known vault CIDs.
 
@@ -66,25 +111,5 @@ def resolve_link_target(target_stem: str, known_cids: Sequence[str]) -> str | No
     3. Note stem match (e.g. 'Note' -> 'wiki/concepts/Note').
     Returns matching CID or None if unresolved (broken link).
     """
-    clean = target_stem.replace("\\", "/").strip("/")
-    if clean.endswith(".md"):
-        clean = clean[:-3]
+    return LinkTargetIndex(known_cids).resolve(target_stem)
 
-    # 1. Exact CID
-    for cid in known_cids:
-        if cid == clean or cid == f"wiki/{clean}":
-            return cid
-
-    # 2. Path suffix
-    for cid in known_cids:
-        if cid.endswith(f"/{clean}"):
-            return cid
-
-    # 3. Stem match
-    target_stem_only = clean.split("/")[-1]
-    for cid in known_cids:
-        stem = cid.split("/")[-1]
-        if stem == target_stem_only:
-            return cid
-
-    return None

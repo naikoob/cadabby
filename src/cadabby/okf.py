@@ -12,9 +12,6 @@ from typing import Any
 from cadabby.constants import (
     ACTOR_PATTERN,
     BODY_HASH_PREFIX,
-    NOTE_STATUSES,
-    NOTE_TYPES,
-    REQUIRED_FRONTMATTER_FIELDS,
     RFC3339_TIMESTAMP_PATTERN,
 )
 

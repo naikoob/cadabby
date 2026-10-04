@@ -8,7 +8,6 @@ from __future__ import annotations
 import re
 import subprocess
 from dataclasses import dataclass
-from typing import Sequence
 
 from cadabby.vault import Vault
 

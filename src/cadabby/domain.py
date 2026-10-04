@@ -6,7 +6,6 @@ Free from filesystem I/O, SQLite dependencies, and network protocols.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Any
 
 from cadabby.cache import VaultCache
 from cadabby.constants import (
@@ -33,6 +33,16 @@ class LintFinding:
     line: int | None
     message: str
 
+    def to_dict(self) -> dict[str, Any]:
+        """Convert LintFinding to serializable dictionary."""
+        return {
+            "code": self.code,
+            "severity": self.severity,
+            "rel_path": self.rel_path,
+            "line": self.line,
+            "message": self.message,
+        }
+
 
 def run_vault_lint(vault: Vault, cache: VaultCache | None = None) -> list[LintFinding]:
     """Execute the six normative lint gates against the vault.
@@ -44,10 +54,16 @@ def run_vault_lint(vault: Vault, cache: VaultCache | None = None) -> list[LintFi
     5. Graph Connectivity
     6. Verification Integrity
     """
+    if cache is not None:
+        return _run_vault_lint_impl(vault, cache)
+    with VaultCache(vault) as local_cache:
+        return _run_vault_lint_impl(vault, local_cache)
+
+
+def _run_vault_lint_impl(vault: Vault, cache: VaultCache) -> list[LintFinding]:
     # Ensure cache is fresh
-    active_cache = cache if cache is not None else VaultCache(vault)
-    active_cache.scan()
-    conn = active_cache.get_connection()
+    cache.scan()
+    conn = cache.get_connection()
 
     findings: list[LintFinding] = []
 
@@ -280,24 +296,25 @@ def run_vault_lint(vault: Vault, cache: VaultCache | None = None) -> list[LintFi
         )
 
     # --- GATE 5: Graph Connectivity ---
-    for cid, note_info in notes_by_cid.items():
-        rel_path = note_info["rel_path"]
-
-        cur = conn.execute("SELECT COUNT(*) FROM links WHERE source_cid = ?;", (cid,))
-        outbound = cur.fetchone()[0]
-
-        cur = conn.execute("SELECT COUNT(*) FROM links WHERE target_cid = ?;", (cid,))
-        inbound = cur.fetchone()[0]
-
-        if outbound == 0 and inbound == 0:
-            findings.append(
-                LintFinding(
-                    code="NOTE_ORPHAN",
-                    severity="warning",
-                    rel_path=rel_path,
-                    line=None,
-                    message="Orphan note: 0 inbound and 0 outbound links",
-                )
+    cur = conn.execute(
+        """
+        SELECT n.rel_path
+        FROM notes n
+        WHERE n.layer = 'wiki'
+          AND NOT EXISTS (SELECT 1 FROM links l1 WHERE l1.source_cid = n.cid)
+          AND NOT EXISTS (SELECT 1 FROM links l2 WHERE l2.target_cid = n.cid)
+        ORDER BY n.rel_path;
+        """
+    )
+    for row in cur.fetchall():
+        findings.append(
+            LintFinding(
+                code="NOTE_ORPHAN",
+                severity="warning",
+                rel_path=row["rel_path"],
+                line=None,
+                message="Orphan note: 0 inbound and 0 outbound links",
             )
+        )
 
     return findings

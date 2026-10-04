@@ -8,16 +8,14 @@ from __future__ import annotations
 import json
 import re
 import sys
-from pathlib import Path
 from typing import Any
 
 from cadabby import __version__
 from cadabby.cache import VaultCache
 from cadabby.constants import NOTE_TYPES
-from cadabby.frontmatter import parse_frontmatter
 from cadabby.lint import run_vault_lint
 from cadabby.ops import ground_notes, scaffold_note, update_note, verify_note
-from cadabby.vault import Vault, cid_to_path, find_vault_root, path_to_cid
+from cadabby.vault import Vault, path_to_cid
 
 TOOLS = [
     {
@@ -179,23 +177,16 @@ class McpServer:
                     trust=args.get("trust"),
                     limit=args.get("limit", 20),
                 )
-                data = [
-                    {
-                        "cid": r.cid,
-                        "title": r.title,
-                        "description": r.description,
-                        "type": r.type,
-                        "status": r.status,
-                        "trust_tier": r.trust_tier,
-                        "score": round(r.score, 4),
-                        "snippet": r.snippet,
-                    }
-                    for r in res
-                ]
+                data = [r.to_dict() for r in res]
                 return {"content": [{"type": "text", "text": json.dumps(data, indent=2)}], "isError": False}
 
             elif name == "vault_ground":
-                grounded = ground_notes(self.vault, args["cids"], budget_tokens=args.get("budget_tokens"))
+                grounded = ground_notes(
+                    self.vault,
+                    args["cids"],
+                    budget_tokens=args.get("budget_tokens"),
+                    cache=self.cache,
+                )
                 return {"content": [{"type": "text", "text": json.dumps(grounded, indent=2)}], "isError": False}
 
             elif name == "vault_scaffold_note":
@@ -270,16 +261,7 @@ class McpServer:
 
             elif name == "vault_lint":
                 findings = run_vault_lint(self.vault, cache=self.cache)
-                out = [
-                    {
-                        "code": f.code,
-                        "severity": f.severity,
-                        "rel_path": f.rel_path,
-                        "line": f.line,
-                        "message": f.message,
-                    }
-                    for f in findings
-                ]
+                out = [f.to_dict() for f in findings]
                 has_errors = any(f.severity == "error" for f in findings)
                 return {
                     "content": [{"type": "text", "text": json.dumps(out, indent=2)}],

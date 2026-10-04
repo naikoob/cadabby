@@ -70,10 +70,6 @@ class InMemoryNoteStorage(NoteStoragePort):
         clean = rel_path.replace("\\", "/").strip("/")
         return clean in self._raw_sources
 
-    def add_raw_source(self, rel_path: str) -> None:
-        clean = rel_path.replace("\\", "/").strip("/")
-        self._raw_sources.add(clean)
-
 
 class InMemoryLedger(LedgerPort):
     """Secondary adapter recording log entries in an in-memory list."""

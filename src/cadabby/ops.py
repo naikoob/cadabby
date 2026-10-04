@@ -15,8 +15,8 @@ from cadabby.adapters.disk_storage import DiskNoteStorage, FileLedger
 from cadabby.cache import VaultCache
 from cadabby.constants import NOTE_TYPES
 from cadabby.domain import Note, VerificationResult, split_markdown_sections
-from cadabby.frontmatter import parse_frontmatter, serialize_frontmatter
-from cadabby.okf import compute_body_hash, derive_trust_tier, is_valid_actor
+from cadabby.frontmatter import serialize_frontmatter
+from cadabby.okf import is_valid_actor
 from cadabby.ports import IndexCachePort, LedgerPort, NoteStoragePort
 from cadabby.vault import Vault, cid_to_path, path_to_cid
 
@@ -196,11 +196,7 @@ class GroundNotesUseCase:
         cids: Sequence[str],
         budget_tokens: int | None = None,
     ) -> list[dict[str, Any]]:
-        if self.cache is not None:
-            self.cache.scan()
-            conn = self.cache.get_connection()
-        else:
-            conn = None
+        conn = self.cache.get_connection() if self.cache is not None else None
 
         grounded = []
 
@@ -287,6 +283,15 @@ class GroundNotesUseCase:
 # ============================================================================
 
 
+def _resolve_adapters(
+    vault: Vault,
+    storage: NoteStoragePort | None = None,
+    ledger: LedgerPort | None = None,
+) -> tuple[NoteStoragePort, LedgerPort]:
+    """Helper to instantiate default disk storage and ledger adapters."""
+    return storage or DiskNoteStorage(vault), ledger or FileLedger(vault)
+
+
 def scaffold_note(
     vault: Vault,
     title: str,
@@ -300,8 +305,7 @@ def scaffold_note(
     ledger: LedgerPort | None = None,
 ) -> Path:
     """Scaffold a new wiki note in the directory matching its type."""
-    active_storage = storage or DiskNoteStorage(vault)
-    active_ledger = ledger or FileLedger(vault)
+    active_storage, active_ledger = _resolve_adapters(vault, storage, ledger)
     uc = ScaffoldNoteUseCase(active_storage, active_ledger)
     note = uc.execute(
         title=title,
@@ -327,8 +331,7 @@ def update_note(
     ledger: LedgerPort | None = None,
 ) -> Path:
     """Non-destructively update note frontmatter or content sections."""
-    active_storage = storage or DiskNoteStorage(vault)
-    active_ledger = ledger or FileLedger(vault)
+    active_storage, active_ledger = _resolve_adapters(vault, storage, ledger)
     uc = UpdateNoteUseCase(active_storage, active_ledger)
     note = uc.execute(
         cid_or_path=cid_or_path,
@@ -351,8 +354,7 @@ def verify_note(
     ledger: LedgerPort | None = None,
 ) -> dict[str, Any]:
     """Appends a content-bound verification attestation to a note."""
-    active_storage = storage or DiskNoteStorage(vault)
-    active_ledger = ledger or FileLedger(vault)
+    active_storage, active_ledger = _resolve_adapters(vault, storage, ledger)
     uc = VerifyNoteUseCase(active_storage, active_ledger)
     res = uc.execute(
         cid_or_path=cid_or_path,
@@ -377,7 +379,11 @@ def ground_notes(
     storage: NoteStoragePort | None = None,
 ) -> list[dict[str, Any]]:
     """Retrieve full content and 1-hop graph neighborhood for the specified CIDs."""
-    active_storage = storage or DiskNoteStorage(vault)
-    active_cache = cache or VaultCache(vault)
+    active_storage, _ = _resolve_adapters(vault, storage)
+    if cache is None:
+        active_cache = VaultCache(vault)
+        active_cache.scan()
+    else:
+        active_cache = cache
     uc = GroundNotesUseCase(vault_or_storage=active_storage, cache=active_cache, vault=vault)
     return uc.execute(cids=cids, budget_tokens=budget_tokens)

@@ -168,23 +168,12 @@ def advisory_lock(
                     pid_str, ts_str = raw_info.split(":", 1)
                     lock_pid = int(pid_str)
                     lock_ts = float(ts_str)
-
                     is_stale = (now - lock_ts > stale_age) or not _is_process_alive(lock_pid)
-                    if is_stale:
-                        # Break stale lock atomically via OCC
-                        try:
-                            atomic_replace_checked(
-                                target,
-                                lock_content,
-                                expected_hash=compute_bytes_sha256(raw_bytes),
-                            )
-                            acquired = True
-                            break
-                        except (VaultConflictError, OSError):
-                            pass
-                        continue
                 else:
-                    # Malformed lock file; break atomically via OCC
+                    is_stale = True
+
+                if is_stale:
+                    # Break stale or malformed lock atomically via OCC
                     try:
                         atomic_replace_checked(
                             target,

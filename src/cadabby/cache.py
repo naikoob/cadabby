@@ -11,18 +11,16 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from cadabby.constants import (
     DEFAULT_RAW_TEXT_EXTENSIONS,
-    DIR_RAW,
-    DIR_WIKI,
     FTS_COLUMN_WEIGHTS,
     SCHEMA_VERSION,
 )
 from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter
 from cadabby.fsutil import compute_file_sha256
-from cadabby.graph import extract_wikilinks, resolve_link_target
+from cadabby.graph import LinkTargetIndex, extract_wikilinks
 from cadabby.okf import compute_body_hash, derive_trust_tier
 from cadabby.vault import Vault, path_to_cid, path_to_layer, path_to_stem
 
@@ -39,6 +37,19 @@ class SearchResult:
     trust_tier: str | None
     score: float
     snippet: str
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert SearchResult to serializable dictionary."""
+        return {
+            "cid": self.cid,
+            "title": self.title,
+            "description": self.description,
+            "type": self.type,
+            "status": self.status,
+            "trust_tier": self.trust_tier,
+            "score": round(self.score, 4),
+            "snippet": self.snippet,
+        }
 
 
 def check_fts5_capability(conn: sqlite3.Connection) -> None:
@@ -74,11 +85,6 @@ class VaultCache:
             self._conn = conn
             self._ensure_schema()
         return self._conn
-
-    def close(self) -> None:
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
 
     def __del__(self) -> None:
         self.close()
@@ -178,19 +184,6 @@ class VaultCache:
             (str(SCHEMA_VERSION),),
         )
         conn.commit()
-
-    def _extract_tags_str(self, frontmatter_json: str | None) -> str:
-        """Helper to extract tags as a space-separated string for FTS indexing."""
-        if not frontmatter_json:
-            return ""
-        try:
-            fm = json.loads(frontmatter_json)
-            tags = fm.get("tags", [])
-            if isinstance(tags, list):
-                return " ".join(str(t) for t in tags if t)
-        except Exception:
-            pass
-        return ""
 
     def upsert_note(
         self,
@@ -512,17 +505,22 @@ class VaultCache:
             else:
                 updated_count += 1
 
-        # 3. Resolve all link targets
-        cur = conn.execute("SELECT cid FROM notes WHERE layer = 'wiki' AND parse_error IS NULL;")
-        all_cids = [row["cid"] for row in cur.fetchall()]
+        # 3. Resolve all link targets if vault structure changed
+        if inserted_count > 0 or updated_count > 0 or deleted_count > 0 or force:
+            cur = conn.execute("SELECT cid FROM notes WHERE layer = 'wiki' AND parse_error IS NULL;")
+            all_cids = [row["cid"] for row in cur.fetchall()]
+            resolver = LinkTargetIndex(all_cids)
 
-        cur = conn.execute("SELECT id, target_raw FROM links;")
-        for link_row in cur.fetchall():
-            link_id = link_row["id"]
-            target_raw = link_row["target_raw"]
-            target_stem = target_raw.split("#")[0]
-            resolved_cid = resolve_link_target(target_stem, all_cids)
-            conn.execute("UPDATE links SET target_cid = ? WHERE id = ?;", (resolved_cid, link_id))
+            cur = conn.execute("SELECT id, target_raw FROM links;")
+            link_updates = []
+            for link_row in cur.fetchall():
+                link_id = link_row["id"]
+                target_raw = link_row["target_raw"]
+                target_stem = target_raw.split("#")[0]
+                resolved_cid = resolver.resolve(target_stem)
+                link_updates.append((resolved_cid, link_id))
+
+            conn.executemany("UPDATE links SET target_cid = ? WHERE id = ?;", link_updates)
 
         conn.commit()
 
@@ -574,6 +572,9 @@ class VaultCache:
         if trust:
             where_clauses.append("n.trust_tier = :trust")
             params["trust"] = trust
+        if tag:
+            where_clauses.append("(instr(' ' || n.tags || ' ', ' ' || :tag || ' ') > 0)")
+            params["tag"] = tag
 
         sql = f"""
             SELECT n.cid,

@@ -8,6 +8,7 @@ import time
 import unittest
 from pathlib import Path
 
+from cadabby.cache import VaultCache
 from cadabby.constants import FILE_CONFIG
 from cadabby.fsutil import (
     LockTimeoutError,
@@ -18,6 +19,7 @@ from cadabby.fsutil import (
     atomic_write,
     compute_file_sha256,
 )
+from cadabby.graph import LinkTargetIndex, resolve_link_target
 from cadabby.vault import (
     Vault,
     VaultConfigError,
@@ -168,6 +170,77 @@ class TestVault(unittest.TestCase):
         self.assertEqual(path_to_cid(raw_rel), raw_rel)
         self.assertEqual(cid_to_path(raw_rel), raw_rel)
         self.assertEqual(path_to_layer(raw_rel), "raw")
+
+
+class TestGraphAndLinkResolution(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.vault_dir = Path(self.tmp.name) / "vault"
+        self.vault_dir.mkdir(parents=True, exist_ok=True)
+        self.vault = Vault(self.vault_dir)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_link_target_index(self):
+        cids = [
+            "wiki/concepts/Epistemic-Trust-Tiers",
+            "wiki/entities/SQLite",
+            "wiki/guides/Getting-Started",
+            "raw/vaswani2017.pdf",
+        ]
+        resolver = LinkTargetIndex(cids)
+
+        # 1. Exact match
+        self.assertEqual(resolver.resolve("wiki/concepts/Epistemic-Trust-Tiers"), "wiki/concepts/Epistemic-Trust-Tiers")
+        self.assertEqual(resolver.resolve("raw/vaswani2017.pdf"), "raw/vaswani2017.pdf")
+
+        # 2. Match without "wiki/" prefix
+        self.assertEqual(resolver.resolve("concepts/Epistemic-Trust-Tiers"), "wiki/concepts/Epistemic-Trust-Tiers")
+        self.assertEqual(resolver.resolve("entities/SQLite"), "wiki/entities/SQLite")
+
+        # 3. Path suffix match
+        self.assertEqual(resolver.resolve("guides/Getting-Started"), "wiki/guides/Getting-Started")
+
+        # 4. Note stem match
+        self.assertEqual(resolver.resolve("Epistemic-Trust-Tiers"), "wiki/concepts/Epistemic-Trust-Tiers")
+        self.assertEqual(resolver.resolve("SQLite"), "wiki/entities/SQLite")
+
+        # 5. Non-existent target returns None
+        self.assertIsNone(resolver.resolve("NonExistentNote"))
+
+        # Verify resolve_link_target backward-compatible wrapper
+        self.assertEqual(resolve_link_target("SQLite", cids), "wiki/entities/SQLite")
+
+    def test_cache_scan_zero_change_skips_link_resolution(self):
+        note_a = self.vault.wiki_dir / "concepts" / "Note-A.md"
+        note_a.parent.mkdir(parents=True, exist_ok=True)
+        note_a.write_text(
+            "---\ntype: concept\ntitle: Note A\ndescription: Test\nstatus: active\n---\n# Note A\nLinks to [[Note-B]].\n",
+            "utf-8",
+        )
+
+        note_b = self.vault.wiki_dir / "concepts" / "Note-B.md"
+        note_b.write_text(
+            "---\ntype: concept\ntitle: Note B\ndescription: Test\nstatus: active\n---\n# Note B\nTarget.\n",
+            "utf-8",
+        )
+
+        with VaultCache(self.vault) as cache:
+            # First scan: populates DB and resolves links
+            ins, upd, deleted, total = cache.scan()
+            self.assertEqual(ins, 2)
+            self.assertEqual(total, 2)
+            conn = cache.get_connection()
+            row = conn.execute("SELECT target_cid FROM links WHERE target_raw = 'Note-B';").fetchone()
+            self.assertEqual(row["target_cid"], "wiki/concepts/Note-B")
+
+            # Second scan: no changes on disk
+            ins2, upd2, deleted2, total2 = cache.scan()
+            self.assertEqual(ins2, 0)
+            self.assertEqual(upd2, 0)
+            self.assertEqual(deleted2, 0)
+            self.assertEqual(total2, 2)
 
 
 if __name__ == "__main__":

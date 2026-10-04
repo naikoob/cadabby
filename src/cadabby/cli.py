@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
-import os
 import shutil
 import sys
 from pathlib import Path
@@ -18,10 +17,10 @@ from cadabby.audit import run_vault_audit
 from cadabby.cache import VaultCache
 from cadabby.constants import DIR_RAW, DIR_WIKI, NOTE_TYPES
 from cadabby.fsutil import atomic_write
-from cadabby.indexer import sync_vault_index
+from cadabby.indexer import rotate_vault_log, sync_vault_index
 from cadabby.lint import run_vault_lint
 from cadabby.ops import TYPE_TO_DIR, ground_notes, scaffold_note, update_note, verify_note
-from cadabby.vault import Vault, find_vault_root
+from cadabby.vault import Vault
 
 
 def get_assets_dir() -> Path:
@@ -108,38 +107,30 @@ def cmd_sync(args: argparse.Namespace) -> int:
     with VaultCache(vault) as cache:
         ins, upd, deleted, total = cache.scan(force=args.force)
         sync_vault_index(vault, cache=cache)
+        rotated = rotate_vault_log(vault)
 
-    print(f"Vault sync complete: {total} total tracked ({ins} inserted, {upd} updated, {deleted} deleted).")
+    msg = f"Vault sync complete: {total} total tracked ({ins} inserted, {upd} updated, {deleted} deleted)."
+    if rotated:
+        msg += f" (Rotated active log to {vault.rel_path(rotated)})"
+    print(msg)
     return 0
 
 
 def cmd_search(args: argparse.Namespace) -> int:
     """Search vault notes with normalized epistemic BM25 ranking."""
     vault = Vault(args.vault)
-    cache = VaultCache(vault)
-    results = cache.search(
-        query=args.query,
-        type_=args.type,
-        status=args.status,
-        trust=args.trust,
-        tag=args.tag,
-        limit=args.limit,
-    )
+    with VaultCache(vault) as cache:
+        results = cache.search(
+            query=args.query,
+            type_=args.type,
+            status=args.status,
+            trust=args.trust,
+            tag=args.tag,
+            limit=args.limit,
+        )
 
     if args.json:
-        out = [
-            {
-                "cid": r.cid,
-                "title": r.title,
-                "description": r.description,
-                "type": r.type,
-                "status": r.status,
-                "trust_tier": r.trust_tier,
-                "score": round(r.score, 4),
-                "snippet": r.snippet,
-            }
-            for r in results
-        ]
+        out = [r.to_dict() for r in results]
         print(json.dumps(out, indent=2))
         return 0
 
@@ -162,7 +153,9 @@ def cmd_search(args: argparse.Namespace) -> int:
 def cmd_ground(args: argparse.Namespace) -> int:
     """Retrieve full content and 1-hop graph for specified CIDs."""
     vault = Vault(args.vault)
-    grounded = ground_notes(vault, args.cids, budget_tokens=args.budget_tokens)
+    with VaultCache(vault) as cache:
+        cache.scan()
+        grounded = ground_notes(vault, args.cids, budget_tokens=args.budget_tokens, cache=cache)
 
     if args.json:
         print(json.dumps(grounded, indent=2))
@@ -265,9 +258,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     """Print high-level vault status, distribution, and verification debt."""
     vault = Vault(args.vault)
-    cache = VaultCache(vault)
-    cache.scan()
-    status_data = cache.get_status()
+    with VaultCache(vault) as cache:
+        cache.scan()
+        status_data = cache.get_status()
 
     if args.json:
         print(json.dumps(status_data, indent=2))
@@ -296,19 +289,11 @@ def cmd_status(args: argparse.Namespace) -> int:
 def cmd_lint(args: argparse.Namespace) -> int:
     """Run six-gate epistemic linting."""
     vault = Vault(args.vault)
-    findings = run_vault_lint(vault)
+    with VaultCache(vault) as cache:
+        findings = run_vault_lint(vault, cache=cache)
 
     if args.json:
-        out = [
-            {
-                "code": f.code,
-                "severity": f.severity,
-                "rel_path": f.rel_path,
-                "line": f.line,
-                "message": f.message,
-            }
-            for f in findings
-        ]
+        out = [f.to_dict() for f in findings]
         print(json.dumps(out, indent=2))
         has_errors = any(f.severity == "error" for f in findings)
         return 1 if has_errors else 0

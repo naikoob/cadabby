@@ -5,12 +5,11 @@ Conforms to Cadabby Technical Specification §2.1, §6.1, §8.
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from cadabby.constants import DIR_LOG, DIR_WIKI, NOTE_TYPES
+from cadabby.constants import NOTE_TYPES
 from cadabby.fsutil import advisory_lock, append_ledger, atomic_write
 from cadabby.vault import Vault
 

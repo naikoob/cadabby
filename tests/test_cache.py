@@ -133,6 +133,24 @@ class TestVaultCache(unittest.TestCase):
         # Deprecated note should be heavily demoted
         self.assertGreater(sqlite_res.score, duckdb_res.score)
 
+    def test_search_tag_filtering(self):
+        self.cache.scan()
+
+        # Search matching tag
+        results = self.cache.search("SQLite", tag="database")
+        cids = [r.cid for r in results]
+        self.assertIn("wiki/entities/SQLite", cids)
+
+        # Search non-matching tag
+        results_none = self.cache.search("SQLite", tag="nonexistent-tag")
+        self.assertEqual(len(results_none), 0)
+
+        # Test SearchResult.to_dict()
+        res_dict = results[0].to_dict()
+        self.assertEqual(res_dict["cid"], results[0].cid)
+        self.assertIn("score", res_dict)
+        self.assertIn("snippet", res_dict)
+
 
 if __name__ == "__main__":
     unittest.main()

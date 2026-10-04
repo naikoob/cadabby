@@ -6,7 +6,7 @@ Defines the contracts between the domain/application core and external infrastru
 
 from __future__ import annotations
 
-from typing import Any, ContextManager, Protocol, Sequence
+from typing import Any, Protocol, Sequence
 
 from cadabby.domain import Note
 
@@ -42,7 +42,7 @@ class NoteStoragePort(Protocol):
 class IndexCachePort(Protocol):
     """Secondary port for searching, caching, and epistemic health reporting."""
 
-    def scan(self) -> dict[str, int]:
+    def scan(self, force: bool = False) -> tuple[int, int, int, int]:
         """Incrementally synchronize the index with storage."""
         ...
 
@@ -52,6 +52,7 @@ class IndexCachePort(Protocol):
         type_: str | None = None,
         status: str | None = None,
         trust: str | None = None,
+        tag: str | None = None,
         limit: int = 20,
     ) -> list[Any]:
         """Execute epistemic search with trust and status boosting."""
@@ -75,12 +76,4 @@ class LedgerPort(Protocol):
 
     def append(self, message: str, actor: str | None = None) -> None:
         """Append an entry to the activity ledger."""
-        ...
-
-
-class LockPort(Protocol):
-    """Secondary port for managing advisory concurrency locks."""
-
-    def acquire(self, timeout: float = 60.0) -> ContextManager[Any]:
-        """Acquire an advisory mutex lease."""
         ...

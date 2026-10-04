@@ -119,6 +119,30 @@ class TestCli(unittest.TestCase):
         args_lint = DummyArgs(vault=str(vault_root), json=True)
         self.assertEqual(cmd_lint(args_lint), 0)
 
+    def test_sync_triggers_log_rotation_on_threshold(self):
+        vault_root = self.dir / "rotate-vault"
+        args_init = DummyArgs(vault=str(vault_root), name="rotate-vault", obsidian=False)
+        cmd_init(args_init)
+
+        # Pad log.md to exceed default 256KB threshold
+        log_path = vault_root / "log.md"
+        big_entry = "- [2026-10-04T12:00:00Z] Test log entry\n" * 8000  # ~320 KB
+        log_path.write_text(big_entry, "utf-8")
+        self.assertGreater(log_path.stat().st_size, 262144)
+
+        # Run sync
+        args_sync = DummyArgs(vault=str(vault_root), force=False)
+        ret = cmd_sync(args_sync)
+        self.assertEqual(ret, 0)
+
+        # Verify rotated file exists in log/
+        rotated_files = list((vault_root / "log").glob("*.md"))
+        self.assertEqual(len(rotated_files), 1)
+        self.assertGreater(rotated_files[0].stat().st_size, 262144)
+
+        # Verify active log.md has been reset
+        self.assertLess(log_path.stat().st_size, 500)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -101,6 +101,29 @@ verified:
         self.assertIn("ACTOR_MALFORMED", codes)
         self.assertIn("VERIFICATION_UNBOUND", codes)
 
+    def test_gate5_orphan_detection_single_query(self):
+        # Scaffold an orphan note with no inbound and no outbound links
+        orphan = self.vault.wiki_dir / "concepts" / "Lonely-Orphan.md"
+        orphan.write_text(
+            """---
+type: concept
+title: Lonely Orphan
+description: An orphan note with no connections
+status: active
+---
+# Lonely Orphan
+
+There are no links here.
+""",
+            "utf-8",
+        )
+
+        findings = run_vault_lint(self.vault)
+        orphan_findings = [f for f in findings if f.code == "NOTE_ORPHAN"]
+        self.assertEqual(len(orphan_findings), 1)
+        self.assertEqual(orphan_findings[0].rel_path, "wiki/concepts/Lonely-Orphan.md")
+        self.assertEqual(orphan_findings[0].severity, "warning")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,11 +6,10 @@ and path conversions within the vault directory boundary.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Sequence
 
 from cadabby.domain import Note
-from cadabby.fsutil import atomic_replace_checked, atomic_write
+from cadabby.fsutil import atomic_replace_checked
 from cadabby.indexer import append_vault_log
 from cadabby.ports import LedgerPort, NoteStoragePort
 from cadabby.vault import Vault, cid_to_path, path_to_cid
@@ -35,11 +34,7 @@ class DiskNoteStorage(NoteStoragePort):
     def save_note(self, note: Note, expected_hash: str | None = None) -> None:
         target = self.vault.abs_path(note.rel_path)
         serialized = note.serialize()
-
-        if target.exists():
-            atomic_replace_checked(target, serialized, expected_hash=expected_hash)
-        else:
-            atomic_write(target, serialized)
+        atomic_replace_checked(target, serialized, expected_hash=expected_hash)
 
     def note_exists(self, cid_or_path: str) -> bool:
         rel_path = cid_to_path(cid_or_path)
