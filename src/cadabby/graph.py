@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any
 
 # Regex matching [[Target#Anchor|Alias]] ignoring backtick code spans
 RE_WIKILINK = re.compile(r"\[\[([^\]|#]+)(?:#([^\]|]+))?(?:\|([^\]]+))?\]\]")
@@ -92,8 +93,7 @@ class LinkTargetIndex:
     def resolve(self, target_stem: str) -> str | None:
         """Resolve a target stem against the precomputed index in O(1) time."""
         clean = target_stem.replace("\\", "/").strip("/")
-        if clean.endswith(".md"):
-            clean = clean[:-3]
+        clean = clean.removesuffix(".md")
 
         # 1. Exact CID or wiki-relative match
         if clean in self._exact_map:

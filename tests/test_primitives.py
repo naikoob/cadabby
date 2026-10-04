@@ -20,6 +20,7 @@ from cadabby.fsutil import (
     compute_file_sha256,
 )
 from cadabby.graph import LinkTargetIndex, resolve_link_target
+from cadabby.indexer import rotate_vault_log
 from cadabby.vault import (
     Vault,
     VaultConfigError,
@@ -85,9 +86,11 @@ class TestFsutil(unittest.TestCase):
         with advisory_lock(lock_file):
             self.assertTrue(lock_file.exists())
             # Second attempt within timeout must raise LockTimeoutError
-            with self.assertRaises(LockTimeoutError):
-                with advisory_lock(lock_file, timeout=0.1, poll_interval=0.02):
-                    pass
+            with (
+                self.assertRaises(LockTimeoutError),
+                advisory_lock(lock_file, timeout=0.1, poll_interval=0.02),
+            ):
+                pass
 
         # Lock file must be unlinked after context exit
         self.assertFalse(lock_file.exists())
@@ -171,6 +174,20 @@ class TestVault(unittest.TestCase):
         self.assertEqual(cid_to_path(raw_rel), raw_rel)
         self.assertEqual(path_to_layer(raw_rel), "raw")
 
+        # Vault.rel_path resolution regardless of cwd
+        vault = Vault(self.dir)
+        old_cwd = os.getcwd()
+        try:
+            # Change cwd to /tmp to ensure cwd != vault.root
+            os.chdir(tempfile.gettempdir())
+            # Relative path within vault
+            self.assertEqual(vault.rel_path("wiki/concepts/Foo.md"), "wiki/concepts/Foo.md")
+            # Absolute path within vault
+            abs_note = self.dir / "wiki" / "concepts" / "Foo.md"
+            self.assertEqual(vault.rel_path(abs_note), "wiki/concepts/Foo.md")
+        finally:
+            os.chdir(old_cwd)
+
 
 class TestGraphAndLinkResolution(unittest.TestCase):
     def setUp(self):
@@ -228,7 +245,7 @@ class TestGraphAndLinkResolution(unittest.TestCase):
 
         with VaultCache(self.vault) as cache:
             # First scan: populates DB and resolves links
-            ins, upd, deleted, total = cache.scan()
+            ins, _, _, total = cache.scan()
             self.assertEqual(ins, 2)
             self.assertEqual(total, 2)
             conn = cache.get_connection()
@@ -241,6 +258,46 @@ class TestGraphAndLinkResolution(unittest.TestCase):
             self.assertEqual(upd2, 0)
             self.assertEqual(deleted2, 0)
             self.assertEqual(total2, 2)
+
+    def test_rotate_vault_log_duplicate_headers(self):
+        # Configure small rotation threshold
+        self.vault.config["log_rotate_bytes"] = 10
+
+        # Create active log
+        self.vault.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.vault.log_path.write_text("# Activity Ledger (2026)\n\nEntry 1 with extra padding\n", "utf-8")
+
+        # First rotation creates 2026.md
+        rot1 = rotate_vault_log(self.vault)
+        self.assertIsNotNone(rot1)
+        assert rot1 is not None
+        self.assertTrue(rot1.exists())
+        self.assertEqual(rot1.read_text("utf-8").count("# Activity Ledger (2026)"), 1)
+
+        # Append more entries to active log and rotate again into existing 2026.md
+        self.vault.log_path.write_text("# Activity Ledger (2026)\n\nEntry 2 with extra padding\n", "utf-8")
+        rot2 = rotate_vault_log(self.vault)
+        self.assertEqual(rot1, rot2)
+
+        # Rotated file should still only have exactly one top-level title header
+        content = rot2.read_text("utf-8")
+        self.assertEqual(content.count("# Activity Ledger (2026)"), 1)
+        self.assertIn("Entry 1", content)
+        self.assertIn("Entry 2", content)
+
+    def test_vault_cache_search_default_ranking_multipliers(self):
+        # Even with empty config, search applies default ranking multipliers without error
+        note = self.vault.wiki_dir / "concepts" / "SearchTest.md"
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text(
+            "---\ntype: concept\ntitle: Search Test\ndescription: Testing ranking\nstatus: active\n---\n# Search Test\nQuery target.\n",
+            "utf-8",
+        )
+        with VaultCache(self.vault) as cache:
+            results = cache.search("Query")
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].title, "Search Test")
+            self.assertGreater(results[0].score, 0.0)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
-from typing import Sequence
+from collections.abc import Sequence
 
 from cadabby.domain import Note
 from cadabby.fsutil import VaultConflictError

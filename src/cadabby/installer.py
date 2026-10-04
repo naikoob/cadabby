@@ -6,7 +6,6 @@ Conforms strictly to Cadabby Technical Specification §7.6.
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import sys
 from pathlib import Path
@@ -118,7 +117,7 @@ def install_claude(
         if existing_content.strip():
             try:
                 cfg_data = json.loads(existing_content)
-            except Exception as e:
+            except (json.JSONDecodeError, ValueError) as e:
                 return False, f"Failed to parse existing JSON at {dest}: {e}. Aborting."
 
     mcp_servers = cfg_data.setdefault("mcpServers", {})
@@ -159,7 +158,7 @@ def uninstall_claude(
 
     try:
         cfg_data = json.loads(existing_content)
-    except Exception as e:
+    except (json.JSONDecodeError, ValueError) as e:
         return False, f"Failed to parse existing JSON at {dest}: {e}. Aborting."
 
     mcp_servers = cfg_data.get("mcpServers", {})

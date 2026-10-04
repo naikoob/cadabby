@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from cadabby.cache import VaultCache
-from cadabby.graph import get_note_graph, resolve_link_target
+from cadabby.graph import get_note_graph
 from cadabby.vault import Vault
 
 

@@ -5,6 +5,7 @@ Conforms strictly to Cadabby Technical Specification §6.3.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,7 +16,6 @@ from cadabby.constants import (
     DEFAULT_IGNORED_DIRS,
     FILE_AGENTS,
     NOTE_STATUSES,
-    NOTE_TYPES,
     REQUIRED_FRONTMATTER_FIELDS,
 )
 from cadabby.domain import DomainDefinition
@@ -26,7 +26,7 @@ from cadabby.okf import (
     is_valid_timestamp,
 )
 from cadabby.ops import TYPE_TO_DIR
-from cadabby.vault import Vault, cid_to_path, path_to_cid
+from cadabby.vault import Vault, cid_to_path
 
 
 @dataclass
@@ -81,17 +81,16 @@ def _run_vault_lint_impl(vault: Vault, cache: VaultCache) -> list[LintFinding]:
     all_note_files: list[tuple[Path, str, DomainDefinition]] = []
     for domain_name, domain_def in domains.items():
         if domain_def.path.exists():
-            for p in sorted(domain_def.path.rglob("*.md")):
-                if p.is_file() and not p.name.startswith("."):
-                    if p.name == FILE_AGENTS:
-                        continue
-                    if any(part in DEFAULT_IGNORED_DIRS for part in p.parts):
-                        continue
-                    all_note_files.append((p, domain_name, domain_def))
+            for root, dirs, files in os.walk(domain_def.path, topdown=True):
+                dirs[:] = [d for d in dirs if d not in DEFAULT_IGNORED_DIRS and not d.startswith(".")]
+                for f in sorted(files):
+                    if f.endswith(".md") and not f.startswith("."):
+                        if f == FILE_AGENTS:
+                            continue
+                        all_note_files.append((Path(root) / f, domain_name, domain_def))
 
     for file_path, domain_name, domain_def in all_note_files:
         rel_path = vault.rel_path(file_path)
-        cid = path_to_cid(rel_path)
         content = file_path.read_text("utf-8", errors="replace")
 
         # --- GATE 1: Schema Integrity ---

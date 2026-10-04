@@ -5,10 +5,13 @@ Conforms strictly to Cadabby Technical Specification §3.5.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
+from cadabby.constants import DEFAULT_IGNORED_DIRS, FILE_AGENTS
 from cadabby.vault import Vault
 
 
@@ -49,11 +52,21 @@ def run_vault_audit(vault: Vault, require_signed: bool = False) -> tuple[list[Au
     identities: dict[str, list[str]] = vault.config.get("identities", {})
     findings: list[AuditFinding] = []
 
-    wiki_files = sorted(vault.wiki_dir.rglob("*.md")) if vault.wiki_dir.exists() else []
+    all_note_files: list[Path] = []
+    domains = vault.discover_domains()
+    for domain_def in domains.values():
+        if domain_def.path.exists():
+            for root, dirs, files in os.walk(domain_def.path, topdown=True):
+                dirs[:] = [d for d in dirs if d not in DEFAULT_IGNORED_DIRS and not d.startswith(".")]
+                for f in sorted(files):
+                    if f.endswith(".md") and not f.startswith("."):
+                        if f == FILE_AGENTS:
+                            continue
+                        all_note_files.append(Path(root) / f)
 
     re_human_by = re.compile(r"^\s*-\s*by:\s*(human:[A-Za-z0-9._\-/]+)\s*")
 
-    for file_path in wiki_files:
+    for file_path in all_note_files:
         rel_path = vault.rel_path(file_path)
         try:
             lines = file_path.read_text("utf-8").splitlines()

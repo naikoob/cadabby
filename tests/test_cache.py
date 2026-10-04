@@ -29,7 +29,7 @@ class TestVaultCache(unittest.TestCase):
         self.tmp_dir.cleanup()
 
     def test_initial_scan_and_trust_tiers(self):
-        inserted, updated, deleted, total = self.cache.scan()
+        inserted, _, deleted, total = self.cache.scan()
         self.assertEqual(inserted, 7)  # 4 wiki notes + 3 raw files
         self.assertEqual(deleted, 0)
         self.assertEqual(total, 7)
@@ -83,7 +83,7 @@ class TestVaultCache(unittest.TestCase):
         note_path.unlink()
 
         # Next scan must reconcile deletion
-        ins, upd, deleted, total = self.cache.scan()
+        _, _, deleted, _ = self.cache.scan()
         self.assertEqual(deleted, 1)
 
         # Verify term is retracted from FTS

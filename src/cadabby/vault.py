@@ -32,7 +32,7 @@ from cadabby.constants import (
     SCHEMA_VERSION,
 )
 from cadabby.domain import DomainDefinition
-from cadabby.frontmatter import parse_frontmatter
+from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter
 
 
 def find_vault_root(start_path: Path | str | None = None) -> Path | None:
@@ -238,11 +238,12 @@ class Vault:
 
     def rel_path(self, path: Path | str) -> str:
         """Convert an absolute or relative path to a vault-relative path with POSIX separators."""
-        p = Path(path).resolve()
+        path_obj = Path(path)
+        p = path_obj.resolve() if path_obj.is_absolute() else (self.root / path_obj).resolve()
         try:
             return p.relative_to(self.root).as_posix()
         except ValueError:
-            return Path(path).as_posix()
+            return path_obj.as_posix()
 
     def abs_path(self, rel_path: str | Path) -> Path:
         """Resolve a vault-relative path to an absolute Path."""
@@ -304,7 +305,7 @@ class Vault:
         raw_text = agents_md.read_text("utf-8", errors="replace")
         try:
             fm, body = parse_frontmatter(raw_text)
-        except Exception:
+        except (FrontmatterParseError, ValueError):
             fm, body = {}, raw_text
 
         schema_cfg = fm.get("schema", {}) if isinstance(fm.get("schema"), dict) else fm

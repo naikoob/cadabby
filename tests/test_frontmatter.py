@@ -9,12 +9,10 @@ import unittest
 
 from cadabby.frontmatter import (
     FrontmatterParseError,
-    format_scalar,
     parse_frontmatter,
     parse_scalar,
     serialize_frontmatter,
     split_comment,
-    split_frontmatter,
 )
 
 

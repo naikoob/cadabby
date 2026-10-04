@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from cadabby.cli import (
     cmd_ground,
@@ -17,10 +15,8 @@ from cadabby.cli import (
     cmd_search,
     cmd_status,
     cmd_sync,
-    cmd_update,
     cmd_verify,
 )
-from cadabby.vault import Vault
 
 
 class DummyArgs:

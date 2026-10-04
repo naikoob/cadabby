@@ -8,11 +8,11 @@ from __future__ import annotations
 import json
 import re
 import sys
-from typing import Any
+from types import TracebackType
+from typing import Any, Self
 
 from cadabby import __version__
 from cadabby.cache import VaultCache
-from cadabby.constants import NOTE_TYPES
 from cadabby.lint import run_vault_lint
 from cadabby.ops import ground_notes, scaffold_note, update_note, verify_note
 from cadabby.vault import Vault, path_to_cid
@@ -139,10 +139,15 @@ class McpServer:
         if hasattr(self, "cache") and self.cache is not None:
             self.cache.close()
 
-    def __enter__(self) -> McpServer:
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         self.close()
 
     def __del__(self) -> None:
@@ -292,9 +297,9 @@ class McpServer:
                     "isError": True,
                 }
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return {
-                "content": [{"type": "text", "text": f"Error executing {name}: {str(e)}"}],
+                "content": [{"type": "text", "text": f"Error executing {name}: {e!s}"}],
                 "isError": True,
             }
 
@@ -376,13 +381,13 @@ class McpServer:
 def run_mcp_server(vault: Vault) -> int:
     """Run stdio JSON-RPC MCP server loop."""
     with McpServer(vault) as server:
-        # Read lines from stdin
+        # Read lines from stdin using binary buffer for exact byte counts
         while True:
-            line = sys.stdin.readline()
-            if not line:
+            raw_line = sys.stdin.buffer.readline()
+            if not raw_line:
                 break
 
-            line = line.strip()
+            line = raw_line.decode("utf-8", errors="replace").strip()
             if not line:
                 continue
 
@@ -392,12 +397,12 @@ def run_mcp_server(vault: Vault) -> int:
                     length = int(line.split(":", 1)[1].strip())
                     # Read through any remaining header lines until empty line
                     while True:
-                        hdr = sys.stdin.readline()
-                        if hdr in ("\r\n", "\n", ""):
+                        hdr_bytes = sys.stdin.buffer.readline()
+                        if hdr_bytes in (b"\r\n", b"\n", b""):
                             break
-                    payload_str = sys.stdin.read(length)
-                    req = json.loads(payload_str)
-                except Exception:
+                    payload_bytes = sys.stdin.buffer.read(length)
+                    req = json.loads(payload_bytes.decode("utf-8", errors="replace"))
+                except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
                     continue
             else:
                 try:
@@ -416,17 +421,29 @@ def run_mcp_server(vault: Vault) -> int:
             resp: dict[str, Any] = {"jsonrpc": "2.0", "id": req_id}
 
             if method == "initialize":
-                resp["result"] = server.handle_initialize(params)
+                try:
+                    resp["result"] = server.handle_initialize(params)
+                except Exception as e:  # noqa: BLE001
+                    resp["error"] = {"code": -32603, "message": f"Internal error during initialize: {e!s}"}
             elif method == "tools/list":
-                resp["result"] = server.handle_tools_list()
+                try:
+                    resp["result"] = server.handle_tools_list()
+                except Exception as e:  # noqa: BLE001
+                    resp["error"] = {"code": -32603, "message": f"Internal error during tools/list: {e!s}"}
             elif method == "tools/call":
                 tool_name = params.get("name", "")
                 tool_args = params.get("arguments", {})
                 resp["result"] = server.handle_tools_call(tool_name, tool_args)
             elif method == "resources/list":
-                resp["result"] = server.handle_resources_list()
+                try:
+                    resp["result"] = server.handle_resources_list()
+                except Exception as e:  # noqa: BLE001
+                    resp["error"] = {"code": -32603, "message": f"Internal error during resources/list: {e!s}"}
             elif method == "resources/read":
-                resp["result"] = server.handle_resources_read(params.get("uri", ""))
+                try:
+                    resp["result"] = server.handle_resources_read(params.get("uri", ""))
+                except Exception as e:  # noqa: BLE001
+                    resp["error"] = {"code": -32602, "message": f"Resource error: {e!s}"}
             elif method == "ping":
                 resp["result"] = {}
             else:
@@ -435,9 +452,10 @@ def run_mcp_server(vault: Vault) -> int:
                     "message": f"Method not found: {method}",
                 }
 
-            # Send JSON-RPC response
-            out_line = json.dumps(resp)
-            sys.stdout.write(f"Content-Length: {len(out_line)}\r\n\r\n{out_line}")
-            sys.stdout.flush()
+            # Send JSON-RPC response with byte-accurate Content-Length header
+            out_bytes = json.dumps(resp).encode("utf-8")
+            header = f"Content-Length: {len(out_bytes)}\r\n\r\n".encode("ascii")
+            sys.stdout.buffer.write(header + out_bytes)
+            sys.stdout.buffer.flush()
 
     return 0

@@ -11,7 +11,6 @@ import json
 import shutil
 import sys
 from pathlib import Path
-from typing import Any
 
 from cadabby.audit import run_vault_audit
 from cadabby.cache import VaultCache
@@ -20,7 +19,13 @@ from cadabby.fsutil import atomic_write
 from cadabby.graph import get_note_graph, resolve_link_target
 from cadabby.indexer import append_vault_log, rotate_vault_log, sync_vault_index
 from cadabby.lint import run_vault_lint
-from cadabby.ops import TYPE_TO_DIR, ground_notes, scaffold_note, update_note, verify_note
+from cadabby.ops import (
+    TYPE_TO_DIR,
+    ground_notes,
+    scaffold_note,
+    update_note,
+    verify_note,
+)
 from cadabby.vault import Vault
 
 
@@ -619,7 +624,7 @@ def main() -> None:
     args = parser.parse_args()
     try:
         sys.exit(args.func(args))
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 

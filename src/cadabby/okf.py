@@ -57,7 +57,7 @@ def is_actor_human(actor: str) -> bool:
 
 def is_actor_machine(actor: str) -> bool:
     """Return True if actor represents an autonomous agent or automated process."""
-    return actor.startswith("agent:") or actor.startswith("process:")
+    return actor.startswith(("agent:", "process:"))
 
 
 def is_valid_timestamp(ts: Any) -> bool:

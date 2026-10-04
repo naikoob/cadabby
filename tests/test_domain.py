@@ -5,9 +5,14 @@ from __future__ import annotations
 import unittest
 
 from cadabby.adapters.memory_storage import InMemoryLedger, InMemoryNoteStorage
-from cadabby.domain import Note, replace_markdown_section, split_markdown_sections
+from cadabby.domain import Note, split_markdown_sections
 from cadabby.fsutil import VaultConflictError
-from cadabby.ops import GroundNotesUseCase, ScaffoldNoteUseCase, UpdateNoteUseCase, VerifyNoteUseCase
+from cadabby.ops import (
+    GroundNotesUseCase,
+    ScaffoldNoteUseCase,
+    UpdateNoteUseCase,
+    VerifyNoteUseCase,
+)
 
 
 class TestDomainModel(unittest.TestCase):

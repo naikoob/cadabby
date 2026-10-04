@@ -7,8 +7,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from cadabby.adapters.disk_storage import DiskNoteStorage
 from cadabby.frontmatter import parse_frontmatter
-from cadabby.fsutil import VaultConflictError, compute_file_sha256
+from cadabby.fsutil import compute_file_sha256
 from cadabby.ops import ground_notes, scaffold_note, update_note, verify_note
 from cadabby.vault import Vault
 
@@ -39,7 +40,7 @@ class TestOps(unittest.TestCase):
         self.assertTrue(note_path.exists())
         self.assertEqual(note_path.parent.name, "concepts")
 
-        fm, body = parse_frontmatter(note_path.read_text("utf-8"))
+        fm, _ = parse_frontmatter(note_path.read_text("utf-8"))
         self.assertEqual(fm["title"], "Vector Databases")
         self.assertEqual(fm["type"], "concept")
         self.assertEqual(fm["status"], "draft")
@@ -53,6 +54,29 @@ class TestOps(unittest.TestCase):
                 type_="concept",
                 description="Duplicate",
             )
+
+    def test_scaffold_note_path_traversal_rejection(self):
+        # Path with .. traversal must raise ValueError
+        with self.assertRaises(ValueError) as ctx:
+            scaffold_note(
+                vault=self.vault,
+                title="Escape Note",
+                type_="concept",
+                description="Attempt to escape vault",
+                path="../../outside_vault.md",
+            )
+        self.assertIn("Path traversal detected", str(ctx.exception))
+
+        # Absolute path must raise ValueError
+        with self.assertRaises(ValueError) as ctx:
+            scaffold_note(
+                vault=self.vault,
+                title="Root Note",
+                type_="concept",
+                description="Attempt absolute path",
+                path="/tmp/outside.md",
+            )
+        self.assertIn("Path traversal detected", str(ctx.exception))
 
     def test_update_note_sections_and_patch(self):
         cid = "wiki/concepts/Flash-Attention"
@@ -106,6 +130,26 @@ class TestOps(unittest.TestCase):
         self.assertEqual(epistemic["trust_tier"], "human-reviewed")
         self.assertGreater(len(epistemic["links"]), 0)
         self.assertFalse(epistemic["truncated"])
+
+    def test_disk_storage_multi_domain_and_pruning(self):
+        # Add a custom domain 'customers'
+        cust_dir = self.vault_root / "customers"
+        cust_dir.mkdir(parents=True, exist_ok=True)
+        (cust_dir / "Acme.md").write_text(
+            "---\ntitle: Acme Corp\ntype: customer\nstatus: active\n---\n# Acme\n", "utf-8"
+        )
+        # Add ignored folder inside domain
+        ignored_dir = cust_dir / "node_modules"
+        ignored_dir.mkdir(parents=True, exist_ok=True)
+        (ignored_dir / "bad.md").write_text("should be ignored", "utf-8")
+
+        storage = DiskNoteStorage(self.vault)
+        cids = storage.list_note_cids()
+
+        self.assertIn("customers/Acme", cids)
+        self.assertNotIn("customers/node_modules/bad", cids)
+        # Should also contain wiki notes
+        self.assertTrue(any(c.startswith("wiki/") for c in cids))
 
 
 if __name__ == "__main__":

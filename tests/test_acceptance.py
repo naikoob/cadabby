@@ -1,4 +1,4 @@
-"""End-to-end test suite validating all 12 falsifiable acceptance criteria from SPECIFICATION.md §10."""
+"""End-to-end test suite validating all 19 falsifiable acceptance criteria from SPECIFICATION.md §10."""
 
 from __future__ import annotations
 
@@ -14,11 +14,15 @@ from unittest.mock import MagicMock, patch
 from cadabby.audit import run_vault_audit
 from cadabby.cache import VaultCache
 from cadabby.cli import cmd_init, cmd_sync
-from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter, serialize_frontmatter
-from cadabby.fsutil import VaultConflictError, compute_file_sha256
+from cadabby.frontmatter import (
+    FrontmatterParseError,
+    parse_frontmatter,
+    serialize_frontmatter,
+)
+from cadabby.fsutil import VaultConflictError
 from cadabby.lint import run_vault_lint
 from cadabby.mcp import McpServer
-from cadabby.ops import ground_notes, scaffold_note, update_note, verify_note
+from cadabby.ops import scaffold_note, update_note, verify_note
 from cadabby.vault import Vault
 
 
@@ -163,7 +167,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         new_path = vault.wiki_dir / "comparisons" / "SQLite-Versus-DuckDB.md"
         old_path.rename(new_path)
 
-        ins, upd, deleted, total = cache.scan()
+        ins, _, deleted, _ = cache.scan()
         self.assertEqual(deleted, 1)
         self.assertEqual(ins, 1)
 
@@ -408,7 +412,12 @@ class TestAcceptanceCriteria(unittest.TestCase):
         initial_claude = json.dumps({"mcpServers": {"existing": {}}, "custom": 123}, indent=2) + "\n"
         claude_dest.write_text(initial_claude, "utf-8")
 
-        from cadabby.installer import install_antigravity, install_claude, uninstall_antigravity, uninstall_claude
+        from cadabby.installer import (
+            install_antigravity,
+            install_claude,
+            uninstall_antigravity,
+            uninstall_claude,
+        )
 
         # First install
         ok1, _ = install_claude(dest_path=claude_dest)
@@ -454,7 +463,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
                         text = p.read_text("utf-8", errors="ignore")
                         if phrase in text:
                             matching.append(p.relative_to(repo_root))
-                    except Exception:
+                    except (UnicodeDecodeError, OSError):
                         pass
             return matching
 

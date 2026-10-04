@@ -5,7 +5,7 @@ Conforms to Cadabby Technical Specification §2.1, §6.1, §8.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +16,7 @@ from cadabby.vault import Vault
 
 def append_vault_log(vault: Vault, message: str, actor: str | None = None) -> None:
     """Append a timestamped entry to the active log.md ledger."""
-    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_iso = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     prefix = f"[{now_iso}]"
     if actor:
         prefix += f" {actor}:"
@@ -35,7 +35,7 @@ def rotate_vault_log(vault: Vault) -> Path | None:
     if st.st_size < max_bytes:
         return None
 
-    year = datetime.now(timezone.utc).strftime("%Y")
+    year = datetime.now(UTC).strftime("%Y")
     log_dir = vault.log_dir
     log_dir.mkdir(parents=True, exist_ok=True)
     target_rotated = log_dir / f"{year}.md"
@@ -44,7 +44,12 @@ def rotate_vault_log(vault: Vault) -> Path | None:
         # Append existing log content into archive
         content = log_file.read_text("utf-8")
         if target_rotated.exists():
-            append_ledger(target_rotated, content)
+            header_prefix = f"# Activity Ledger ({year})"
+            body_content = content
+            if body_content.startswith(header_prefix):
+                body_content = body_content[len(header_prefix):].lstrip("\r\n")
+            if body_content:
+                append_ledger(target_rotated, body_content)
         else:
             atomic_write(target_rotated, content)
 

@@ -10,8 +10,8 @@ import hashlib
 import os
 import time
 import uuid
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator
 
 
 class VaultConflictError(Exception):

@@ -6,6 +6,6 @@ from cadabby.adapters.memory_storage import InMemoryLedger, InMemoryNoteStorage
 __all__ = [
     "DiskNoteStorage",
     "FileLedger",
-    "InMemoryNoteStorage",
     "InMemoryLedger",
+    "InMemoryNoteStorage",
 ]

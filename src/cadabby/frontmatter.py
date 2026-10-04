@@ -44,9 +44,8 @@ def split_comment(line: str) -> tuple[str, str | None]:
         if ch == '"' and not in_single:
             in_double = not in_double
             continue
-        if ch == "#" and not in_single and not in_double:
-            if i == 0 or line[i - 1].isspace():
-                return line[:i], line[i:]
+        if ch == "#" and not in_single and not in_double and (i == 0 or line[i - 1].isspace()):
+            return line[:i], line[i:]
 
     return line, None
 
@@ -155,7 +154,7 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     Raises:
         FrontmatterParseError on any syntax violation.
     """
-    raw_fm, body, closing_line = split_frontmatter(content)
+    raw_fm, body, _ = split_frontmatter(content)
     if raw_fm is None:
         return {}, content
 
@@ -194,7 +193,7 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
             current_seq_item_map = None
 
             if ":" not in stripped:
-                raise FrontmatterParseError(f"Expected 'key: value' or 'key:' mapping at indent 0", line_idx)
+                raise FrontmatterParseError("Expected 'key: value' or 'key:' mapping at indent 0", line_idx)
 
             k, _, v = stripped.partition(":")
             k = k.strip()
@@ -353,7 +352,7 @@ def serialize_frontmatter(data: dict[str, Any], body: str = "") -> str:
 
     # Sort keys: SCHEMA_KEY_ORDER first, then extra keys alphabetically
     ordered_keys = [k for k in SCHEMA_KEY_ORDER if k in data]
-    extra_keys = sorted(k for k in data.keys() if k not in SCHEMA_KEY_ORDER)
+    extra_keys = sorted(k for k in data if k not in SCHEMA_KEY_ORDER)
     all_keys = ordered_keys + extra_keys
 
     lines: list[str] = ["---"]

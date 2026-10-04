@@ -14,7 +14,6 @@ from pathlib import Path
 from cadabby.cache import VaultCache
 from cadabby.constants import NOTE_TYPES
 from cadabby.domain import DomainDefinition
-from cadabby.graph import LinkTargetIndex
 from cadabby.lint import run_vault_lint
 from cadabby.mcp import McpServer
 from cadabby.ops import ground_notes, scaffold_note, verify_note
@@ -244,7 +243,7 @@ Apollo specific architecture design.
         (ignored_dir / "README.md").write_text("# Ignored", encoding="utf-8")
 
         cache = VaultCache(self.vault)
-        inserted, updated, deleted, total = cache.scan()
+        _, _, _, total = cache.scan()
 
         # Should index 3 notes: wiki, customers, projects.
         # Should NOT index AGENTS.md, node_modules/README.md
@@ -421,7 +420,7 @@ status: evergreen
         codes = [f.code for f in cust_findings]
         self.assertIn("ENUM_INVALID", codes)
 
-        enum_err = [f for f in cust_findings if f.code == "ENUM_INVALID"][0]
+        enum_err = next(f for f in cust_findings if f.code == "ENUM_INVALID")
         self.assertIn("stranger", enum_err.message)
         self.assertEqual(enum_err.rel_path, "customers/acme/Unknown.md")
 
@@ -805,7 +804,7 @@ Architectural decisions must link to canonical concepts.
 
         # 5. Cache Scan & FTS Search
         with VaultCache(self.vault) as cache:
-            ins, upd, deleted, total = cache.scan()
+            _, _, _, total = cache.scan()
             self.assertEqual(total, 4)  # 3 notes + 1 raw
 
             # Check status breakdown

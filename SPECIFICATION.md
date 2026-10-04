@@ -1,6 +1,6 @@
 # Cadabby: Technical Specification
 
-**Version:** 0.3.0-draft  
+**Version:** 0.3.0  
 **Status:** Approved Architecture (Multi-Domain Extended)  
 **Author:** Pair programmed with Antigravity  
 **Target Runtime:** CPython >= 3.11, standard library only
@@ -131,7 +131,7 @@ my-vault/
 | **`AGENTS.md`** | Human / Agent | **Collaborative** | The global normative constitution for all AI agents working on this vault. |
 | **`{domain}/AGENTS.md`** | Human / Domain Lead | **Normative** | Domain manifest (YAML schema constraints) and localized markdown agent directives injected during grounding (§2.2). |
 | **`.agents/skills/`** | Human / Agent | **Collaborative** | Canonical persona runbooks. The only place persona behavior is defined (§7.1). |
-| **`CLAUDE.md`**, **`GEMINI.md`** | Engine | **Write-once** | Thin non-normative pointers to `AGENTS.md`. Written by `init`, never rewritten (§7.3). |
+| **`CLAUDE.md`**, **`GEMINI.md`** | Engine | **Write-once** | Thin non-normative pointers to `AGENTS.md`. Written by `init`, left untouched unless `--force` is specified (§7.3). |
 
 In `wiki/`, the `type` frontmatter field (§3.1) and subdirectory are **required to agree**: a note of `type: comparison` lives in `wiki/comparisons/`. In custom cognitive domains, layout is flexible by default (§2.2).
 
@@ -170,7 +170,7 @@ All customer profiles must maintain enterprise confidentiality.
 
 #### Fallback Behavior
 * **Unconfigured Domains**: A top-level directory lacking `AGENTS.md` is discovered as a permissive cognitive domain (`allowed_types: None`, `enforce_layout: false`, `require_sources: false`, `searchable: true`, empty directives).
-* **Canonical `wiki/` Domain**: If `wiki/AGENTS.md` is not present, `wiki/` automatically defaults to canonical governance: 5 types (`concept`, `entity`, `comparison`, `topic`/`synthesis`, `index`/`guide`), `enforce_layout: true`, `require_sources: false`, `searchable: true`.
+* **Canonical `wiki/` Domain**: If `wiki/AGENTS.md` is not present, `wiki/` automatically defaults to canonical governance: 5 canonical types (`concept`, `entity`, `comparison`, `synthesis`, `guide`), `enforce_layout: true`, `require_sources: false`, `searchable: true`.
 
 ### 2.3. Generalized Content Identifiers (CIDs)
 
@@ -180,9 +180,9 @@ Cadabby uses canonical CIDs to uniquely reference notes across all cognitive dom
   - `wiki/concepts/Epistemic-Trust-Tiers.md` $\rightarrow$ `wiki/concepts/Epistemic-Trust-Tiers`
   - `customers/acme-corp/README.md` $\rightarrow$ `customers/acme-corp/README`
   - `projects/apollo/rfc-001.md` $\rightarrow$ `projects/apollo/rfc-001`
-* **Raw Sources & Ledgers**: Retain their filename and extension verbatim.
+* **Raw Sources**: Retain their filename and extension verbatim.
   - `raw/2026-paper-kv.pdf` $\rightarrow$ `raw/2026-paper-kv.pdf`
-  - `log/2025.md` $\rightarrow$ `log/2025.md`
+  - `raw/karpathy-llm-wiki-gist.md` $\rightarrow$ `raw/karpathy-llm-wiki-gist.md`
 
 ### 2.4. Raw Source Semantics
 
@@ -259,7 +259,7 @@ generated:
 
 **Required**: `type`, `title`, `description`, `status`. **Optional**: `tags`, `sources`, `verified`, `generated`. Timestamps are RFC 3339 UTC with a `Z` suffix and must be single-quoted (an unquoted YAML timestamp is a typed scalar in full YAML, and the subset avoids implicit typing entirely).
 
-* **Type Validation**: In `wiki/`, `type` must strictly be one of the five canonical types (`concept`, `entity`, `comparison`, `synthesis`/`topic`, `guide`/`index`). In custom cognitive domains, `type` must match one of the entries in the domain's declared `allowed_types` (§2.2); if the domain defines no `allowed_types`, any non-empty string scalar is accepted.
+* **Type Validation**: In `wiki/`, `type` must strictly be one of the five canonical types (`concept`, `entity`, `comparison`, `synthesis`, `guide`). In custom cognitive domains, `type` must match one of the entries in the domain's declared `allowed_types` (§2.2); if the domain defines no `allowed_types`, any non-empty string scalar is accepted.
 * **Sources Requirement**: `sources` is optional by default, but is **required** whenever the note's enclosing cognitive domain specifies `require_sources: true` in `{domain}/AGENTS.md`.
 
 **Deliberately omitted: `updated: {by, at}`.** The only epistemic question modification tracking needs to answer is "has this drifted since it was reviewed?", and `body_hash` vs. `of:` (§3.4) answers it from content rather than from a clock — immune to skew, out-of-order writes, and an agent forgetting to bump a field. Last-writer attribution is recorded losslessly by `log.md` and by Git, whereas a single overwritten slot would be lossy and self-reported. Note that `git clone` resets mtime to checkout time while preserving `git log`; conversely zip, Dropbox, Syncthing, and rsync preserve mtime but carry no history — so every realistic distribution path retains at least one of the two. Revisit only if a recency multiplier is added to ranking (§4.4), and even then prefer backfilling the timestamp from `git log` into the disposable cache over putting it in-band.
@@ -613,7 +613,7 @@ plugins/cadabby/
 
 **Capabilities.** The `cadabby-wiki` skill injects high-level wiki operations into context without consuming prompt tokens up front. The root agent delegates reading, drafting, and cross-linking to **librarian**, and cache maintenance, diagnostics, and linting to **technician**. Slash commands `/ingest`, `/vault-status`, and `/vault-lint` are available in the chat UI.
 
-> **Unverified against upstream.** The manifest filenames and schema above are a working assumption. They must be validated against current Antigravity plugin documentation before Phase 5 begins; discovering the layout is wrong after the plugin is built is the expensive failure. This is an explicit gate in §10, not a detail to resolve during implementation.
+> **Verified Architecture (v0.3.0).** The manifest layout conforms to the single-definition invariant (§7.1): entry-point progressive disclosure skill at `skills/cadabby-wiki/SKILL.md` and thin subagent manifests in `agents/` delegating runbook execution directly to `.agents/skills/<persona>/SKILL.md` in the active vault.
 
 ### 7.3. Claude Code Integration
 
@@ -650,7 +650,7 @@ Follow the librarian runbook at `.agents/skills/librarian/SKILL.md`,
 then run the ingestion workflow for: $ARGUMENTS
 ```
 
-Behavior lives in `.agents/skills/` and `AGENTS.md`, both of which are vault content the user can update by pulling. `cadabby install --claude --refresh` re-copies the shims for anyone who wants them current, but a stale shim is harmless by construction.
+Behavior lives in `.agents/skills/` and `AGENTS.md`, both of which are vault content the user can update by pulling. Running `cadabby init --force` re-copies the shims for anyone who wants them refreshed, but a stale shim is harmless by construction.
 
 ### 7.5. Obsidian Configuration (optional)
 

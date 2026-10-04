@@ -6,16 +6,19 @@ Conforms strictly to Cadabby Technical Specification §4.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from cadabby.constants import (
     DEFAULT_IGNORED_DIRS,
     DEFAULT_RAW_TEXT_EXTENSIONS,
+    DEFAULT_STATUS_MULTIPLIERS,
+    DEFAULT_TRUST_MULTIPLIERS,
     FILE_AGENTS,
     FTS_COLUMN_WEIGHTS,
     SCHEMA_VERSION,
@@ -218,7 +221,7 @@ class VaultCache:
         conn = self.get_connection()
         cid = path_to_cid(rel_path)
         stem = path_to_stem(rel_path)
-        indexed_at = datetime.now(timezone.utc).isoformat()
+        indexed_at = datetime.now(UTC).isoformat()
         tags_str = " ".join(str(t) for t in (tags or []))
 
         # Check existing row
@@ -374,24 +377,28 @@ class VaultCache:
 
         # 1. Raw evidence directory
         if self.vault.raw_dir.exists():
-            for p in self.vault.raw_dir.rglob("*"):
-                if p.is_file() and not p.name.startswith("."):
-                    if not any(part in DEFAULT_IGNORED_DIRS for part in p.parts):
-                        rel = self.vault.rel_path(p)
-                        disk_files[rel] = p
+            for root, dirs, files in os.walk(self.vault.raw_dir, topdown=True):
+                dirs[:] = [d for d in dirs if d not in DEFAULT_IGNORED_DIRS and not d.startswith(".")]
+                for f in files:
+                    if not f.startswith("."):
+                        p = Path(root) / f
+                        if not any(part in DEFAULT_IGNORED_DIRS for part in p.parts):
+                            rel = self.vault.rel_path(p)
+                            disk_files[rel] = p
 
         # 2. Cognitive domains (wiki, customers, projects, etc.)
         domains = self.vault.discover_domains()
-        for domain_name, domain_def in domains.items():
+        for domain_def in domains.values():
             if domain_def.path.exists():
-                for p in domain_def.path.rglob("*"):
-                    if p.is_file() and not p.name.startswith("."):
-                        if p.name == FILE_AGENTS:
-                            continue
-                        if any(part in DEFAULT_IGNORED_DIRS for part in p.parts):
-                            continue
-                        rel = self.vault.rel_path(p)
-                        disk_files[rel] = p
+                for root, dirs, files in os.walk(domain_def.path, topdown=True):
+                    dirs[:] = [d for d in dirs if d not in DEFAULT_IGNORED_DIRS and not d.startswith(".")]
+                    for f in files:
+                        if not f.startswith("."):
+                            if f == FILE_AGENTS:
+                                continue
+                            p = Path(root) / f
+                            rel = self.vault.rel_path(p)
+                            disk_files[rel] = p
 
         # 1. Deletion reconciliation: find notes in DB missing from disk
         cur = conn.execute("SELECT rel_path FROM notes;")
@@ -536,13 +543,19 @@ class VaultCache:
             else:
                 updated_count += 1
 
-        # 3. Resolve all link targets if vault structure changed
+        # 3. Resolve link targets if vault structure changed or new/updated links exist
         if inserted_count > 0 or updated_count > 0 or deleted_count > 0 or force:
             cur = conn.execute("SELECT cid FROM notes WHERE layer != 'raw' AND parse_error IS NULL;")
             all_cids = [row["cid"] for row in cur.fetchall()]
             resolver = LinkTargetIndex(all_cids)
 
-            cur = conn.execute("SELECT id, target_raw FROM links;")
+            # If note topology changed (inserted/deleted/force), re-resolve all links.
+            # If only existing notes were updated, only resolve the newly inserted unresolved links.
+            if inserted_count > 0 or deleted_count > 0 or force:
+                cur = conn.execute("SELECT id, target_raw FROM links;")
+            else:
+                cur = conn.execute("SELECT id, target_raw FROM links WHERE target_cid IS NULL;")
+
             link_updates = []
             for link_row in cur.fetchall():
                 link_id = link_row["id"]
@@ -575,9 +588,10 @@ class VaultCache:
         self.scan()
         conn = self.get_connection()
 
-        # Build dynamic multipliers CASE statements from config
-        trust_cfg = self.vault.config.get("ranking", {}).get("trust", {})
-        status_cfg = self.vault.config.get("ranking", {}).get("status", {})
+        # Build dynamic multipliers CASE statements from config with fallback to defaults
+        ranking_cfg = self.vault.config.get("ranking", {})
+        trust_cfg = ranking_cfg.get("trust") if isinstance(ranking_cfg.get("trust"), dict) else DEFAULT_TRUST_MULTIPLIERS
+        status_cfg = ranking_cfg.get("status") if isinstance(ranking_cfg.get("status"), dict) else DEFAULT_STATUS_MULTIPLIERS
 
         trust_cases = " ".join(f"WHEN '{k}' THEN {float(v)}" for k, v in trust_cfg.items())
         status_cases = " ".join(f"WHEN '{k}' THEN {float(v)}" for k, v in status_cfg.items())
@@ -722,11 +736,11 @@ class VaultCache:
         if self._conn is not None:
             try:
                 self._conn.close()
-            except Exception:
+            except (sqlite3.Error, OSError):
                 pass
             self._conn = None
 
-    def __enter__(self) -> VaultCache:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:

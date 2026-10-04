@@ -7,9 +7,10 @@ Implements the Driving Use Cases layer in Hexagonal Architecture.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from cadabby.adapters.disk_storage import DiskNoteStorage, FileLedger
 from cadabby.cache import VaultCache
@@ -65,7 +66,13 @@ class ScaffoldNoteUseCase:
             raise ValueError("Note type must be a non-empty string")
 
         if path:
-            clean_path = str(path).replace("\\", "/").strip("/")
+            raw_path = str(path).replace("\\", "/")
+            if raw_path.startswith("/") or Path(path).is_absolute():
+                raise ValueError(f"Path traversal detected in '{path}': absolute paths are forbidden")
+            clean_path = raw_path.strip("/")
+            parts = [p for p in clean_path.split("/") if p]
+            if any(p == ".." for p in parts):
+                raise ValueError(f"Path traversal detected in '{path}': must not contain '..'")
             rel_path = clean_path if clean_path.endswith(".md") else f"{clean_path}.md"
             cid = path_to_cid(rel_path)
             target_domain = path_to_layer(rel_path)
@@ -88,18 +95,17 @@ class ScaffoldNoteUseCase:
         if self.vault is not None:
             domains = self.vault.discover_domains()
             domain_def = domains.get(target_domain)
-            if domain_def and domain_def.allowed_types is not None:
-                if type_ not in domain_def.allowed_types:
-                    raise ValueError(
-                        f"Invalid note type '{type_}'. In domain '{target_domain}', allowed types are {domain_def.allowed_types}"
-                    )
+            if domain_def and domain_def.allowed_types is not None and type_ not in domain_def.allowed_types:
+                raise ValueError(
+                    f"Invalid note type '{type_}'. In domain '{target_domain}', allowed types are {domain_def.allowed_types}"
+                )
         elif target_domain == "wiki" and type_ not in NOTE_TYPES:
             raise ValueError(f"Invalid note type '{type_}'. Must be one of {NOTE_TYPES}")
 
         if self.storage.note_exists(cid):
             raise FileExistsError(f"Note already exists at {rel_path}")
 
-        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        now_iso = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         fm_data = {
             "type": type_,

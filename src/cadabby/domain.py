@@ -7,7 +7,7 @@ Free from filesystem I/O, SQLite dependencies, and network protocols.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +37,7 @@ def split_markdown_sections(body: str) -> list[tuple[str, str]]:
         stripped = line.strip()
         # Check code fence start/end
         if not in_fence:
-            if stripped.startswith("```") or stripped.startswith("~~~"):
+            if stripped.startswith(("```", "~~~")):
                 f_char = stripped[0]
                 f_len = len(stripped) - len(stripped.lstrip(f_char))
                 if f_len >= 3:
@@ -182,7 +182,7 @@ class Note:
             if isinstance(entry, dict) and entry.get("by") == actor and entry.get("of") == current_hash:
                 return (entry, self.trust_tier, True)
 
-        now_str = at_iso or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        now_str = at_iso or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         attestation = {
             "by": actor,
             "at": now_str,
