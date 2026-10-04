@@ -1,2 +1,28 @@
+# Cadabby transient index and cache
 .cadabby/
+
+# Obsidian session states
 .obsidian/workspace*.json
+
+# Operating Systems
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+# IDEs and Editors
+.vscode/
+*.code-workspace
+.idea/
+*.swp
+*.swo
+
