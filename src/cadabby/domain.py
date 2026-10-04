@@ -15,6 +15,77 @@ from cadabby.frontmatter import parse_frontmatter, serialize_frontmatter
 from cadabby.okf import compute_body_hash, derive_trust_tier, is_valid_actor
 
 
+def split_markdown_sections(body: str) -> list[tuple[str, str]]:
+    """Split markdown body into sections delineated by top-level headings (## ),
+    strictly ignoring any heading lines inside fenced code blocks (``` or ~~~).
+
+    Returns:
+        List of (heading, full_section_text) tuples.
+        The preamble before the first ## heading has heading="".
+    """
+    lines = body.splitlines(keepends=True)
+    sections: list[tuple[str, str]] = []
+
+    current_heading = ""
+    current_lines: list[str] = []
+
+    in_fence = False
+    fence_char = ""
+    fence_len = 0
+
+    for line in lines:
+        stripped = line.strip()
+        # Check code fence start/end
+        if not in_fence:
+            if stripped.startswith("```") or stripped.startswith("~~~"):
+                f_char = stripped[0]
+                f_len = len(stripped) - len(stripped.lstrip(f_char))
+                if f_len >= 3:
+                    in_fence = True
+                    fence_char = f_char
+                    fence_len = f_len
+        else:
+            if stripped.startswith(fence_char * fence_len):
+                in_fence = False
+                fence_char = ""
+                fence_len = 0
+
+        # Heading detection outside code blocks
+        if not in_fence and line.startswith("## "):
+            if current_lines or current_heading:
+                sections.append((current_heading, "".join(current_lines)))
+                current_lines = []
+            current_heading = line[3:].strip()
+            current_lines.append(line)
+        else:
+            current_lines.append(line)
+
+    if current_lines or current_heading:
+        sections.append((current_heading, "".join(current_lines)))
+
+    return sections
+
+
+def replace_markdown_section(body: str, heading: str, new_content: str) -> str:
+    """Replace an existing ## heading section or append if not present, code-fence safe."""
+    sections = split_markdown_sections(body)
+    found = False
+    new_section_text = f"## {heading}\n\n{new_content.strip()}\n\n"
+
+    new_sections = []
+    for h, content in sections:
+        if h == heading and not found:
+            new_sections.append(new_section_text)
+            found = True
+        else:
+            new_sections.append(content)
+
+    if not found:
+        return body.rstrip() + f"\n\n## {heading}\n\n{new_content.strip()}\n"
+
+    return "".join(new_sections)
+
+
 @dataclass
 class Note:
     """Core domain aggregate representing a typed knowledge note."""
@@ -79,13 +150,8 @@ class Note:
                 self.frontmatter[k] = v
 
     def replace_section(self, heading: str, content: str) -> None:
-        """Replace section under ## heading or append if not present."""
-        pattern = rf"(^##\s+{re.escape(heading)}\s*$\n?)([\s\S]*?)(?=^##\s|\Z)"
-        replacement = f"## {heading}\n\n{content.strip()}\n\n"
-        if re.search(pattern, self.body, flags=re.MULTILINE):
-            self.body = re.sub(pattern, replacement, self.body, flags=re.MULTILINE)
-        else:
-            self.body = self.body.rstrip() + f"\n\n## {heading}\n\n{content.strip()}\n"
+        """Replace section under ## heading or append if not present (code-fence safe)."""
+        self.body = replace_markdown_section(self.body, heading, content)
 
     def append_section(self, heading: str, content: str) -> None:
         """Append a section under ## heading to the end of the body."""

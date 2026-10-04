@@ -105,9 +105,9 @@ def cmd_init(args: argparse.Namespace) -> int:
 def cmd_sync(args: argparse.Namespace) -> int:
     """Run incremental cache scan and catalog sync."""
     vault = Vault(args.vault)
-    cache = VaultCache(vault)
-    ins, upd, deleted, total = cache.scan(force=args.force)
-    sync_vault_index(vault)
+    with VaultCache(vault) as cache:
+        ins, upd, deleted, total = cache.scan(force=args.force)
+        sync_vault_index(vault, cache=cache)
 
     print(f"Vault sync complete: {total} total tracked ({ins} inserted, {upd} updated, {deleted} deleted).")
     return 0

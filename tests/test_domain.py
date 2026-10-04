@@ -5,9 +5,9 @@ from __future__ import annotations
 import unittest
 
 from cadabby.adapters.memory_storage import InMemoryLedger, InMemoryNoteStorage
-from cadabby.domain import Note
+from cadabby.domain import Note, replace_markdown_section, split_markdown_sections
 from cadabby.fsutil import VaultConflictError
-from cadabby.ops import ScaffoldNoteUseCase, UpdateNoteUseCase, VerifyNoteUseCase
+from cadabby.ops import GroundNotesUseCase, ScaffoldNoteUseCase, UpdateNoteUseCase, VerifyNoteUseCase
 
 
 class TestDomainModel(unittest.TestCase):
@@ -59,6 +59,36 @@ class TestDomainModel(unittest.TestCase):
         # Append new section
         note.append_section("Section C", "C content")
         self.assertTrue(note.body.endswith("## Section C\n\nC content\n"))
+
+    def test_section_replace_with_code_fence(self):
+        body = (
+            "# Main Title\n\n"
+            "## Code Example\n\n"
+            "```markdown\n"
+            "## Section Inside Code Block Should Not Match\n"
+            "```\n\n"
+            "## Real Section\n\n"
+            "Old real content\n"
+        )
+        note = Note(cid="wiki/concepts/Code", rel_path="wiki/concepts/Code.md", frontmatter={"type": "concept"}, body=body)
+
+        # Replacing real section should leave the code block intact
+        note.replace_section("Real Section", "New real content")
+        self.assertIn("```markdown\n## Section Inside Code Block Should Not Match\n```", note.body)
+        self.assertIn("## Real Section\n\nNew real content", note.body)
+        self.assertNotIn("Old real content", note.body)
+
+        # Attempting to replace a heading that only exists inside a code block appends as a new section
+        note.replace_section("Section Inside Code Block Should Not Match", "Appended content")
+        self.assertTrue(note.body.endswith("## Section Inside Code Block Should Not Match\n\nAppended content\n"))
+
+    def test_split_markdown_sections(self):
+        text = "# Preamble\n\nText\n\n## Section 1\nContent 1\n\n## Section 2\nContent 2\n"
+        sections = split_markdown_sections(text)
+        self.assertEqual(len(sections), 3)
+        self.assertEqual(sections[0][0], "")
+        self.assertEqual(sections[1][0], "Section 1")
+        self.assertEqual(sections[2][0], "Section 2")
 
     def test_frontmatter_patching(self):
         note = Note(cid="wiki/concepts/Demo", rel_path="wiki/concepts/Demo.md", frontmatter={"status": "draft", "remove_me": 123}, body="body")
@@ -148,6 +178,37 @@ class TestInMemoryHexagonalUseCases(unittest.TestCase):
         persisted = self.storage.get_note("wiki/concepts/Fast-Attention")
         self.assertIsNotNone(persisted)
         self.assertEqual(persisted.trust_tier, "machine-confirmed")
+
+    def test_ground_notes_pure_in_memory(self):
+        # Scaffold a note in memory
+        scaffold_uc = ScaffoldNoteUseCase(self.storage, self.ledger)
+        scaffold_uc.execute(
+            title="Transformer Architecture",
+            type_="concept",
+            description="Attention is all you need",
+            tags=["nlp", "ai"],
+            sources=["raw/vaswani2017.pdf"],
+            body="# Transformer Architecture\n\nSelf-attention mechanisms.\n\n## Section 1\nDetails 1\n\n## Section 2\nDetails 2\n",
+            actor="agent:scaffold-bot",
+        )
+
+        ground_uc = GroundNotesUseCase(self.storage, cache=None)
+        grounded = ground_uc.execute(["wiki/concepts/Transformer-Architecture"])
+
+        self.assertEqual(len(grounded), 1)
+        res = grounded[0]
+        self.assertEqual(res["cid"], "wiki/concepts/Transformer-Architecture")
+        self.assertEqual(res["title"], "Transformer Architecture")
+        self.assertEqual(res["type"], "concept")
+        self.assertEqual(res["trust_tier"], "unverified")
+        self.assertFalse(res["truncated"])
+        self.assertIn("Self-attention mechanisms", res["content"])
+
+        # Test budget truncation in memory
+        grounded_budget = ground_uc.execute(["wiki/concepts/Transformer-Architecture"], budget_tokens=20)
+        self.assertEqual(len(grounded_budget), 1)
+        self.assertTrue(grounded_budget[0]["truncated"])
+        self.assertIn("[truncated:", grounded_budget[0]["content"])
 
 
 if __name__ == "__main__":

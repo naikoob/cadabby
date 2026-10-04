@@ -14,10 +14,10 @@ from typing import Any, Sequence
 from cadabby.adapters.disk_storage import DiskNoteStorage, FileLedger
 from cadabby.cache import VaultCache
 from cadabby.constants import NOTE_TYPES
-from cadabby.domain import Note, VerificationResult
+from cadabby.domain import Note, VerificationResult, split_markdown_sections
 from cadabby.frontmatter import parse_frontmatter, serialize_frontmatter
 from cadabby.okf import compute_body_hash, derive_trust_tier, is_valid_actor
-from cadabby.ports import LedgerPort, NoteStoragePort
+from cadabby.ports import IndexCachePort, LedgerPort, NoteStoragePort
 from cadabby.vault import Vault, cid_to_path, path_to_cid
 
 TYPE_TO_DIR = {
@@ -175,91 +175,102 @@ class VerifyNoteUseCase:
 class GroundNotesUseCase:
     """Driving use case for retrieving notes and 1-hop graph neighborhood with token budgeting (§8.3)."""
 
-    def __init__(self, vault: Vault, cache: VaultCache | None = None):
-        self.vault = vault
-        self.cache = cache or VaultCache(vault)
+    def __init__(
+        self,
+        vault_or_storage: Vault | NoteStoragePort,
+        cache: IndexCachePort | VaultCache | None = None,
+        storage: NoteStoragePort | None = None,
+        vault: Vault | None = None,
+    ):
+        if isinstance(vault_or_storage, Vault):
+            self.vault = vault_or_storage
+            self.storage = storage or DiskNoteStorage(vault_or_storage)
+            self.cache = cache or VaultCache(vault_or_storage)
+        else:
+            self.storage = vault_or_storage
+            self.cache = cache
+            self.vault = vault
 
     def execute(
         self,
         cids: Sequence[str],
         budget_tokens: int | None = None,
     ) -> list[dict[str, Any]]:
-        self.cache.scan()
-        conn = self.cache.get_connection()
+        if self.cache is not None:
+            self.cache.scan()
+            conn = self.cache.get_connection()
+        else:
+            conn = None
 
         grounded = []
 
         for raw_cid in cids:
             cid = path_to_cid(raw_cid)
-            rel_path = cid_to_path(cid)
-            abs_path = self.vault.abs_path(rel_path)
-
-            if not abs_path.exists():
+            note = self.storage.get_note(cid)
+            if note is None:
                 continue
 
-            text = abs_path.read_text("utf-8", errors="replace")
-            fm, body = parse_frontmatter(text)
+            links: list[dict[str, Any]] = []
+            backlinks: list[dict[str, Any]] = []
+            sources: list[dict[str, Any]] = []
 
-            # 1-hop forward links
-            cur = conn.execute(
-                "SELECT target_raw, target_cid FROM links WHERE source_cid = ?;",
-                (cid,),
-            )
-            links = [{"target": r["target_raw"], "resolved_cid": r["target_cid"]} for r in cur.fetchall()]
+            if conn is not None:
+                # 1-hop forward links
+                cur = conn.execute(
+                    "SELECT target_raw, target_cid FROM links WHERE source_cid = ?;",
+                    (cid,),
+                )
+                links = [{"target": r["target_raw"], "resolved_cid": r["target_cid"]} for r in cur.fetchall()]
 
-            # 1-hop backlinks
-            cur = conn.execute(
-                "SELECT source_cid, target_raw FROM links WHERE target_cid = ?;",
-                (cid,),
-            )
-            backlinks = [{"source_cid": r["source_cid"], "target_raw": r["target_raw"]} for r in cur.fetchall()]
+                # 1-hop backlinks
+                cur = conn.execute(
+                    "SELECT source_cid, target_raw FROM links WHERE target_cid = ?;",
+                    (cid,),
+                )
+                backlinks = [{"source_cid": r["source_cid"], "target_raw": r["target_raw"]} for r in cur.fetchall()]
 
-            # Sources
-            cur = conn.execute(
-                "SELECT raw_path, resolved FROM sources WHERE source_cid = ?;",
-                (cid,),
-            )
-            sources = [{"path": r["raw_path"], "exists": bool(r["resolved"])} for r in cur.fetchall()]
+                # Sources
+                cur = conn.execute(
+                    "SELECT raw_path, resolved FROM sources WHERE source_cid = ?;",
+                    (cid,),
+                )
+                sources = [{"path": r["raw_path"], "exists": bool(r["resolved"])} for r in cur.fetchall()]
 
-            # Budget calculation
+            # Budget calculation using code-fence aware section splitting
+            full_text = note.serialize()
             truncated = False
-            content_to_return = text
+            content_to_return = full_text
 
             if budget_tokens is not None and budget_tokens > 0:
                 char_budget = budget_tokens * 4
-                if len(text) > char_budget:
-                    sections = re.split(r"(^##\s+)", body, flags=re.MULTILINE)
-                    # Reconstruct sections respecting budget
-                    accumulated = [sections[0]] if sections else [""]
-                    current_len = len(text) - len(body) + len(accumulated[0])
+                if len(full_text) > char_budget:
+                    sections = split_markdown_sections(note.body)
+                    preamble = sections[0][1] if sections else ""
+                    accumulated = [preamble]
+                    current_len = len(full_text) - len(note.body) + len(preamble)
 
-                    total_sections = max(1, len(sections) // 2)
-                    included_sections = 0
+                    total_sections = max(1, len(sections))
+                    included_sections = 1 if preamble else 0
 
-                    i = 1
-                    while i < len(sections):
-                        sec_header = sections[i]
-                        sec_body = sections[i + 1] if i + 1 < len(sections) else ""
-                        sec_full = sec_header + sec_body
-                        if current_len + len(sec_full) > char_budget:
+                    for _, sec_text in sections[1:]:
+                        if current_len + len(sec_text) > char_budget:
                             break
-                        accumulated.append(sec_full)
-                        current_len += len(sec_full)
+                        accumulated.append(sec_text)
+                        current_len += len(sec_text)
                         included_sections += 1
-                        i += 2
 
                     truncated_body = "".join(accumulated).rstrip()
                     marker = f"\n\n> [truncated: {included_sections} of {total_sections} sections included]\n"
-                    content_to_return = serialize_frontmatter(fm, truncated_body + marker)
+                    content_to_return = serialize_frontmatter(note.frontmatter, truncated_body + marker)
                     truncated = True
 
             grounded.append(
                 {
                     "cid": cid,
-                    "title": fm.get("title", abs_path.stem),
-                    "type": fm.get("type", "unknown"),
-                    "status": fm.get("status", "unknown"),
-                    "trust_tier": derive_trust_tier(fm.get("verified"), compute_body_hash(body)),
+                    "title": note.title or Path(note.rel_path).stem,
+                    "type": note.type,
+                    "status": note.status,
+                    "trust_tier": note.trust_tier,
                     "content": content_to_return,
                     "links": links,
                     "backlinks": backlinks,
@@ -363,7 +374,10 @@ def ground_notes(
     cids: Sequence[str],
     budget_tokens: int | None = None,
     cache: VaultCache | None = None,
+    storage: NoteStoragePort | None = None,
 ) -> list[dict[str, Any]]:
     """Retrieve full content and 1-hop graph neighborhood for the specified CIDs."""
-    uc = GroundNotesUseCase(vault, cache=cache)
+    active_storage = storage or DiskNoteStorage(vault)
+    active_cache = cache or VaultCache(vault)
+    uc = GroundNotesUseCase(vault_or_storage=active_storage, cache=active_cache, vault=vault)
     return uc.execute(cids=cids, budget_tokens=budget_tokens)

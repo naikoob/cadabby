@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from cadabby.constants import DIR_LOG, DIR_WIKI, NOTE_TYPES
 from cadabby.fsutil import advisory_lock, append_ledger, atomic_write
@@ -55,88 +56,93 @@ def rotate_vault_log(vault: Vault) -> Path | None:
     return target_rotated
 
 
-def generate_index_markdown(vault: Vault) -> str:
+def _build_index_lines_from_conn(vault: Vault, conn: Any) -> str:
+    lines = [
+        f"# {vault.config.get('vault_name', 'Wiki')} Catalog",
+        "",
+        "> Auto-generated catalog linking compiled wiki knowledge and raw ground truth sources.",
+        "",
+    ]
+
+    # 1. Wiki notes grouped by type
+    type_plural_map = {
+        "entity": "Entities",
+        "concept": "Concepts",
+        "synthesis": "Syntheses",
+        "comparison": "Comparisons",
+        "guide": "Guides",
+    }
+
+    for n_type in NOTE_TYPES:
+        heading = type_plural_map.get(n_type, n_type.capitalize())
+        cur = conn.execute(
+            """
+            SELECT cid, stem, title, description, trust_tier, status
+            FROM notes
+            WHERE layer = 'wiki' AND type = ? AND parse_error IS NULL
+            ORDER BY stem ASC;
+            """,
+            (n_type,),
+        )
+        rows = cur.fetchall()
+        if rows:
+            lines.append(f"## {heading}")
+            lines.append("")
+            lines.append("| Note | Description | Trust | Status |")
+            lines.append("| :--- | :--- | :--- | :--- |")
+            for r in rows:
+                desc = (r["description"] or "").replace("|", "\\|")
+                tier = r["trust_tier"] or "unverified"
+                status = r["status"] or "active"
+                lines.append(f"| [[{r['stem']}]] | {desc} | `{tier}` | `{status}` |")
+            lines.append("")
+
+    # 2. Raw sources tracking
+    cur = conn.execute(
+        """
+        SELECT r.rel_path, r.stem,
+               (SELECT COUNT(*) FROM sources s WHERE s.raw_path = r.rel_path) AS citation_count
+        FROM notes r
+        WHERE r.layer = 'raw'
+        ORDER BY r.rel_path ASC;
+        """
+    )
+    raw_rows = cur.fetchall()
+    if raw_rows:
+        lines.append("## Raw Sources")
+        lines.append("")
+        lines.append("| Source File | Status | Citations |")
+        lines.append("| :--- | :--- | :--- |")
+        for r in raw_rows:
+            citations = r["citation_count"]
+            status_badge = "Processed" if citations > 0 else "**Unprocessed**"
+            lines.append(f"| `{r['rel_path']}` | {status_badge} | {citations} |")
+        lines.append("")
+
+    return "\n".join(lines).strip() + "\n"
+
+
+def generate_index_markdown(vault: Vault, cache: Any | None = None) -> str:
     """Generate deterministic catalog markdown for index.md.
 
     Deterministic sort order guarantees zero Git diff churn on idempotent runs.
     """
+    if cache is not None:
+        return _build_index_lines_from_conn(vault, cache.get_connection())
+
     from cadabby.cache import VaultCache
 
-    with VaultCache(vault) as cache:
-        cache.scan()
-        conn = cache.get_connection()
-
-        lines = [
-            f"# {vault.config.get('vault_name', 'Wiki')} Catalog",
-            "",
-            "> Auto-generated catalog linking compiled wiki knowledge and raw ground truth sources.",
-            "",
-        ]
-
-        # 1. Wiki notes grouped by type
-        type_plural_map = {
-            "entity": "Entities",
-            "concept": "Concepts",
-            "synthesis": "Syntheses",
-            "comparison": "Comparisons",
-            "guide": "Guides",
-        }
-
-        for n_type in NOTE_TYPES:
-            heading = type_plural_map.get(n_type, n_type.capitalize())
-            cur = conn.execute(
-                """
-                SELECT cid, stem, title, description, trust_tier, status
-                FROM notes
-                WHERE layer = 'wiki' AND type = ? AND parse_error IS NULL
-                ORDER BY stem ASC;
-                """,
-                (n_type,),
-            )
-            rows = cur.fetchall()
-            if rows:
-                lines.append(f"## {heading}")
-                lines.append("")
-                lines.append("| Note | Description | Trust | Status |")
-                lines.append("| :--- | :--- | :--- | :--- |")
-                for r in rows:
-                    desc = (r["description"] or "").replace("|", "\\|")
-                    tier = r["trust_tier"] or "unverified"
-                    status = r["status"] or "active"
-                    lines.append(f"| [[{r['stem']}]] | {desc} | `{tier}` | `{status}` |")
-                lines.append("")
-
-        # 2. Raw sources tracking
-        cur = conn.execute(
-            """
-            SELECT r.rel_path, r.stem,
-                   (SELECT COUNT(*) FROM sources s WHERE s.raw_path = r.rel_path) AS citation_count
-            FROM notes r
-            WHERE r.layer = 'raw'
-            ORDER BY r.rel_path ASC;
-            """
-        )
-        raw_rows = cur.fetchall()
-        if raw_rows:
-            lines.append("## Raw Sources")
-            lines.append("")
-            lines.append("| Source File | Status | Citations |")
-            lines.append("| :--- | :--- | :--- |")
-            for r in raw_rows:
-                citations = r["citation_count"]
-                status_badge = "Processed" if citations > 0 else "**Unprocessed**"
-                lines.append(f"| `{r['rel_path']}` | {status_badge} | {citations} |")
-            lines.append("")
-
-        return "\n".join(lines).strip() + "\n"
+    with VaultCache(vault) as new_cache:
+        new_cache.scan()
+        return _build_index_lines_from_conn(vault, new_cache.get_connection())
 
 
-def sync_vault_index(vault: Vault) -> bool:
+def sync_vault_index(vault: Vault, cache: Any | None = None) -> bool:
     """Regenerate index.md under advisory lock only if bytes have changed.
 
     Returns True if file was rewritten, False if unchanged.
     """
-    new_content = generate_index_markdown(vault)
+    new_content = generate_index_markdown(vault, cache=cache)
     index_path = vault.index_path
 
     with advisory_lock(vault.lock_path):

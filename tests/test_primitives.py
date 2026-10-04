@@ -102,6 +102,16 @@ class TestFsutil(unittest.TestCase):
 
         self.assertFalse(lock_file.exists())
 
+    def test_lock_release_preserves_foreign_lock(self):
+        lock_file = self.dir / ".cadabby" / "vault.lock"
+        with advisory_lock(lock_file):
+            # Simulate another process having taken over the lock file
+            lock_file.write_text("12345:9999999999.000\n", "utf-8")
+
+        # Exiting context manager must not delete the lock since pid doesn't match
+        self.assertTrue(lock_file.exists())
+        self.assertEqual(lock_file.read_text("utf-8").strip(), "12345:9999999999.000")
+
 
 class TestVault(unittest.TestCase):
     def setUp(self):

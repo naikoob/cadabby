@@ -162,7 +162,8 @@ def advisory_lock(
         except FileExistsError:
             # Inspect existing lock for staleness
             try:
-                raw_info = target.read_text("utf-8").strip()
+                raw_bytes = target.read_bytes()
+                raw_info = raw_bytes.decode("utf-8", errors="replace").strip()
                 if ":" in raw_info:
                     pid_str, ts_str = raw_info.split(":", 1)
                     lock_pid = int(pid_str)
@@ -170,15 +171,33 @@ def advisory_lock(
 
                     is_stale = (now - lock_ts > stale_age) or not _is_process_alive(lock_pid)
                     if is_stale:
-                        # Break stale lock
-                        with contextlib.suppress(FileNotFoundError, OSError):
-                            target.unlink()
+                        # Break stale lock atomically via OCC
+                        try:
+                            atomic_replace_checked(
+                                target,
+                                lock_content,
+                                expected_hash=compute_bytes_sha256(raw_bytes),
+                            )
+                            acquired = True
+                            break
+                        except (VaultConflictError, OSError):
+                            pass
                         continue
+                else:
+                    # Malformed lock file; break atomically via OCC
+                    try:
+                        atomic_replace_checked(
+                            target,
+                            lock_content,
+                            expected_hash=compute_bytes_sha256(raw_bytes),
+                        )
+                        acquired = True
+                        break
+                    except (VaultConflictError, OSError):
+                        pass
+                    continue
             except (ValueError, OSError):
-                # Unreadable or corrupt lock file; treat as stale
-                with contextlib.suppress(FileNotFoundError, OSError):
-                    target.unlink()
-                continue
+                pass
 
             if time.monotonic() - start_time >= timeout:
                 raise LockTimeoutError(f"Could not acquire vault lock at {target} within {timeout}s")
@@ -188,5 +207,10 @@ def advisory_lock(
     try:
         yield target
     finally:
-        with contextlib.suppress(FileNotFoundError, OSError):
-            target.unlink()
+        # Only unlink if this process still holds the lock
+        try:
+            current_owner = target.read_text("utf-8").strip()
+            if current_owner.startswith(f"{os.getpid()}:"):
+                target.unlink()
+        except (FileNotFoundError, OSError):
+            pass

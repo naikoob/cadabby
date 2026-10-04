@@ -61,6 +61,10 @@ class IndexCachePort(Protocol):
         """Return aggregate epistemic health metrics."""
         ...
 
+    def get_connection(self) -> Any:
+        """Return underlying database connection."""
+        ...
+
     def close(self) -> None:
         """Release any underlying database connections or locks."""
         ...
