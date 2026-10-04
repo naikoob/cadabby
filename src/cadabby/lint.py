@@ -7,14 +7,18 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from cadabby.cache import VaultCache
 from cadabby.constants import (
+    DEFAULT_IGNORED_DIRS,
+    FILE_AGENTS,
     NOTE_STATUSES,
     NOTE_TYPES,
     REQUIRED_FRONTMATTER_FIELDS,
 )
+from cadabby.domain import DomainDefinition
 from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter
 from cadabby.okf import (
     compute_body_hash,
@@ -68,13 +72,24 @@ def _run_vault_lint_impl(vault: Vault, cache: VaultCache) -> list[LintFinding]:
     findings: list[LintFinding] = []
 
     # Map of CID to note details for graph and anchor checks
-    cur = conn.execute("SELECT cid, rel_path, body FROM notes WHERE layer = 'wiki';")
+    cur = conn.execute("SELECT cid, rel_path, body FROM notes WHERE layer != 'raw';")
     notes_by_cid = {r["cid"]: dict(r) for r in cur.fetchall()}
 
-    # Scan all markdown files in wiki/
-    wiki_files = sorted(vault.wiki_dir.rglob("*.md")) if vault.wiki_dir.exists() else []
+    domains = vault.discover_domains()
 
-    for file_path in wiki_files:
+    # Scan all markdown files across all discovered cognitive domains
+    all_note_files: list[tuple[Path, str, DomainDefinition]] = []
+    for domain_name, domain_def in domains.items():
+        if domain_def.path.exists():
+            for p in sorted(domain_def.path.rglob("*.md")):
+                if p.is_file() and not p.name.startswith("."):
+                    if p.name == FILE_AGENTS:
+                        continue
+                    if any(part in DEFAULT_IGNORED_DIRS for part in p.parts):
+                        continue
+                    all_note_files.append((p, domain_name, domain_def))
+
+    for file_path, domain_name, domain_def in all_note_files:
         rel_path = vault.rel_path(file_path)
         cid = path_to_cid(rel_path)
         content = file_path.read_text("utf-8", errors="replace")
@@ -120,16 +135,28 @@ def _run_vault_lint_impl(vault: Vault, cache: VaultCache) -> list[LintFinding]:
                 )
 
         note_type = fm.get("type")
-        if note_type and note_type not in NOTE_TYPES:
-            findings.append(
-                LintFinding(
-                    code="ENUM_INVALID",
-                    severity="error",
-                    rel_path=rel_path,
-                    line=None,
-                    message=f"Invalid type '{note_type}'. Must be one of {NOTE_TYPES}",
+        if note_type:
+            if domain_def.allowed_types is not None:
+                if note_type not in domain_def.allowed_types:
+                    findings.append(
+                        LintFinding(
+                            code="ENUM_INVALID",
+                            severity="error",
+                            rel_path=rel_path,
+                            line=None,
+                            message=f"Invalid type '{note_type}'. Must be one of {domain_def.allowed_types}",
+                        )
+                    )
+            elif not isinstance(note_type, str) or not note_type.strip():
+                findings.append(
+                    LintFinding(
+                        code="ENUM_INVALID",
+                        severity="error",
+                        rel_path=rel_path,
+                        line=None,
+                        message=f"Invalid type '{note_type}'. Type must be a non-empty string",
+                    )
                 )
-            )
 
         note_status = fm.get("status")
         if note_status and note_status not in NOTE_STATUSES:
@@ -175,7 +202,7 @@ def _run_vault_lint_impl(vault: Vault, cache: VaultCache) -> list[LintFinding]:
                         )
 
         # --- GATE 2: Layout Consistency ---
-        if note_type in TYPE_TO_DIR:
+        if domain_def.enforce_layout and note_type in TYPE_TO_DIR:
             expected_parent = TYPE_TO_DIR[note_type]
             actual_parent = file_path.parent.name
             if actual_parent != expected_parent:
@@ -185,7 +212,21 @@ def _run_vault_lint_impl(vault: Vault, cache: VaultCache) -> list[LintFinding]:
                         severity="error",
                         rel_path=rel_path,
                         line=None,
-                        message=f"Note of type '{note_type}' is in 'wiki/{actual_parent}/', expected 'wiki/{expected_parent}/'",
+                        message=f"Note of type '{note_type}' is in '{domain_name}/{actual_parent}/', expected '{domain_name}/{expected_parent}/'",
+                    )
+                )
+
+        # --- GATE 4 (Domain Provenance Requirement) ---
+        if domain_def.require_sources:
+            sources = fm.get("sources")
+            if not sources or not isinstance(sources, list) or len(sources) == 0:
+                findings.append(
+                    LintFinding(
+                        code="SOURCE_MISSING",
+                        severity="error",
+                        rel_path=rel_path,
+                        line=None,
+                        message=f"Domain '{domain_name}' requires 'sources:' provenance list",
                     )
                 )
 

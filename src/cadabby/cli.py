@@ -17,7 +17,8 @@ from cadabby.audit import run_vault_audit
 from cadabby.cache import VaultCache
 from cadabby.constants import DIR_RAW, DIR_WIKI, NOTE_TYPES
 from cadabby.fsutil import atomic_write
-from cadabby.indexer import rotate_vault_log, sync_vault_index
+from cadabby.graph import get_note_graph, resolve_link_target
+from cadabby.indexer import append_vault_log, rotate_vault_log, sync_vault_index
 from cadabby.lint import run_vault_lint
 from cadabby.ops import TYPE_TO_DIR, ground_notes, scaffold_note, update_note, verify_note
 from cadabby.vault import Vault
@@ -38,9 +39,10 @@ def get_assets_dir() -> Path:
 
 
 def cmd_init(args: argparse.Namespace) -> int:
-    """Scaffold a fresh vault structure conforming to §2.1 and §9."""
+    """Scaffold a fresh vault structure conforming to §2.1, §5.3, and §9."""
     target_dir = Path(args.vault).resolve() if args.vault else Path.cwd()
     vault_name = args.name or target_dir.name or "vault"
+    force = getattr(args, "force", False)
 
     assets = get_assets_dir()
     vault_tpl = assets / "vault"
@@ -53,19 +55,34 @@ def cmd_init(args: argparse.Namespace) -> int:
     (target_dir / ".agents" / "skills" / "librarian").mkdir(parents=True, exist_ok=True)
     (target_dir / ".agents" / "skills" / "technician").mkdir(parents=True, exist_ok=True)
 
+    def copy_template_file(src: Path, dst: Path) -> None:
+        if not src.exists():
+            return
+        if dst.exists():
+            if not force:
+                print(f"Existing file left untouched: {dst.name} (use --force to overwrite)")
+                return
+            else:
+                shutil.copy(src, dst)
+                print(f"Overwrote existing file: {dst.name}")
+        else:
+            shutil.copy(src, dst)
+
     # 1. Config .cadabby.json
     cfg_src = vault_tpl / ".cadabby.json"
-    if cfg_src.exists():
+    cfg_dst = target_dir / ".cadabby.json"
+    if cfg_dst.exists() and not force:
+        print("Existing file left untouched: .cadabby.json (use --force to overwrite)")
+    elif cfg_src.exists():
         cfg_data = json.loads(cfg_src.read_text("utf-8"))
         cfg_data["vault_name"] = vault_name
-        atomic_write(target_dir / ".cadabby.json", json.dumps(cfg_data, indent=2) + "\n")
+        atomic_write(cfg_dst, json.dumps(cfg_data, indent=2) + "\n")
 
     # 2. Files from vault template
     for filename in (".gitignore", ".mcp.json", "AGENTS.md", "CLAUDE.md", "GEMINI.md", "STYLE.md", "index.md"):
         src = vault_tpl / filename
         dst = target_dir / filename
-        if src.exists() and not dst.exists():
-            shutil.copy(src, dst)
+        copy_template_file(src, dst)
 
     # 3. Touch empty log.md
     log_file = target_dir / "log.md"
@@ -78,24 +95,21 @@ def cmd_init(args: argparse.Namespace) -> int:
         for skill_name in ("librarian", "technician"):
             src_skill = skills_dir / skill_name / "SKILL.md"
             dst_skill = target_dir / ".agents" / "skills" / skill_name / "SKILL.md"
-            if src_skill.exists() and not dst_skill.exists():
-                shutil.copy(src_skill, dst_skill)
+            copy_template_file(src_skill, dst_skill)
 
     # 5. Copy slash command templates to .claude/commands/
     cmds_dir = assets / "commands"
     if cmds_dir.exists():
         for cmd_file in cmds_dir.glob("*.md"):
             dst_cmd = target_dir / ".claude" / "commands" / cmd_file.name
-            if not dst_cmd.exists():
-                shutil.copy(cmd_file, dst_cmd)
+            copy_template_file(cmd_file, dst_cmd)
 
     # 6. Optional Obsidian config
     if args.obsidian:
         obsidian_dir = target_dir / ".obsidian"
         obsidian_dir.mkdir(parents=True, exist_ok=True)
         obs_src = vault_tpl / "obsidian" / "app.json"
-        if obs_src.exists():
-            shutil.copy(obs_src, obsidian_dir / "app.json")
+        copy_template_file(obs_src, obsidian_dir / "app.json")
 
     print(f"Initialized Cadabby vault '{vault_name}' in {target_dir}")
     return 0
@@ -104,8 +118,18 @@ def cmd_init(args: argparse.Namespace) -> int:
 def cmd_sync(args: argparse.Namespace) -> int:
     """Run incremental cache scan and catalog sync."""
     vault = Vault(args.vault)
+    rebuild = getattr(args, "rebuild", False)
+    if rebuild:
+        cache_path = vault.cache_db_path
+        if cache_path.exists():
+            cache_path.unlink()
+        for ext in ("-wal", "-shm"):
+            extra = Path(str(cache_path) + ext)
+            if extra.exists():
+                extra.unlink()
+
     with VaultCache(vault) as cache:
-        ins, upd, deleted, total = cache.scan(force=args.force)
+        ins, upd, deleted, total = cache.scan(force=(args.force or rebuild))
         sync_vault_index(vault, cache=cache)
         rotated = rotate_vault_log(vault)
 
@@ -126,6 +150,7 @@ def cmd_search(args: argparse.Namespace) -> int:
             status=args.status,
             trust=args.trust,
             tag=args.tag,
+            domain=getattr(args, "domain", None),
             limit=args.limit,
         )
 
@@ -188,6 +213,8 @@ def cmd_scaffold(args: argparse.Namespace) -> int:
         tags=tags,
         sources=sources,
         actor=args.actor or f"human:{getpass.getuser()}",
+        domain=getattr(args, "domain", "wiki"),
+        path=getattr(args, "path", None),
     )
     print(f"Scaffolded note: {vault.rel_path(path)}")
     return 0
@@ -235,12 +262,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
         actor = args.agent if args.agent.startswith(("agent:", "process:")) else f"agent:{args.agent}"
         is_human = False
     else:
-        # Default to agent:cli unless interactive
+        # Default to process:cli unless interactive (§5.3)
         if sys.stdin.isatty():
             actor = f"human:{getpass.getuser()}"
             is_human = True
         else:
-            actor = "agent:cli"
+            actor = "process:cli"
             is_human = False
 
     res = verify_note(
@@ -353,47 +380,98 @@ def cmd_audit(args: argparse.Namespace) -> int:
     return 1
 
 
-def cmd_install(args: argparse.Namespace) -> int:
-    """Install Cadabby configurations into target AI harnesses."""
-    installed_any = False
-
-    if args.antigravity:
-        # Install into Antigravity plugins or MCP
-        dest_plugin = Path.home() / ".gemini" / "antigravity" / "plugins" / "cadabby"
-        repo_plugin = Path(__file__).resolve().parent.parent.parent / "plugins" / "cadabby"
-        if repo_plugin.exists():
-            dest_plugin.parent.mkdir(parents=True, exist_ok=True)
-            if dest_plugin.is_symlink() or dest_plugin.exists():
-                if dest_plugin.is_symlink():
-                    dest_plugin.unlink()
-                else:
-                    shutil.rmtree(dest_plugin)
-            dest_plugin.symlink_to(repo_plugin)
-            print(f"Linked Antigravity plugin to {dest_plugin}")
-            installed_any = True
-
-    if args.claude:
-        # Install into Claude Code or Claude Desktop
-        claude_cfg_path = Path.home() / ".claude.json"
-        cfg_data: dict[str, Any] = {}
-        if claude_cfg_path.exists():
-            try:
-                cfg_data = json.loads(claude_cfg_path.read_text("utf-8"))
-            except Exception:
-                pass
-        mcp_servers = cfg_data.setdefault("mcpServers", {})
-        mcp_servers["cadabby"] = {
-            "command": "python3",
-            "args": ["-m", "cadabby", "mcp"],
-        }
-        atomic_write(claude_cfg_path, json.dumps(cfg_data, indent=2) + "\n")
-        print(f"Registered Cadabby MCP server in {claude_cfg_path}")
-        installed_any = True
-
-    if not installed_any:
-        print("Please specify a target harness: --antigravity or --claude")
-        return 1
+def cmd_log(args: argparse.Namespace) -> int:
+    """Append a timestamped entry to the active log.md ledger (§5.3)."""
+    vault = Vault(args.vault)
+    actor = args.actor
+    if not actor:
+        if sys.stdin.isatty():
+            actor = f"human:{getpass.getuser()}"
+        else:
+            actor = "process:cli"
+    append_vault_log(vault, args.message, actor=actor)
+    print(f"Logged entry to {vault.rel_path(vault.log_path)}")
     return 0
+
+
+def cmd_graph(args: argparse.Namespace) -> int:
+    """Display 1-hop and 2-hop neighbors, co-citations, and links for a note (§5.3)."""
+    vault = Vault(args.vault)
+    with VaultCache(vault) as cache:
+        cache.scan()
+        conn = cache.get_connection()
+        cid = args.cid
+        # Resolve target stem if not a full CID
+        cids = [r["cid"] for r in conn.execute("SELECT cid FROM notes").fetchall()]
+        resolved = resolve_link_target(cid, cids)
+        if resolved:
+            cid = resolved
+
+        graph_data = get_note_graph(conn, cid)
+        if not graph_data:
+            print(f"Error: Note not found: '{args.cid}'", file=sys.stderr)
+            return 1
+
+        if args.json:
+            print(json.dumps(graph_data, indent=2))
+            return 0
+
+        note = graph_data["note"]
+        print(f"Graph for [[{note['cid']}]] ({note['type']}, {note['trust_tier']}):\n")
+
+        print("Forward Links (1-hop):")
+        if graph_data["forward_links"]:
+            for fl in graph_data["forward_links"]:
+                tgt = fl["target_cid"] or f"{fl['target_raw']} (unresolved)"
+                print(f"  -> [[{tgt}]]")
+        else:
+            print("  (none)")
+
+        print("\nBacklinks (1-hop):")
+        if graph_data["backlinks"]:
+            for bl in graph_data["backlinks"]:
+                print(f"  <- [[{bl['source_cid']}]]")
+        else:
+            print("  (none)")
+
+        print("\n2-Hop Forward:")
+        if graph_data["two_hop_forward"]:
+            for th in graph_data["two_hop_forward"]:
+                print(f"  -> [[{th['target_cid']}]] (via [[{th['via']}]])")
+        else:
+            print("  (none)")
+
+        print("\n2-Hop Backlinks:")
+        if graph_data["two_hop_backlinks"]:
+            for th in graph_data["two_hop_backlinks"]:
+                print(f"  <- [[{th['source_cid']}]] (via [[{th['via']}]])")
+        else:
+            print("  (none)")
+
+        print("\nCo-Citations:")
+        if graph_data["co_citations"]:
+            for cc in graph_data["co_citations"]:
+                print(f"  * [[{cc['cid']}]] ({cc['count']} shared citations)")
+        else:
+            print("  (none)")
+
+        return 0
+
+
+def cmd_install(args: argparse.Namespace) -> int:
+    """Install or uninstall Cadabby harness configurations (§7.6)."""
+    from cadabby.installer import run_install
+
+    dest_path = Path(args.path) if args.path else None
+    return run_install(
+        antigravity=args.antigravity,
+        claude=args.claude,
+        all_targets=args.all,
+        uninstall=args.uninstall,
+        dry_run=args.dry_run,
+        dest_path=dest_path,
+        force=args.force,
+    )
 
 
 def cmd_mcp(args: argparse.Namespace) -> int:
@@ -410,14 +488,19 @@ def build_parser() -> argparse.ArgumentParser:
     vault_parent.add_argument(
         "--vault",
         type=Path,
-        default=None,
+        default=argparse.SUPPRESS,
         help="Path to vault root (default: discovered from cwd)",
     )
 
     parser = argparse.ArgumentParser(
         prog="cadabby",
         description="Epistemically auditable LLM Wiki engine for humans and AI agents.",
-        parents=[vault_parent],
+    )
+    parser.add_argument(
+        "--vault",
+        type=Path,
+        default=None,
+        help="Path to vault root (default: discovered from cwd)",
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -425,17 +508,20 @@ def build_parser() -> argparse.ArgumentParser:
     # init
     p_init = subparsers.add_parser("init", parents=[vault_parent], help="Scaffold a new vault")
     p_init.add_argument("--name", help="Name of the vault")
+    p_init.add_argument("--force", action="store_true", help="Overwrite existing files")
     p_init.add_argument("--obsidian", action="store_true", help="Scaffold Obsidian configuration")
     p_init.set_defaults(func=cmd_init)
 
     # sync
     p_sync = subparsers.add_parser("sync", parents=[vault_parent], help="Sync ephemeral cache and index catalog")
     p_sync.add_argument("--force", action="store_true", help="Force full rescan")
+    p_sync.add_argument("--rebuild", action="store_true", help="Discard cache.db before rescan (§5.3)")
     p_sync.set_defaults(func=cmd_sync)
 
     # search
     p_search = subparsers.add_parser("search", parents=[vault_parent], help="Search vault notes")
     p_search.add_argument("query", help="Search query")
+    p_search.add_argument("--domain", help="Filter by cognitive domain (e.g. wiki, customers, projects)")
     p_search.add_argument("--type", help="Filter by note type")
     p_search.add_argument("--status", help="Filter by note status")
     p_search.add_argument("--trust", help="Filter by trust tier")
@@ -447,15 +533,17 @@ def build_parser() -> argparse.ArgumentParser:
     # ground
     p_ground = subparsers.add_parser("ground", parents=[vault_parent], help="Retrieve full content and 1-hop graph")
     p_ground.add_argument("cids", nargs="+", help="One or more note CIDs")
-    p_ground.add_argument("--budget-tokens", type=int, default=None, help="Token budget")
+    p_ground.add_argument("--budget-tokens", "--budget", dest="budget_tokens", type=int, default=None, help="Token budget")
     p_ground.add_argument("--json", action="store_true", help="Output as JSON")
     p_ground.set_defaults(func=cmd_ground)
 
     # scaffold
     p_scaffold = subparsers.add_parser("scaffold", parents=[vault_parent], help="Scaffold a new note")
     p_scaffold.add_argument("title", help="Note title")
-    p_scaffold.add_argument("--type", required=True, choices=NOTE_TYPES, help="Note type")
+    p_scaffold.add_argument("--type", required=True, help="Note type (e.g. concept, entity, or domain-specific type)")
     p_scaffold.add_argument("--desc", required=True, help="Note description")
+    p_scaffold.add_argument("--domain", default="wiki", help="Cognitive domain (default: wiki)")
+    p_scaffold.add_argument("--path", help="Custom relative path within domain or vault")
     p_scaffold.add_argument("--tags", help="Comma-separated tags")
     p_scaffold.add_argument("--sources", help="Comma-separated raw sources")
     p_scaffold.add_argument("--actor", help="Actor identity (default: human:<user>)")
@@ -495,10 +583,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_audit.add_argument("--json", action="store_true", help="Output as JSON")
     p_audit.set_defaults(func=cmd_audit)
 
+    # log
+    p_log = subparsers.add_parser("log", parents=[vault_parent], help="Append a timestamped entry to log.md")
+    p_log.add_argument("message", help="Log message text")
+    p_log.add_argument("--actor", help="Actor identity (default: human:<user> or process:cli)")
+    p_log.set_defaults(func=cmd_log)
+
+    # graph
+    p_graph = subparsers.add_parser("graph", parents=[vault_parent], help="Display 1-hop and 2-hop neighbors and co-citations")
+    p_graph.add_argument("cid", help="Note CID, stem, or path")
+    p_graph.add_argument("--json", action="store_true", help="Output as JSON")
+    p_graph.set_defaults(func=cmd_graph)
+
     # install
-    p_install = subparsers.add_parser("install", parents=[vault_parent], help="Install harness integrations")
+    p_install = subparsers.add_parser("install", parents=[vault_parent], help="Install harness integrations (§7.6)")
     p_install.add_argument("--antigravity", action="store_true", help="Install Antigravity plugin")
     p_install.add_argument("--claude", action="store_true", help="Install Claude Code MCP configuration")
+    p_install.add_argument("--all", action="store_true", help="Install into all supported harnesses")
+    p_install.add_argument("--uninstall", action="store_true", help="Remove Cadabby harness configurations")
+    p_install.add_argument("--dry-run", action="store_true", help="Print changes without modifying files")
+    p_install.add_argument("--path", help="Override destination install path")
+    p_install.add_argument("--force", action="store_true", help="Overwrite conflicting harness configuration entries")
     p_install.set_defaults(func=cmd_install)
 
     # mcp

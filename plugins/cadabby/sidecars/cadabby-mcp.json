@@ -1,6 +1,0 @@
-{
-  "name": "cadabby-mcp",
-  "command": "python3",
-  "args": ["-m", "cadabby", "mcp"],
-  "env": {}
-}

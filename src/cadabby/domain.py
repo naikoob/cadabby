@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from cadabby.frontmatter import parse_frontmatter, serialize_frontmatter
@@ -209,3 +210,18 @@ class VerificationResult:
     of: str
     trust_tier: str
     already_verified: bool
+
+
+@dataclass
+class DomainDefinition:
+    """Represents a self-describing, self-governing cognitive domain."""
+
+    name: str
+    path: Path
+    description: str = ""
+    searchable: bool = True
+    allowed_types: list[str] | None = None  # None = open/permissive
+    require_sources: bool = False
+    enforce_layout: bool = False
+    directives_markdown: str = ""
+

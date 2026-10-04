@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import shutil
 import tempfile
@@ -11,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 from cadabby.audit import run_vault_audit
 from cadabby.cache import VaultCache
-from cadabby.cli import cmd_init
+from cadabby.cli import cmd_init, cmd_sync
 from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter, serialize_frontmatter
 from cadabby.fsutil import VaultConflictError, compute_file_sha256
 from cadabby.lint import run_vault_lint
@@ -253,18 +255,32 @@ class TestAcceptanceCriteria(unittest.TestCase):
         server = McpServer(vault)
         init_res = server.handle_initialize({"clientInfo": {"name": "claude-code"}})
         self.assertEqual(init_res["serverInfo"]["name"], "cadabby")
-        self.assertEqual(init_res["serverInfo"]["version"], "0.2.0")
+        self.assertEqual(init_res["serverInfo"]["version"], "0.3.0")
 
         tools_res = server.handle_tools_list()
         self.assertEqual(len(tools_res["tools"]), 7)
 
-        # Attempt to verify directly as human:* over MCP: server client_id is forced to agent:<clientInfo>
+        # 1. Verification over MCP stamps agent:<clientInfo>
         res = server.handle_tools_call(
             "vault_verify_note",
             {"cid": "wiki/concepts/Flash-Attention"},
         )
         self.assertFalse(res["isError"])
         self.assertIn("agent:claude-code", res["content"][0]["text"])
+
+        # 2. Rejection of human:* over MCP (AC 12)
+        res_actor = server.handle_tools_call(
+            "vault_verify_note",
+            {"cid": "wiki/concepts/Flash-Attention", "actor": "human:attacker"},
+        )
+        self.assertTrue(res_actor["isError"])
+        self.assertIn("Error: Verification by human:* cannot be performed over MCP", res_actor["content"][0]["text"])
+
+        res_by = server.handle_tools_call(
+            "vault_verify_note",
+            {"cid": "wiki/concepts/Flash-Attention", "by": "human:attacker"},
+        )
+        self.assertTrue(res_by["isError"])
 
     def test_ac11_audit_provenance_mismatch(self):
         """11. cadabby audit flags a human attestation whose Git commit author does not match identities map."""
@@ -348,6 +364,123 @@ class TestAcceptanceCriteria(unittest.TestCase):
         # 5. Run lint to ensure vault remains immaculate
         lint_out = server.handle_tools_call("vault_lint", {})
         self.assertFalse(lint_out["isError"])
+
+    def test_ac16_sync_zero_git_diff(self):
+        """16. cadabby sync run twice in a row produces no Git diff on the second run."""
+        demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
+        vault_dir = self.root / "demo-vault"
+        shutil.copytree(demo_src, vault_dir, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
+
+        # First sync
+        args_sync = DummyArgs(vault=str(vault_dir), force=False, rebuild=False)
+        cmd_sync(args_sync)
+        index_first = (vault_dir / "index.md").read_text("utf-8")
+
+        # Second sync
+        cmd_sync(args_sync)
+        index_second = (vault_dir / "index.md").read_text("utf-8")
+
+        self.assertEqual(index_first, index_second)
+
+    def test_ac17_init_untouched_claude_notification(self):
+        """17. cadabby init into a directory with an existing CLAUDE.md leaves that file untouched and says so."""
+        vault_dir = self.root / "existing-claude-vault"
+        vault_dir.mkdir(parents=True, exist_ok=True)
+        custom_claude = "# My Custom Claude Config\nDo not overwrite.\n"
+        claude_path = vault_dir / "CLAUDE.md"
+        claude_path.write_text(custom_claude, "utf-8")
+
+        f = io.StringIO()
+        with contextlib.redirect_stdout(f):
+            args = DummyArgs(vault=str(vault_dir), name="test", force=False, obsidian=False)
+            ret = cmd_init(args)
+
+        self.assertEqual(ret, 0)
+        self.assertEqual(claude_path.read_text("utf-8"), custom_claude)
+        output = f.getvalue()
+        self.assertIn("Existing file left untouched: CLAUDE.md", output)
+
+    def test_ac18_installer_idempotency_and_uninstall(self):
+        """18. cadabby install --all run twice changes no bytes on the second run; --uninstall restores the pre-install config exactly."""
+        claude_dest = self.root / ".claude.json"
+        ag_dest = self.root / "antigravity" / "plugins" / "cadabby"
+
+        initial_claude = json.dumps({"mcpServers": {"existing": {}}, "custom": 123}, indent=2) + "\n"
+        claude_dest.write_text(initial_claude, "utf-8")
+
+        from cadabby.installer import install_antigravity, install_claude, uninstall_antigravity, uninstall_claude
+
+        # First install
+        ok1, _ = install_claude(dest_path=claude_dest)
+        ok2, _ = install_antigravity(dest_path=ag_dest)
+        self.assertTrue(ok1 and ok2)
+
+        after_first = claude_dest.read_text("utf-8")
+
+        # Second install: 0 bytes changed
+        ok1, _ = install_claude(dest_path=claude_dest)
+        ok2, _ = install_antigravity(dest_path=ag_dest)
+        self.assertTrue(ok1 and ok2)
+        self.assertEqual(claude_dest.read_text("utf-8"), after_first)
+
+        # Uninstall: exactly restores pre-install config
+        u1, _ = uninstall_claude(dest_path=claude_dest)
+        u2, _ = uninstall_antigravity(dest_path=ag_dest)
+        self.assertTrue(u1 and u2)
+        self.assertEqual(claude_dest.read_text("utf-8"), initial_claude)
+        self.assertFalse(ag_dest.exists())
+
+    def test_ac19_single_definition_invariant(self):
+        """19. No persona behavior text appears in more than one file across the repository."""
+        repo_root = Path(__file__).resolve().parent.parent
+
+        # Librarian core behavior string
+        librarian_phrase = "Ingestion, synthesis, and cross-referencing persona for Cadabby LLM Wiki vaults"
+        # Technician core behavior string
+        technician_phrase = "Health, diagnostics, linting, and maintenance persona for Cadabby LLM Wiki vaults"
+        # Constitution heading phrase
+        agents_md_phrase = "single canonical constitution"
+
+        def count_phrase_occurrences(phrase: str) -> list[Path]:
+            matching = []
+            for p in repo_root.rglob("*"):
+                if p.is_file() and p.suffix in (".md", ".json", ".py", ".yaml", ".yml"):
+                    # ignore .git, build artifacts, cache, tests, and spec docs
+                    if any(part in p.parts for part in (".git", ".cadabby", "__pycache__", "build", "dist", "tests")):
+                        continue
+                    if p.name == "SPECIFICATION.md":
+                        continue
+                    try:
+                        text = p.read_text("utf-8", errors="ignore")
+                        if phrase in text:
+                            matching.append(p.relative_to(repo_root))
+                    except Exception:
+                        pass
+            return matching
+
+        lib_matches = count_phrase_occurrences(librarian_phrase)
+        self.assertEqual(
+            len(lib_matches),
+            1,
+            f"Librarian persona text duplicated across files: {lib_matches}",
+        )
+        self.assertEqual(str(lib_matches[0]), "assets/skills/librarian/SKILL.md")
+
+        tech_matches = count_phrase_occurrences(technician_phrase)
+        self.assertEqual(
+            len(tech_matches),
+            1,
+            f"Technician persona text duplicated across files: {tech_matches}",
+        )
+        self.assertEqual(str(tech_matches[0]), "assets/skills/technician/SKILL.md")
+
+        agents_matches = count_phrase_occurrences(agents_md_phrase)
+        self.assertEqual(
+            len(agents_matches),
+            1,
+            f"AGENTS.md constitution duplicated across files: {agents_matches}",
+        )
+        self.assertEqual(str(agents_matches[0]), "assets/vault/AGENTS.md")
 
 
 if __name__ == "__main__":

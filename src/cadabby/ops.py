@@ -18,7 +18,7 @@ from cadabby.domain import Note, VerificationResult, split_markdown_sections
 from cadabby.frontmatter import serialize_frontmatter
 from cadabby.okf import is_valid_actor
 from cadabby.ports import IndexCachePort, LedgerPort, NoteStoragePort
-from cadabby.vault import Vault, cid_to_path, path_to_cid
+from cadabby.vault import Vault, cid_to_path, path_to_cid, path_to_layer
 
 TYPE_TO_DIR = {
     "entity": "entities",
@@ -44,9 +44,10 @@ def sanitize_filename(title: str) -> str:
 class ScaffoldNoteUseCase:
     """Driving use case for scaffolding a new typed OKF note (§6)."""
 
-    def __init__(self, storage: NoteStoragePort, ledger: LedgerPort):
+    def __init__(self, storage: NoteStoragePort, ledger: LedgerPort, vault: Vault | None = None):
         self.storage = storage
         self.ledger = ledger
+        self.vault = vault
 
     def execute(
         self,
@@ -57,14 +58,43 @@ class ScaffoldNoteUseCase:
         sources: list[str] | None = None,
         body: str = "",
         actor: str = "agent:unknown",
+        domain: str = "wiki",
+        path: str | None = None,
     ) -> Note:
-        if type_ not in NOTE_TYPES:
-            raise ValueError(f"Invalid note type '{type_}'. Must be one of {NOTE_TYPES}")
+        if not type_ or not isinstance(type_, str) or not type_.strip():
+            raise ValueError("Note type must be a non-empty string")
 
-        sub_dir = TYPE_TO_DIR[type_]
-        stem = sanitize_filename(title)
-        rel_path = f"wiki/{sub_dir}/{stem}.md"
-        cid = f"wiki/{sub_dir}/{stem}"
+        if path:
+            clean_path = str(path).replace("\\", "/").strip("/")
+            rel_path = clean_path if clean_path.endswith(".md") else f"{clean_path}.md"
+            cid = path_to_cid(rel_path)
+            target_domain = path_to_layer(rel_path)
+        else:
+            target_domain = domain or "wiki"
+            stem = sanitize_filename(title)
+            if target_domain == "wiki":
+                if type_ not in TYPE_TO_DIR:
+                    raise ValueError(
+                        f"Invalid note type '{type_}'. In domain 'wiki', must be one of {list(TYPE_TO_DIR.keys())}"
+                    )
+                sub_dir = TYPE_TO_DIR[type_]
+                rel_path = f"wiki/{sub_dir}/{stem}.md"
+                cid = f"wiki/{sub_dir}/{stem}"
+            else:
+                rel_path = f"{target_domain}/{stem}.md"
+                cid = f"{target_domain}/{stem}"
+
+        # If vault is available, check allowed_types for the domain
+        if self.vault is not None:
+            domains = self.vault.discover_domains()
+            domain_def = domains.get(target_domain)
+            if domain_def and domain_def.allowed_types is not None:
+                if type_ not in domain_def.allowed_types:
+                    raise ValueError(
+                        f"Invalid note type '{type_}'. In domain '{target_domain}', allowed types are {domain_def.allowed_types}"
+                    )
+        elif target_domain == "wiki" and type_ not in NOTE_TYPES:
+            raise ValueError(f"Invalid note type '{type_}'. Must be one of {NOTE_TYPES}")
 
         if self.storage.note_exists(cid):
             raise FileExistsError(f"Note already exists at {rel_path}")
@@ -200,11 +230,17 @@ class GroundNotesUseCase:
 
         grounded = []
 
+        domains = self.vault.discover_domains() if self.vault is not None else {}
+
         for raw_cid in cids:
             cid = path_to_cid(raw_cid)
             note = self.storage.get_note(cid)
             if note is None:
                 continue
+
+            domain_name = path_to_layer(note.rel_path)
+            domain_def = domains.get(domain_name)
+            directives = domain_def.directives_markdown if domain_def is not None else ""
 
             links: list[dict[str, Any]] = []
             backlinks: list[dict[str, Any]] = []
@@ -263,10 +299,12 @@ class GroundNotesUseCase:
             grounded.append(
                 {
                     "cid": cid,
+                    "domain": domain_name,
                     "title": note.title or Path(note.rel_path).stem,
                     "type": note.type,
                     "status": note.status,
                     "trust_tier": note.trust_tier,
+                    "directives": directives,
                     "content": content_to_return,
                     "links": links,
                     "backlinks": backlinks,
@@ -301,12 +339,14 @@ def scaffold_note(
     sources: list[str] | None = None,
     body: str = "",
     actor: str = "agent:unknown",
+    domain: str = "wiki",
+    path: str | None = None,
     storage: NoteStoragePort | None = None,
     ledger: LedgerPort | None = None,
 ) -> Path:
-    """Scaffold a new wiki note in the directory matching its type."""
+    """Scaffold a new note in the directory matching its type or custom path."""
     active_storage, active_ledger = _resolve_adapters(vault, storage, ledger)
-    uc = ScaffoldNoteUseCase(active_storage, active_ledger)
+    uc = ScaffoldNoteUseCase(active_storage, active_ledger, vault=vault)
     note = uc.execute(
         title=title,
         type_=type_,
@@ -315,6 +355,8 @@ def scaffold_note(
         sources=sources,
         body=body,
         actor=actor,
+        domain=domain,
+        path=path,
     )
     return vault.abs_path(note.rel_path)
 

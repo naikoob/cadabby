@@ -20,14 +20,16 @@ from cadabby.vault import Vault, path_to_cid
 TOOLS = [
     {
         "name": "vault_search",
-        "description": "Full-text BM25 search across wiki notes boosted by epistemic trust tiers and note status.",
+        "description": "Full-text BM25 search across vault notes boosted by epistemic trust tiers and note status.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Search query terms"},
-                "type": {"type": "string", "enum": list(NOTE_TYPES), "description": "Filter by note type"},
+                "domain": {"type": "string", "description": "Filter by cognitive domain (e.g. 'wiki', 'customers', 'projects')"},
+                "type": {"type": "string", "description": "Filter by note type"},
                 "status": {"type": "string", "description": "Filter by note status"},
                 "trust": {"type": "string", "description": "Filter by trust tier (human-reviewed, machine-confirmed, etc.)"},
+                "tag": {"type": "string", "description": "Filter by note tag"},
                 "limit": {"type": "integer", "default": 20, "description": "Max results to return"},
             },
             "required": ["query"],
@@ -62,13 +64,15 @@ TOOLS = [
     },
     {
         "name": "vault_scaffold_note",
-        "description": "Create a note in the wiki/ subdirectory matching its type, with valid OKF frontmatter and generated attribution. Refuses to overwrite.",
+        "description": "Create a note in the vault with valid OKF frontmatter and generated attribution. Refuses to overwrite.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "title": {"type": "string", "description": "Title of the note"},
-                "type": {"type": "string", "enum": list(NOTE_TYPES), "description": "Note type"},
+                "type": {"type": "string", "description": "Note type (e.g. 'concept', 'entity', or domain-specific type)"},
                 "description": {"type": "string", "description": "One-line descriptive summary"},
+                "domain": {"type": "string", "default": "wiki", "description": "Cognitive domain (default: 'wiki')"},
+                "path": {"type": "string", "description": "Optional custom relative path within domain or vault"},
                 "tags": {"type": "array", "items": {"type": "string"}, "description": "List of tags"},
                 "sources": {"type": "array", "items": {"type": "string"}, "description": "Paths to raw sources"},
                 "body": {"type": "string", "description": "Initial markdown body text"},
@@ -156,6 +160,7 @@ class McpServer:
             "protocolVersion": "2024-11-05",
             "capabilities": {
                 "tools": {},
+                "resources": {},
             },
             "serverInfo": {
                 "name": "cadabby",
@@ -175,6 +180,8 @@ class McpServer:
                     type_=args.get("type"),
                     status=args.get("status"),
                     trust=args.get("trust"),
+                    tag=args.get("tag"),
+                    domain=args.get("domain"),
                     limit=args.get("limit", 20),
                 )
                 data = [r.to_dict() for r in res]
@@ -199,6 +206,8 @@ class McpServer:
                     sources=args.get("sources"),
                     body=args.get("body", ""),
                     actor=self.client_id,
+                    domain=args.get("domain", "wiki"),
+                    path=args.get("path"),
                 )
                 rel = self.vault.rel_path(path)
                 return {
@@ -233,6 +242,15 @@ class McpServer:
                 }
 
             elif name == "vault_verify_note":
+                actor_param = args.get("actor") or args.get("by")
+                if actor_param and str(actor_param).startswith("human:"):
+                    return {
+                        "content": [
+                            {"type": "text", "text": "Error: Verification by human:* cannot be performed over MCP."}
+                        ],
+                        "isError": True,
+                    }
+
                 res = verify_note(
                     vault=self.vault,
                     cid_or_path=args["cid"],
@@ -279,6 +297,80 @@ class McpServer:
                 "content": [{"type": "text", "text": f"Error executing {name}: {str(e)}"}],
                 "isError": True,
             }
+
+    def handle_resources_list(self) -> dict[str, Any]:
+        """List exposed MCP resources representing cognitive domains and directives."""
+        resources: list[dict[str, Any]] = [
+            {
+                "uri": "vault://domains",
+                "name": "Discovered Cognitive Domains",
+                "description": "JSON inventory of all cognitive domains and governance rules",
+                "mimeType": "application/json",
+            }
+        ]
+        domains = self.vault.discover_domains()
+        for name, d in domains.items():
+            if d.directives_markdown:
+                resources.append(
+                    {
+                        "uri": f"domain://{name}/directives",
+                        "name": f"{name.capitalize()} Domain Directives",
+                        "description": f"Domain directives and agent constraints for '{name}'",
+                        "mimeType": "text/markdown",
+                    }
+                )
+        return {"resources": resources}
+
+    def handle_resources_read(self, uri: str) -> dict[str, Any]:
+        """Read content of an exposed MCP resource."""
+        domains = self.vault.discover_domains()
+        if uri == "vault://domains":
+            data = {
+                name: {
+                    "name": d.name,
+                    "description": d.description,
+                    "searchable": d.searchable,
+                    "allowed_types": d.allowed_types,
+                    "require_sources": d.require_sources,
+                    "enforce_layout": d.enforce_layout,
+                    "has_directives": bool(d.directives_markdown),
+                }
+                for name, d in domains.items()
+            }
+            return {
+                "contents": [
+                    {
+                        "uri": uri,
+                        "mimeType": "application/json",
+                        "text": json.dumps(data, indent=2),
+                    }
+                ]
+            }
+
+        if uri.startswith("domain://") and uri.endswith("/directives"):
+            domain_name = uri[len("domain://") : -len("/directives")].strip("/")
+            domain_def = domains.get(domain_name)
+            if domain_def is not None and domain_def.directives_markdown:
+                return {
+                    "contents": [
+                        {
+                            "uri": uri,
+                            "mimeType": "text/markdown",
+                            "text": domain_def.directives_markdown,
+                        }
+                    ]
+                }
+            return {
+                "contents": [
+                    {
+                        "uri": uri,
+                        "mimeType": "text/markdown",
+                        "text": f"# {domain_name.capitalize()} Directives\n\nNo custom directives configured.",
+                    }
+                ]
+            }
+
+        raise ValueError(f"Unknown resource URI: {uri}")
 
 
 def run_mcp_server(vault: Vault) -> int:
@@ -331,6 +423,10 @@ def run_mcp_server(vault: Vault) -> int:
                 tool_name = params.get("name", "")
                 tool_args = params.get("arguments", {})
                 resp["result"] = server.handle_tools_call(tool_name, tool_args)
+            elif method == "resources/list":
+                resp["result"] = server.handle_resources_list()
+            elif method == "resources/read":
+                resp["result"] = server.handle_resources_read(params.get("uri", ""))
             elif method == "ping":
                 resp["result"] = {}
             else:

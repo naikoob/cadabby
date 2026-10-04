@@ -1,6 +1,6 @@
 {
   "name": "cadabby",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Epistemically auditable LLM Wiki engine for humans and AI agents",
   "author": {
     "name": "Cadabby Project"

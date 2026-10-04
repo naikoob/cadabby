@@ -55,6 +55,20 @@ DIR_AGENTS = ".agents"
 DIR_CLAUDE = ".claude"
 DIR_OBSIDIAN = ".obsidian"
 
+DEFAULT_IGNORED_DIRS = frozenset({
+    ".git",
+    ".cadabby",
+    ".obsidian",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    "target",
+    "dist",
+    "build",
+    ".pytest_cache",
+})
+
 FILE_CONFIG = ".cadabby.json"
 FILE_INDEX = "index.md"
 FILE_LOG = "log.md"

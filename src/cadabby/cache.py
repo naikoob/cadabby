@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Any
 
 from cadabby.constants import (
+    DEFAULT_IGNORED_DIRS,
     DEFAULT_RAW_TEXT_EXTENSIONS,
+    FILE_AGENTS,
     FTS_COLUMN_WEIGHTS,
     SCHEMA_VERSION,
 )
@@ -37,11 +39,17 @@ class SearchResult:
     trust_tier: str | None
     score: float
     snippet: str
+    domain: str = ""
+
+    def __post_init__(self):
+        if not self.domain and self.cid:
+            self.domain = self.cid.split("/")[0]
 
     def to_dict(self) -> dict[str, Any]:
         """Convert SearchResult to serializable dictionary."""
         return {
             "cid": self.cid,
+            "domain": self.domain or (self.cid.split("/")[0] if self.cid else ""),
             "title": self.title,
             "description": self.description,
             "type": self.type,
@@ -215,7 +223,7 @@ class VaultCache:
 
         # Check existing row
         cur = conn.execute(
-            "SELECT id, title, description, body, tags FROM notes WHERE rel_path = ?;",
+            "SELECT id, layer, parse_error, title, description, body, tags FROM notes WHERE rel_path = ?;",
             (rel_path,),
         )
         existing = cur.fetchone()
@@ -227,12 +235,16 @@ class VaultCache:
             old_body = existing["body"] or ""
             old_tags = existing["tags"] or ""
 
-            # 1. Retract old terms from FTS5 index using OLD values
-            conn.execute(
-                "INSERT INTO notes_fts(notes_fts, rowid, title, description, body, tags) "
-                "VALUES('delete', ?, ?, ?, ?, ?);",
-                (row_id, old_title, old_desc, old_body, old_tags),
-            )
+            # 1. Retract old terms from FTS5 index using OLD values if previously indexed
+            if existing["layer"] != "raw" and existing["parse_error"] is None:
+                try:
+                    conn.execute(
+                        "INSERT INTO notes_fts(notes_fts, rowid, title, description, body, tags) "
+                        "VALUES('delete', ?, ?, ?, ?, ?);",
+                        (row_id, old_title, old_desc, old_body, old_tags),
+                    )
+                except sqlite3.OperationalError:
+                    pass
 
             # 2. Update 'notes' row
             conn.execute(
@@ -299,8 +311,8 @@ class VaultCache:
             row_id = cur.lastrowid
             assert row_id is not None
 
-        # 3. Insert into FTS5 index only if valid wiki note without parse errors
-        if layer == "wiki" and parse_error is None:
+        # 3. Insert into FTS5 index only if valid cognitive domain note without parse errors
+        if layer != "raw" and parse_error is None:
             conn.execute(
                 "INSERT INTO notes_fts(rowid, title, description, body, tags) VALUES (?, ?, ?, ?, ?);",
                 (row_id, title or "", description or "", body, tags_str),
@@ -315,7 +327,7 @@ class VaultCache:
         """
         conn = self.get_connection()
         cur = conn.execute(
-            "SELECT id, cid, title, description, body, tags FROM notes WHERE rel_path = ?;",
+            "SELECT id, cid, layer, parse_error, title, description, body, tags FROM notes WHERE rel_path = ?;",
             (rel_path,),
         )
         row = cur.fetchone()
@@ -329,12 +341,16 @@ class VaultCache:
         old_body = row["body"] or ""
         old_tags = row["tags"] or ""
 
-        # Retract from FTS5
-        conn.execute(
-            "INSERT INTO notes_fts(notes_fts, rowid, title, description, body, tags) "
-            "VALUES('delete', ?, ?, ?, ?, ?);",
-            (row_id, old_title, old_desc, old_body, old_tags),
-        )
+        # Retract from FTS5 if previously indexed
+        if row["layer"] != "raw" and row["parse_error"] is None:
+            try:
+                conn.execute(
+                    "INSERT INTO notes_fts(notes_fts, rowid, title, description, body, tags) "
+                    "VALUES('delete', ?, ?, ?, ?, ?);",
+                    (row_id, old_title, old_desc, old_body, old_tags),
+                )
+            except sqlite3.OperationalError:
+                pass
 
         # Delete dependent edges
         conn.execute("DELETE FROM links WHERE source_cid = ?;", (cid,))
@@ -353,12 +369,27 @@ class VaultCache:
         integrity_mode = self.vault.config.get("integrity", "mtime_size")
         raw_text_exts = tuple(self.vault.config.get("raw_text_extensions", DEFAULT_RAW_TEXT_EXTENSIONS))
 
-        # Discover all files on disk under wiki/ and raw/
+        # Discover all files on disk under raw/ and cognitive domains
         disk_files: dict[str, Path] = {}
-        for directory, layer in [(self.vault.wiki_dir, "wiki"), (self.vault.raw_dir, "raw")]:
-            if directory.exists():
-                for p in directory.rglob("*"):
+
+        # 1. Raw evidence directory
+        if self.vault.raw_dir.exists():
+            for p in self.vault.raw_dir.rglob("*"):
+                if p.is_file() and not p.name.startswith("."):
+                    if not any(part in DEFAULT_IGNORED_DIRS for part in p.parts):
+                        rel = self.vault.rel_path(p)
+                        disk_files[rel] = p
+
+        # 2. Cognitive domains (wiki, customers, projects, etc.)
+        domains = self.vault.discover_domains()
+        for domain_name, domain_def in domains.items():
+            if domain_def.path.exists():
+                for p in domain_def.path.rglob("*"):
                     if p.is_file() and not p.name.startswith("."):
+                        if p.name == FILE_AGENTS:
+                            continue
+                        if any(part in DEFAULT_IGNORED_DIRS for part in p.parts):
+                            continue
                         rel = self.vault.rel_path(p)
                         disk_files[rel] = p
 
@@ -405,13 +436,13 @@ class VaultCache:
             cid = path_to_cid(rel_path)
             modified_cids.add(cid)
 
-            if layer == "wiki":
+            if layer != "raw":
                 content = abs_path.read_text("utf-8", errors="replace")
                 try:
                     fm, body = parse_frontmatter(content)
                     b_hash = compute_body_hash(body)
                     tier = derive_trust_tier(fm.get("verified"), b_hash)
-                    title = fm.get("title")
+                    title = fm.get("title") or abs_path.stem
                     desc = fm.get("description")
                     type_ = fm.get("type")
                     status = fm.get("status")
@@ -507,7 +538,7 @@ class VaultCache:
 
         # 3. Resolve all link targets if vault structure changed
         if inserted_count > 0 or updated_count > 0 or deleted_count > 0 or force:
-            cur = conn.execute("SELECT cid FROM notes WHERE layer = 'wiki' AND parse_error IS NULL;")
+            cur = conn.execute("SELECT cid FROM notes WHERE layer != 'raw' AND parse_error IS NULL;")
             all_cids = [row["cid"] for row in cur.fetchall()]
             resolver = LinkTargetIndex(all_cids)
 
@@ -536,9 +567,10 @@ class VaultCache:
         status: str | None = None,
         trust: str | None = None,
         tag: str | None = None,
+        domain: str | None = None,
         limit: int = 20,
     ) -> list[SearchResult]:
-        """Perform BM25 search across wiki notes with epistemic rank boosting conforming to §4.4."""
+        """Perform BM25 search across cognitive domain notes with epistemic rank boosting conforming to §4.4."""
         # Ensure cache is synced
         self.scan()
         conn = self.get_connection()
@@ -559,9 +591,14 @@ class VaultCache:
         where_clauses = [
             "notes_fts MATCH :query",
             "n.parse_error IS NULL",
-            "n.layer = 'wiki'",
         ]
         params: dict[str, Any] = {"query": query, "limit": limit}
+
+        if domain:
+            where_clauses.append("n.layer = :domain")
+            params["domain"] = domain
+        else:
+            where_clauses.append("n.layer != 'raw'")
 
         if type_:
             where_clauses.append("n.type = :type")
@@ -596,9 +633,10 @@ class VaultCache:
             cur = conn.execute(sql, params)
             results = []
             for row in cur.fetchall():
+                cid = row["cid"]
                 results.append(
                     SearchResult(
-                        cid=row["cid"],
+                        cid=cid,
                         title=row["title"],
                         description=row["description"],
                         type=row["type"],
@@ -606,6 +644,7 @@ class VaultCache:
                         trust_tier=row["trust_tier"],
                         score=float(row["score"]),
                         snippet=row["snippet"],
+                        domain=cid.split("/")[0] if cid else "",
                     )
                 )
             return results
@@ -632,25 +671,33 @@ class VaultCache:
         unprocessed_raw = cur.fetchone()[0]
 
         cur = conn.execute(
-            "SELECT trust_tier, COUNT(*) as cnt FROM notes WHERE layer = 'wiki' GROUP BY trust_tier;"
+            "SELECT layer, COUNT(*) as cnt FROM notes WHERE layer != 'raw' GROUP BY layer;"
+        )
+        domain_counts = {r["layer"]: r["cnt"] for r in cur.fetchall()}
+        total_notes = sum(domain_counts.values())
+
+        cur = conn.execute(
+            "SELECT trust_tier, COUNT(*) as cnt FROM notes WHERE layer != 'raw' GROUP BY trust_tier;"
         )
         tier_counts = {r["trust_tier"] or "unverified": r["cnt"] for r in cur.fetchall()}
         stale_count = tier_counts.get("stale-verified", 0)
 
         cur = conn.execute(
-            "SELECT type, COUNT(*) as cnt FROM notes WHERE layer = 'wiki' GROUP BY type;"
+            "SELECT type, COUNT(*) as cnt FROM notes WHERE layer != 'raw' GROUP BY type;"
         )
         type_counts = {r["type"] or "unknown": r["cnt"] for r in cur.fetchall()}
 
         cur = conn.execute(
-            "SELECT status, COUNT(*) as cnt FROM notes WHERE layer = 'wiki' GROUP BY status;"
+            "SELECT status, COUNT(*) as cnt FROM notes WHERE layer != 'raw' GROUP BY status;"
         )
         status_counts = {r["status"] or "unknown": r["cnt"] for r in cur.fetchall()}
 
         return {
             "vault_name": self.vault.config.get("vault_name", "vault"),
             "root": str(self.vault.root),
-            "total_notes": total_wiki,
+            "total_notes": total_notes,
+            "total_wiki": total_wiki,
+            "domains": domain_counts,
             "total_raw": total_raw,
             "unprocessed_raw": unprocessed_raw,
             "unprocessed_raw_sources": unprocessed_raw,

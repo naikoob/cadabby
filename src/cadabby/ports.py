@@ -53,6 +53,7 @@ class IndexCachePort(Protocol):
         status: str | None = None,
         trust: str | None = None,
         tag: str | None = None,
+        domain: str | None = None,
         limit: int = 20,
     ) -> list[Any]:
         """Execute epistemic search with trust and status boosting."""

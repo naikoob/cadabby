@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from cadabby.constants import (
+    DEFAULT_IGNORED_DIRS,
     DEFAULT_INTEGRITY,
     DEFAULT_LOG_ROTATE_BYTES,
     DEFAULT_RAW_TEXT_EXTENSIONS,
@@ -21,13 +22,17 @@ from cadabby.constants import (
     DIR_LOG,
     DIR_RAW,
     DIR_WIKI,
+    FILE_AGENTS,
     FILE_CACHE_DB,
     FILE_CONFIG,
     FILE_INDEX,
     FILE_LOCK,
     FILE_LOG,
+    NOTE_TYPES,
     SCHEMA_VERSION,
 )
+from cadabby.domain import DomainDefinition
+from cadabby.frontmatter import parse_frontmatter
 
 
 def find_vault_root(start_path: Path | str | None = None) -> Path | None:
@@ -117,32 +122,49 @@ def load_vault_config(vault_root: Path) -> dict[str, Any]:
 
 
 def path_to_cid(rel_path: str | Path) -> str:
-    """Map a vault-relative path to its canonical CID.
+    """Map a vault-relative path to its canonical CID across all domains.
 
     Examples:
         'wiki/concepts/Epistemic-Trust-Tiers.md' -> 'wiki/concepts/Epistemic-Trust-Tiers'
+        'customers/acme/README.md' -> 'customers/acme/README'
+        'projects/apollo/rfc-001.md' -> 'projects/apollo/rfc-001'
         'raw/paper.pdf' -> 'raw/paper.pdf'
+        'raw/notes.md' -> 'raw/notes.md'
     """
     clean_path = str(rel_path).replace("\\", "/").strip("/")
-    if clean_path.startswith(f"{DIR_WIKI}/") and clean_path.endswith(".md"):
-        return clean_path[:-3]
-    return clean_path
+    first_seg = clean_path.split("/")[0]
+    if first_seg in (DIR_RAW, DIR_LOG) or not clean_path.endswith(".md"):
+        return clean_path
+    return clean_path[:-3]
 
 
 def cid_to_path(cid: str) -> str:
-    """Map a canonical CID back to its vault-relative path."""
+    """Map a canonical CID back to its vault-relative path across all domains.
+
+    Examples:
+        'wiki/concepts/Epistemic-Trust-Tiers' -> 'wiki/concepts/Epistemic-Trust-Tiers.md'
+        'customers/acme/README' -> 'customers/acme/README.md'
+        'raw/paper.pdf' -> 'raw/paper.pdf'
+    """
     clean_cid = str(cid).replace("\\", "/").strip("/")
-    if clean_cid.startswith(f"{DIR_WIKI}/") and not clean_cid.endswith(".md"):
-        return f"{clean_cid}.md"
-    return clean_cid
+    first_seg = clean_cid.split("/")[0]
+    if first_seg in (DIR_RAW, DIR_LOG) or clean_cid.endswith(".md"):
+        return clean_cid
+    return f"{clean_cid}.md"
 
 
 def path_to_layer(rel_path: str | Path) -> str:
-    """Determine layer ('wiki' or 'raw') from relative path."""
+    """Determine domain or layer name from the relative path.
+
+    Examples:
+        'wiki/concepts/Foo.md' -> 'wiki'
+        'customers/acme/README.md' -> 'customers'
+        'projects/apollo/rfc-001.md' -> 'projects'
+        'raw/data.csv' -> 'raw'
+    """
     clean = str(rel_path).replace("\\", "/").strip("/")
-    if clean.startswith(f"{DIR_WIKI}/"):
-        return "wiki"
-    return "raw"
+    parts = clean.split("/")
+    return parts[0] if len(parts) > 1 else "root"
 
 
 def path_to_stem(rel_path: str | Path) -> str:
@@ -198,6 +220,11 @@ class Vault:
         return self.dot_cadabby_dir / FILE_CACHE_DB
 
     @property
+    def cache_path(self) -> Path:
+        """Alias for cache_db_path."""
+        return self.cache_db_path
+
+    @property
     def lock_path(self) -> Path:
         return self.dot_cadabby_dir / FILE_LOCK
 
@@ -220,3 +247,88 @@ class Vault:
     def abs_path(self, rel_path: str | Path) -> Path:
         """Resolve a vault-relative path to an absolute Path."""
         return (self.root / rel_path).resolve()
+
+    def discover_domains(self) -> dict[str, DomainDefinition]:
+        """Discover all cognitive domains in the vault."""
+        domains: dict[str, DomainDefinition] = {}
+
+        # 1. Built-in wiki domain (default contract if no AGENTS.md)
+        wiki_agents_md = self.wiki_dir / FILE_AGENTS
+        if wiki_agents_md.exists():
+            domains[DIR_WIKI] = self._load_domain_from_agents_md(DIR_WIKI, self.wiki_dir, wiki_agents_md)
+        else:
+            domains[DIR_WIKI] = DomainDefinition(
+                name=DIR_WIKI,
+                path=self.wiki_dir,
+                description="Canonical knowledge base",
+                searchable=True,
+                allowed_types=list(NOTE_TYPES),
+                require_sources=False,
+                enforce_layout=True,
+                directives_markdown="",
+            )
+
+        # 2. Discover arbitrary top-level directories
+        if self.root.exists():
+            for entry in sorted(self.root.iterdir()):
+                if not entry.is_dir():
+                    continue
+                name = entry.name
+                if (
+                    name.startswith(".")
+                    or name in (DIR_WIKI, DIR_RAW, DIR_LOG)
+                    or name in DEFAULT_IGNORED_DIRS
+                ):
+                    continue
+
+                agents_md = entry / FILE_AGENTS
+                if agents_md.exists():
+                    domains[name] = self._load_domain_from_agents_md(name, entry, agents_md)
+                else:
+                    domains[name] = DomainDefinition(
+                        name=name,
+                        path=entry,
+                        description=f"{name.capitalize()} domain",
+                        searchable=True,
+                        allowed_types=None,  # Open
+                        require_sources=False,
+                        enforce_layout=False,
+                        directives_markdown="",
+                    )
+        return domains
+
+    def _load_domain_from_agents_md(
+        self, name: str, dir_path: Path, agents_md: Path
+    ) -> DomainDefinition:
+        """Parse an AGENTS.md file into a DomainDefinition."""
+        raw_text = agents_md.read_text("utf-8", errors="replace")
+        try:
+            fm, body = parse_frontmatter(raw_text)
+        except Exception:
+            fm, body = {}, raw_text
+
+        schema_cfg = fm.get("schema", {}) if isinstance(fm.get("schema"), dict) else fm
+
+        allowed_types = schema_cfg.get("allowed_types", fm.get("allowed_types"))
+        if isinstance(allowed_types, list):
+            allowed_types_list: list[str] | None = [str(t) for t in allowed_types]
+        elif name == DIR_WIKI:
+            allowed_types_list = list(NOTE_TYPES)
+        else:
+            allowed_types_list = None
+
+        searchable = bool(fm.get("searchable", True))
+        require_sources = bool(schema_cfg.get("require_sources", fm.get("require_sources", False)))
+        enforce_layout = bool(schema_cfg.get("enforce_layout", fm.get("enforce_layout", (name == DIR_WIKI))))
+        description = str(fm.get("description", f"{name.capitalize()} domain"))
+
+        return DomainDefinition(
+            name=name,
+            path=dir_path,
+            description=description,
+            searchable=searchable,
+            allowed_types=allowed_types_list,
+            require_sources=require_sources,
+            enforce_layout=enforce_layout,
+            directives_markdown=body.strip(),
+        )
