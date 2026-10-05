@@ -43,17 +43,20 @@ def resolve_cli_vault(args: argparse.Namespace) -> Vault:
 
 
 def get_assets_dir() -> Path:
-    """Return path to assets directory."""
-    # Look next to package or repository root
-    pkg_root = Path(__file__).resolve().parent.parent.parent
-    assets_dir = pkg_root / "assets"
-    if assets_dir.exists():
-        return assets_dir
-    # Fallback to current working directory
-    cwd_assets = Path.cwd() / "assets"
-    if cwd_assets.exists():
-        return cwd_assets
-    raise RuntimeError(f"Cadabby assets directory not found at {assets_dir}")
+    """Return the packaged scaffolding assets directory.
+
+    Assets ship inside the package rather than at the repository root, so they
+    resolve identically from a wheel, an editable install, and a plain checkout.
+    Resolving them relative to the repository (or the cwd) only ever worked for
+    a source checkout, which left `cadabby init` broken for installed users.
+    """
+    assets_dir = Path(__file__).resolve().parent / "assets"
+    if not assets_dir.is_dir():
+        raise RuntimeError(
+            f"Cadabby assets directory not found at {assets_dir}. "
+            "The installation looks incomplete; reinstall the cadabby package."
+        )
+    return assets_dir
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -73,18 +76,19 @@ def cmd_init(args: argparse.Namespace) -> int:
     (target_dir / ".agents" / "skills" / "librarian").mkdir(parents=True, exist_ok=True)
     (target_dir / ".agents" / "skills" / "technician").mkdir(parents=True, exist_ok=True)
 
-    def copy_template_file(src: Path, dst: Path) -> None:
+    def copy_template_file(src: Path, dst: Path) -> bool:
+        """Copy a template into the vault, honoring --force. True if dst was written."""
         if not src.exists():
-            return
+            return False
         if dst.exists():
             if not force:
                 print(f"Existing file left untouched: {dst.name} (use --force to overwrite)")
-                return
-            else:
-                shutil.copy(src, dst)
-                print(f"Overwrote existing file: {dst.name}")
-        else:
+                return False
             shutil.copy(src, dst)
+            print(f"Overwrote existing file: {dst.name}")
+            return True
+        shutil.copy(src, dst)
+        return True
 
     # 1. Config .cadabby.json
     cfg_src = vault_tpl / ".cadabby.json"
@@ -97,18 +101,24 @@ def cmd_init(args: argparse.Namespace) -> int:
         atomic_write(cfg_dst, json.dumps(cfg_data, indent=2) + "\n")
 
     # 2. Files from vault template
+    wrote_mcp_json = False
     for filename in (".gitignore", ".mcp.json", "AGENTS.md", "CLAUDE.md", "GEMINI.md", "STYLE.md", "index.md"):
         src = vault_tpl / filename
         dst = target_dir / filename
-        copy_template_file(src, dst)
+        written = copy_template_file(src, dst)
+        if filename == ".mcp.json":
+            wrote_mcp_json = written
 
-    # Configure .mcp.json with the initialized vault path for Claude Code workspace MCP
-    mcp_json_dst = target_dir / ".mcp.json"
-    if mcp_json_dst.exists():
+    # Bind the freshly written .mcp.json to this vault and interpreter, so Claude
+    # Code can mount the workspace server with no further configuration. Gated on
+    # having actually written the file: rewriting one that --force just declined to
+    # touch would contradict the message printed above. Use 'cadabby install' to
+    # re-bind an existing config.
+    if wrote_mcp_json:
         from cadabby.installer import make_mcp_server_entry
 
         claude_mcp_data = {"mcpServers": {"cadabby": make_mcp_server_entry(target_dir)}}
-        atomic_write(mcp_json_dst, json.dumps(claude_mcp_data, indent=2) + "\n")
+        atomic_write(target_dir / ".mcp.json", json.dumps(claude_mcp_data, indent=2) + "\n")
 
     # 3. Touch empty log.md
     log_file = target_dir / "log.md"
@@ -132,25 +142,24 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     # 6. Copy Antigravity vault-scoped plugin & MCP configuration to .agents/plugins/cadabby/
     plugin_src = assets / "plugins" / "cadabby"
-    if not plugin_src.exists():
-        plugin_src = Path(__file__).resolve().parent.parent.parent / "plugins" / "cadabby"
-
     if plugin_src.exists():
         dst_plugin = target_dir / ".agents" / "plugins" / "cadabby"
+        wrote_mcp_cfg = False
         for p in sorted(plugin_src.rglob("*")):
             if p.is_file():
                 rel = p.relative_to(plugin_src)
                 target_file = dst_plugin / rel
                 target_file.parent.mkdir(parents=True, exist_ok=True)
-                copy_template_file(p, target_file)
+                written = copy_template_file(p, target_file)
+                if rel.as_posix() == "mcp_config.json":
+                    wrote_mcp_cfg = written
 
-        # Configure mcp_config.json with the initialized vault path so Antigravity connects seamlessly
-        mcp_cfg_file = dst_plugin / "mcp_config.json"
-        if mcp_cfg_file.exists():
+        # Bind the plugin's MCP config the same way, under the same --force rule
+        if wrote_mcp_cfg:
             from cadabby.installer import make_mcp_server_entry
 
             mcp_data = {"mcpServers": {"cadabby": make_mcp_server_entry(target_dir)}}
-            atomic_write(mcp_cfg_file, json.dumps(mcp_data, indent=2) + "\n")
+            atomic_write(dst_plugin / "mcp_config.json", json.dumps(mcp_data, indent=2) + "\n")
 
     # 7. Optional Obsidian config
     if args.obsidian:

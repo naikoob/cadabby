@@ -8,12 +8,12 @@ import unittest
 from pathlib import Path
 
 from cadabby.installer import (
-    CADABBY_MCP_SERVER_ENTRY,
     default_antigravity_path,
     default_claude_path,
     install_antigravity,
     install_claude,
     make_mcp_server_entry,
+    mcp_launch_argv,
     run_install,
     uninstall_antigravity,
     uninstall_claude,
@@ -48,7 +48,7 @@ class TestInstaller(unittest.TestCase):
         data = json.loads(claude_cfg.read_text("utf-8"))
         self.assertEqual(data["userPreference"], "dark_mode")
         self.assertIn("weather", data["mcpServers"])
-        self.assertEqual(data["mcpServers"]["cadabby"], CADABBY_MCP_SERVER_ENTRY)
+        self.assertEqual(data["mcpServers"]["cadabby"], make_mcp_server_entry(None))
 
         first_content = claude_cfg.read_text("utf-8")
 
@@ -96,7 +96,7 @@ class TestInstaller(unittest.TestCase):
         ok, msg = install_claude(dest_path=claude_cfg, force=True)
         self.assertTrue(ok)
         data = json.loads(claude_cfg.read_text("utf-8"))
-        self.assertEqual(data["mcpServers"]["cadabby"], CADABBY_MCP_SERVER_ENTRY)
+        self.assertEqual(data["mcpServers"]["cadabby"], make_mcp_server_entry(None))
 
     def test_antigravity_install_and_uninstall(self):
         plugin_dest = self.root / "antigravity" / "plugins" / "cadabby"
@@ -135,9 +135,11 @@ class TestInstaller(unittest.TestCase):
         self.assertTrue(data.get("existing"))
 
     def test_make_mcp_server_entry(self):
+        command, *base_args = mcp_launch_argv()
+
         # Without vault
         entry = make_mcp_server_entry(None)
-        self.assertEqual(entry, {"command": "python3", "args": ["-m", "cadabby", "mcp"]})
+        self.assertEqual(entry, {"command": command, "args": base_args})
 
         # With vault
         vault_dir = self.root / "my-vault"
@@ -145,10 +147,19 @@ class TestInstaller(unittest.TestCase):
         self.assertEqual(
             entry_vault,
             {
-                "command": "python3",
-                "args": ["-m", "cadabby", "mcp", "--vault", str(vault_dir.resolve())],
+                "command": command,
+                "args": [*base_args, "--vault", str(vault_dir.resolve())],
             },
         )
+
+    def test_mcp_launch_argv_never_emits_bare_python(self):
+        # A harness resolves the command from its own PATH, so a bare "python3"
+        # would miss any isolated install (pipx, uv tool, venv).
+        argv = mcp_launch_argv()
+        self.assertTrue(Path(argv[0]).is_absolute(), f"not an absolute path: {argv[0]}")
+        self.assertTrue(Path(argv[0]).exists())
+        self.assertNotIn(argv[0], ("python", "python3"))
+        self.assertEqual(argv[-1], "mcp")
 
     def test_claude_install_vault_path(self):
         claude_cfg = self.root / "claude_vault.json"
@@ -161,7 +172,7 @@ class TestInstaller(unittest.TestCase):
         data = json.loads(claude_cfg.read_text("utf-8"))
         self.assertEqual(
             data["mcpServers"]["cadabby"]["args"],
-            ["-m", "cadabby", "mcp", "--vault", str(vault1.resolve())],
+            [*mcp_launch_argv()[1:], "--vault", str(vault1.resolve())],
         )
 
         # 2. Idempotent install with same vault
@@ -180,7 +191,7 @@ class TestInstaller(unittest.TestCase):
         data = json.loads(claude_cfg.read_text("utf-8"))
         self.assertEqual(
             data["mcpServers"]["cadabby"]["args"],
-            ["-m", "cadabby", "mcp", "--vault", str(vault2.resolve())],
+            [*mcp_launch_argv()[1:], "--vault", str(vault2.resolve())],
         )
 
     def test_antigravity_install_vault_path(self):
@@ -196,7 +207,7 @@ class TestInstaller(unittest.TestCase):
         mcp_cfg = json.loads((plugin_dest / "mcp_config.json").read_text("utf-8"))
         self.assertEqual(
             mcp_cfg["mcpServers"]["cadabby"]["args"],
-            ["-m", "cadabby", "mcp", "--vault", str(vault1.resolve())],
+            [*mcp_launch_argv()[1:], "--vault", str(vault1.resolve())],
         )
 
         # 2. Idempotent install with same vault
@@ -215,7 +226,7 @@ class TestInstaller(unittest.TestCase):
         mcp_cfg = json.loads((plugin_dest / "mcp_config.json").read_text("utf-8"))
         self.assertEqual(
             mcp_cfg["mcpServers"]["cadabby"]["args"],
-            ["-m", "cadabby", "mcp", "--vault", str(vault2.resolve())],
+            [*mcp_launch_argv()[1:], "--vault", str(vault2.resolve())],
         )
 
     def test_antigravity_replace_symlink_with_vault_bound(self):
@@ -237,7 +248,7 @@ class TestInstaller(unittest.TestCase):
             mcp_cfg = json.loads((plugin_dest / "mcp_config.json").read_text("utf-8"))
             self.assertEqual(
                 mcp_cfg["mcpServers"]["cadabby"]["args"],
-                ["-m", "cadabby", "mcp", "--vault", str(vault.resolve())],
+                [*mcp_launch_argv()[1:], "--vault", str(vault.resolve())],
             )
 
     def test_default_paths_workspace_and_global(self):
@@ -275,7 +286,7 @@ class TestInstaller(unittest.TestCase):
         claude_data = json.loads(claude_mcp.read_text("utf-8"))
         self.assertEqual(
             claude_data["mcpServers"]["cadabby"]["args"],
-            ["-m", "cadabby", "mcp", "--vault", str(vault.resolve())],
+            [*mcp_launch_argv()[1:], "--vault", str(vault.resolve())],
         )
 
         # Check Antigravity workspace plugin
@@ -284,7 +295,7 @@ class TestInstaller(unittest.TestCase):
         ag_cfg = json.loads((ag_plugin / "mcp_config.json").read_text("utf-8"))
         self.assertEqual(
             ag_cfg["mcpServers"]["cadabby"]["args"],
-            ["-m", "cadabby", "mcp", "--vault", str(vault.resolve())],
+            [*mcp_launch_argv()[1:], "--vault", str(vault.resolve())],
         )
 
         # Uninstall in workspace mode

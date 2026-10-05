@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "cadabby": {
-      "command": "python3",
-      "args": ["-m", "cadabby", "mcp"]
-    }
-  }
-}

@@ -19,6 +19,7 @@ from cadabby.cli import (
     cmd_sync,
     cmd_verify,
 )
+from cadabby.installer import mcp_launch_argv
 
 
 class DummyArgs:
@@ -63,7 +64,7 @@ class TestCli(unittest.TestCase):
         self.assertIn("cadabby", mcp_cfg.get("mcpServers", {}))
         self.assertEqual(
             mcp_cfg["mcpServers"]["cadabby"]["args"],
-            ["-m", "cadabby", "mcp", "--vault", str(vault_path.resolve())],
+            [*mcp_launch_argv()[1:], "--vault", str(vault_path.resolve())],
         )
 
         # Verify .mcp.json specifies the vault-scoped cadabby MCP server for Claude Code
@@ -71,11 +72,37 @@ class TestCli(unittest.TestCase):
         self.assertIn("cadabby", claude_mcp.get("mcpServers", {}))
         self.assertEqual(
             claude_mcp["mcpServers"]["cadabby"]["args"],
-            ["-m", "cadabby", "mcp", "--vault", str(vault_path.resolve())],
+            [*mcp_launch_argv()[1:], "--vault", str(vault_path.resolve())],
         )
 
         self.assertTrue((vault_path / ".claude" / "commands" / "ingest.md").exists())
         self.assertTrue((vault_path / ".obsidian" / "app.json").exists())
+
+    def test_init_without_force_does_not_rewrite_existing_mcp_configs(self):
+        # The generated harness configs are subject to --force like every other
+        # template: re-running init must not silently rebind a hand-edited one.
+        vault_path = self.dir / "preserve-vault"
+        self.assertEqual(cmd_init(DummyArgs(vault=str(vault_path), name="v1", obsidian=False)), 0)
+
+        claude_mcp = vault_path / ".mcp.json"
+        ag_mcp = vault_path / ".agents" / "plugins" / "cadabby" / "mcp_config.json"
+        custom = json.dumps({"mcpServers": {"cadabby": {"command": "my-wrapper", "args": []}}}) + "\n"
+        claude_mcp.write_text(custom, "utf-8")
+        ag_mcp.write_text(custom, "utf-8")
+
+        # Re-init without --force leaves both untouched
+        self.assertEqual(cmd_init(DummyArgs(vault=str(vault_path), name="v1", obsidian=False)), 0)
+        self.assertEqual(claude_mcp.read_text("utf-8"), custom)
+        self.assertEqual(ag_mcp.read_text("utf-8"), custom)
+
+        # With --force both are rewritten and re-bound to this vault
+        self.assertEqual(
+            cmd_init(DummyArgs(vault=str(vault_path), name="v1", obsidian=False, force=True)), 0
+        )
+        expected = [*mcp_launch_argv()[1:], "--vault", str(vault_path.resolve())]
+        for cfg in (claude_mcp, ag_mcp):
+            data = json.loads(cfg.read_text("utf-8"))
+            self.assertEqual(data["mcpServers"]["cadabby"]["args"], expected)
 
     def test_cli_lifecycle_on_demo_vault(self):
         demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
@@ -223,7 +250,7 @@ class TestCli(unittest.TestCase):
         claude_data = json.loads(claude_mcp.read_text("utf-8"))
         self.assertEqual(
             claude_data["mcpServers"]["cadabby"]["args"],
-            ["-m", "cadabby", "mcp", "--vault", str(vault_root.resolve())],
+            [*mcp_launch_argv()[1:], "--vault", str(vault_root.resolve())],
         )
 
         ag_mcp = vault_root / ".agents" / "plugins" / "cadabby" / "mcp_config.json"
@@ -231,7 +258,7 @@ class TestCli(unittest.TestCase):
         ag_data = json.loads(ag_mcp.read_text("utf-8"))
         self.assertEqual(
             ag_data["mcpServers"]["cadabby"]["args"],
-            ["-m", "cadabby", "mcp", "--vault", str(vault_root.resolve())],
+            [*mcp_launch_argv()[1:], "--vault", str(vault_root.resolve())],
         )
 
     def test_cmd_install_with_explicit_path(self):
@@ -257,7 +284,7 @@ class TestCli(unittest.TestCase):
         claude_data = json.loads(claude_cfg.read_text("utf-8"))
         self.assertEqual(
             claude_data["mcpServers"]["cadabby"]["args"],
-            ["-m", "cadabby", "mcp", "--vault", str(vault_root.resolve())],
+            [*mcp_launch_argv()[1:], "--vault", str(vault_root.resolve())],
         )
 
         # Also test antigravity install with explicit vault
@@ -276,7 +303,7 @@ class TestCli(unittest.TestCase):
         ag_mcp = json.loads((ag_dest / "mcp_config.json").read_text("utf-8"))
         self.assertEqual(
             ag_mcp["mcpServers"]["cadabby"]["args"],
-            ["-m", "cadabby", "mcp", "--vault", str(vault_root.resolve())],
+            [*mcp_launch_argv()[1:], "--vault", str(vault_root.resolve())],
         )
 
     def test_cmd_install_outside_vault_requires_global(self):
@@ -322,7 +349,7 @@ class TestCli(unittest.TestCase):
         claude_data = json.loads(claude_cfg.read_text("utf-8"))
         self.assertEqual(
             claude_data["mcpServers"]["cadabby"]["args"],
-            ["-m", "cadabby", "mcp"],
+            mcp_launch_argv()[1:],
         )
 
 

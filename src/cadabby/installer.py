@@ -13,38 +13,45 @@ from typing import Any
 
 from cadabby.fsutil import atomic_write
 
-CADABBY_MCP_SERVER_ENTRY = {
-    "command": "python3",
-    "args": ["-m", "cadabby", "mcp"],
-}
+
+def mcp_launch_argv() -> list[str]:
+    """Resolve the argv a harness should spawn to start the MCP server.
+
+    A harness launches this as a bare subprocess with no activated environment,
+    so the command has to name an interpreter that can actually import cadabby.
+    A bare "python3" cannot: the harness resolves it from its own PATH, which
+    for any isolated install (pipx, uv tool, venv) has no cadabby on it.
+
+    Prefers the console script sitting beside the running interpreter, which is
+    by construction the one for this environment, and falls back to the running
+    interpreter itself -- importable by definition, since it is executing now.
+    """
+    # Deliberately not resolve(): a venv's bin/python is a symlink to the base
+    # interpreter, so resolving would leave the venv and miss its console script.
+    bin_dir = Path(sys.executable).parent
+    script = shutil.which("cadabby", path=str(bin_dir))
+    if script:
+        return [script, "mcp"]
+    return [sys.executable, "-m", "cadabby", "mcp"]
 
 
 def make_mcp_server_entry(vault_path: Path | str | None = None) -> dict[str, Any]:
     """Generate the MCP server configuration entry, optionally bound to a vault."""
-    if vault_path is None:
-        return {
-            "command": "python3",
-            "args": ["-m", "cadabby", "mcp"],
-        }
-    resolved = Path(vault_path).resolve()
-    return {
-        "command": "python3",
-        "args": ["-m", "cadabby", "mcp", "--vault", str(resolved)],
-    }
+    command, *args = mcp_launch_argv()
+    if vault_path is not None:
+        args += ["--vault", str(Path(vault_path).resolve())]
+    return {"command": command, "args": args}
 
 
 def get_repo_plugin_dir() -> Path:
-    """Return path to bundled plugins/cadabby directory."""
-    pkg_root = Path(__file__).resolve().parent.parent.parent
-    for candidate in (
-        pkg_root / "plugins" / "cadabby",
-        pkg_root / "assets" / "plugins" / "cadabby",
-        Path.cwd() / "plugins" / "cadabby",
-        Path.cwd() / "assets" / "plugins" / "cadabby",
-    ):
-        if candidate.exists() and candidate.is_dir():
-            return candidate
-    raise RuntimeError(f"Cadabby plugin directory not found")
+    """Return path to the bundled Antigravity plugin directory."""
+    plugin_dir = Path(__file__).resolve().parent / "assets" / "plugins" / "cadabby"
+    if not plugin_dir.is_dir():
+        raise RuntimeError(
+            f"Cadabby plugin directory not found at {plugin_dir}. "
+            "The installation looks incomplete; reinstall the cadabby package."
+        )
+    return plugin_dir
 
 
 def default_antigravity_path(vault_path: Path | str | None = None, is_global: bool = False) -> Path:

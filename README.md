@@ -20,14 +20,38 @@ Cadabby is a zero-dependency, local-first engine and Model Context Protocol (MCP
 
 ## 1. Installation
 
+Cadabby is a command-line application, so install it as a tool rather than as a
+library. Either of these puts `cadabby` on your `PATH` in its own isolated
+environment, leaving your system Python untouched:
+
 ```bash
-# Clone and install in editable mode:
+uv tool install cadabby    # recommended
+pipx install cadabby       # equivalent
+```
+
+Verify:
+
+```bash
+cadabby --help
+```
+
+> **Why not `pip install`?** It works, but it drops Cadabby into whichever
+> environment happens to be active, which makes the install easy to lose track of
+> and easy to break with an unrelated upgrade. Nothing imports `cadabby` as a
+> library, so there is no reason to put it on an interpreter's import path.
+
+Cadabby has **zero runtime dependencies** (pure CPython >= 3.11 standard
+library), so installation never pulls in a transitive dependency tree.
+
+### Contributing
+
+Working on Cadabby itself:
+
+```bash
 git clone https://github.com/your-org/cadabby.git
 cd cadabby
-pip install -e .
-
-# Or run directly via python module without installing:
-python3 -m cadabby.cli --help
+uv sync                    # or: pip install -e .
+uv run python -m unittest discover -s tests
 ```
 
 ---

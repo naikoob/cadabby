@@ -473,7 +473,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
             1,
             f"Librarian persona text duplicated across files: {lib_matches}",
         )
-        self.assertEqual(str(lib_matches[0]), "assets/skills/librarian/SKILL.md")
+        self.assertEqual(str(lib_matches[0]), "src/cadabby/assets/skills/librarian/SKILL.md")
 
         tech_matches = count_phrase_occurrences(technician_phrase)
         self.assertEqual(
@@ -481,7 +481,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
             1,
             f"Technician persona text duplicated across files: {tech_matches}",
         )
-        self.assertEqual(str(tech_matches[0]), "assets/skills/technician/SKILL.md")
+        self.assertEqual(str(tech_matches[0]), "src/cadabby/assets/skills/technician/SKILL.md")
 
         agents_matches = count_phrase_occurrences(agents_md_phrase)
         self.assertEqual(
@@ -489,7 +489,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
             1,
             f"AGENTS.md constitution duplicated across files: {agents_matches}",
         )
-        self.assertEqual(str(agents_matches[0]), "assets/vault/AGENTS.md")
+        self.assertEqual(str(agents_matches[0]), "src/cadabby/assets/vault/AGENTS.md")
 
 
 if __name__ == "__main__":

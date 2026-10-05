@@ -597,10 +597,12 @@ A consequence worth stating: a persona must never be defined once in the vault a
 
 ### 7.2. Google Antigravity Plugin
 
-Cadabby bundles a plugin in `plugins/cadabby/`:
+Cadabby bundles a plugin inside the installed package, at
+`cadabby/assets/plugins/cadabby/`, so it ships in the wheel and resolves
+identically from an installed copy and a source checkout:
 
 ```text
-plugins/cadabby/
+cadabby/assets/plugins/cadabby/
 ├── plugin.json               # Antigravity plugin manifest
 ├── mcp_config.json           # MCP tool provider configuration
 ├── skills/
