@@ -61,7 +61,8 @@ def get_assets_dir() -> Path:
 
 def cmd_init(args: argparse.Namespace) -> int:
     """Scaffold a fresh vault structure conforming to §2.1, §5.3, and §9."""
-    target_dir = Path(args.vault).resolve() if args.vault else Path.cwd()
+    raw_target = getattr(args, "target_path", None) or getattr(args, "vault", None)
+    target_dir = Path(raw_target).resolve() if raw_target else Path.cwd()
     vault_name = args.name or target_dir.name or "vault"
     force = getattr(args, "force", False)
 
@@ -364,8 +365,12 @@ def cmd_status(args: argparse.Namespace) -> int:
     print("\nTrust Tiers:")
     for tier in ("human-reviewed", "machine-confirmed", "stale-verified", "unverified"):
         print(f"  - {tier:<20}: {status_data['trust_tiers'].get(tier, 0)}")
+    print("\nDomains:")
+    for d, count in status_data.get("domains", {}).items():
+        print(f"  - {d:<20}: {count}")
     print("\nTypes:")
-    for t in NOTE_TYPES:
+    all_types = sorted(set(NOTE_TYPES) | set(status_data.get("types", {}).keys()))
+    for t in all_types:
         print(f"  - {t:<20}: {status_data['types'].get(t, 0)}")
     print("\nStatuses:")
     for s, count in status_data["statuses"].items():
@@ -591,6 +596,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # init
     p_init = subparsers.add_parser("init", parents=[vault_parent], help="Scaffold a new vault")
+    p_init.add_argument("target_path", nargs="?", type=Path, help="Target directory for new vault (defaults to --vault or current directory)")
     p_init.add_argument("--name", help="Name of the vault")
     p_init.add_argument("--force", action="store_true", help="Overwrite existing files")
     p_init.add_argument("--obsidian", action="store_true", help="Scaffold Obsidian configuration")
@@ -625,7 +631,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_scaffold = subparsers.add_parser("scaffold", parents=[vault_parent], help="Scaffold a new note")
     p_scaffold.add_argument("title", help="Note title")
     p_scaffold.add_argument("--type", required=True, help="Note type (e.g. concept, entity, or domain-specific type)")
-    p_scaffold.add_argument("--desc", required=True, help="Note description")
+    p_scaffold.add_argument("--desc", "--description", dest="desc", required=True, help="Note description")
     p_scaffold.add_argument("--domain", default="wiki", help="Cognitive domain (default: wiki)")
     p_scaffold.add_argument("--path", help="Custom relative path within domain or vault")
     p_scaffold.add_argument("--tags", help="Comma-separated tags")

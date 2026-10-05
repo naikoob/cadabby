@@ -352,6 +352,27 @@ class TestCli(unittest.TestCase):
             mcp_launch_argv()[1:],
         )
 
+    def test_init_with_positional_target_path(self):
+        vault_path = self.dir / "positional-vault"
+        args = DummyArgs(target_path=vault_path, vault=None, name=None, obsidian=False)
+        ret = cmd_init(args)
+        self.assertEqual(ret, 0)
+        self.assertTrue((vault_path / ".cadabby.json").exists())
+
+    def test_cli_parser_scaffold_description_alias(self):
+        from cadabby.cli import build_parser
+
+        parser = build_parser()
+        args = parser.parse_args(["scaffold", "My-Note", "--type", "concept", "--description", "Desc text", "--vault", str(self.dir)])
+        self.assertEqual(args.desc, "Desc text")
+
+    def test_cli_parser_init_positional_target(self):
+        from cadabby.cli import build_parser
+
+        parser = build_parser()
+        args = parser.parse_args(["init", "/tmp/my-vault"])
+        self.assertEqual(args.target_path, Path("/tmp/my-vault"))
+
 
 if __name__ == "__main__":
     unittest.main()

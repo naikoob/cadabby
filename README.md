@@ -166,13 +166,12 @@ Drop an `AGENTS.md` file into the root of any top-level domain folder to configu
 ---
 description: Customer accounts, CRM dossiers, and stakeholders
 searchable: true
-schema:
-  allowed_types:
-    - account
-    - stakeholder
-    - interaction
-  require_sources: false
-  enforce_layout: false
+allowed_types:
+  - account
+  - stakeholder
+  - interaction
+require_sources: false
+enforce_layout: false
 ---
 
 # Customers Domain Directives
@@ -188,13 +187,51 @@ schema:
 | :--- | :---: | :---: | :--- |
 | `description` | string | `"<Domain> domain"` | Human-readable domain description. |
 | `searchable` | bool | `true` | Whether notes in this domain are indexed and returned in `vault_search`. |
-| `schema.allowed_types` | list[str] | `null` (unrestricted) | Allowed `type:` values in frontmatter. Violations trigger `ENUM_INVALID` in `cadabby lint`. |
-| `schema.require_sources`| bool | `false` | When `true`, notes in this domain must specify non-empty `sources: [...]`. |
-| `schema.enforce_layout` | bool | `false` | When `true`, notes must live in a subfolder matching their `type` (like in `wiki/`). When `false`, arbitrary directory nesting is permitted. |
+| `allowed_types` | list[str] | `null` (unrestricted) | Allowed `type:` values in frontmatter. Violations trigger `ENUM_INVALID` in `cadabby lint`. |
+| `require_sources`| bool | `false` | When `true`, notes in this domain must specify non-empty `sources: [...]`. |
+| `enforce_layout` | bool | `false` | When `true`, notes must live in a subfolder matching their `type` (like in `wiki/`). When `false`, arbitrary directory nesting is permitted. |
 
 ### Permissive vs. Strict Domains
 - **Permissive Domains** (no `AGENTS.md` or `allowed_types: null`): Any non-empty note type and any folder hierarchy are allowed without triggering lint errors.
 - **Strict Domains** (`allowed_types` specified): Linter enforces valid types, while allowing cross-domain wikilinks (`[[Note-Stem]]`) to resolve smoothly across all domains.
+
+### Step-by-Step: Creating a New Cognitive Domain
+
+1. **Choose a Top-Level Directory Name**: Pick a domain name at the vault root (e.g. `customers/`, `projects/`, `research/`). Ensure the name does not conflict with reserved engine directories (`raw/`, `log/`, `.cadabby/`, `.obsidian/`, `.git/`, `.agents/`, `.claude/`, or environment folders like `.venv/`).
+2. **Create the Domain Manifest (Optional but Recommended)**: Create `{domain}/AGENTS.md` to define schema validation and operational directives:
+   ```bash
+   mkdir -p customers
+   cat << 'EOF' > customers/AGENTS.md
+   ---
+   description: "Customer accounts and dossiers"
+   searchable: true
+   allowed_types:
+     - account
+     - contact
+   require_sources: false
+   enforce_layout: false
+   ---
+   # Customer Directives
+   Cross-link all accounts to primary contact notes.
+   EOF
+   ```
+3. **Scaffold Notes in the Domain**:
+   - **Via CLI**:
+     ```bash
+     cadabby scaffold "Acme-Corp" --domain customers --type account --description "Enterprise account dossier"
+     ```
+   - **Via MCP**:
+     Call `vault_scaffold_note(title="Acme-Corp", domain="customers", type="account", description="Enterprise account dossier")`.
+4. **Verify Domain Discovery & Epistemic Health**:
+   ```bash
+   cadabby status
+   ```
+   The status report displays registered domains, their note counts, and schema status.
+5. **Validate Schemas & Integrity**:
+   ```bash
+   cadabby lint
+   ```
+   The linter validates note frontmatter against the domain's `allowed_types` and layout rules.
 
 ### How AI Agents Consume Domain Directives
 - **MCP Resources**: Cadabby exposes `vault://domains` (inventory of all discovered domains) and `domain://{name}/directives` (the markdown body of `{domain}/AGENTS.md`).

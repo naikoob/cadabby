@@ -19,7 +19,28 @@ This vault implements Andrej Karpathy's 3-layer LLM Wiki architecture:
   - `wiki/comparisons/`: Structured trade-off analyses.
   - `wiki/guides/`: Procedural how-tos and runbooks.
 * **Cognitive Domains (Custom Top-Level Directories)**:
-  Additional domain directories (e.g. `customers/`, `projects/`, `team/`) can be created at the vault root. Each domain can contain its own `{domain}/AGENTS.md` manifest specifying schema rules (`allowed_types`, `require_sources`, `enforce_layout`) and localized directives.
+  Any non-reserved top-level directory at the vault root functions as an independent Cognitive Domain (e.g. `customers/`, `projects/`, `research/`).
+  - **Reserved Directories**: The following directories are reserved by the engine and MUST NOT be used as cognitive domains: `raw/`, `log/`, `.cadabby/`, `.obsidian/`, `.git/`, `.agents/`, `.claude/`, plus build/environment folders (`.venv/`, `node_modules/`, `target/`, etc.).
+  - **Domain Manifest (`{domain}/AGENTS.md`)**: A domain defines its governance rules and AI operational constraints via a local `AGENTS.md` file:
+    ```yaml
+    ---
+    description: "Human-readable description of domain purpose"
+    searchable: true
+    allowed_types:
+      - custom_type_a
+      - custom_type_b
+    require_sources: false
+    enforce_layout: false
+    ---
+    # Domain Directives
+    Localized instructions for agents operating on notes in this domain.
+    ```
+  - **Permissive vs. Strict Domains**:
+    - *Permissive* (no `AGENTS.md` or `allowed_types: null`): Accepts any non-empty string for `type:` and allows flexible nested folders.
+    - *Strict* (`allowed_types` list provided): Linter gate 1 strictly validates note types. If `enforce_layout: true`, notes must live in subdirectories matching their `type`.
+  - **Context Injection**: Calling `vault_ground` on a note in any domain automatically injects that domain's directives into the agent context. Agents can also query `vault://domains` and `domain://{domain}/directives` via MCP resources.
+* **Prose & Style Guidelines (`STYLE.md`)**:
+  Consult and adhere to `STYLE.md` for objective voice, capitalized human-readable stems, and strict OKF frontmatter requirements across all cognitive domains.
 * **`index.md` & `log.md` (System Layer)**:
   - `index.md`: Auto-generated catalog linking all notes and tracking source status. Never hand-edited.
   - `log.md`: Append-only chronological audit ledger.
@@ -37,7 +58,8 @@ Knowledge is classified into four explicit epistemic trust tiers:
 
 ### Verification Binding Invariant
 Verification records bind to content (`of: sha256:<body_hash>`), not filenames.
-* **Never forge human verification**: The MCP server strictly forbids `by: human:*`. Agents must stamp `by: agent:<client_id>`.
+* **Never forge human verification**: The MCP server strictly forbids `by: human:*`.
+* **Automatic Agent Attestation**: When calling `vault_verify_note(cid, method=...)`, the MCP server automatically binds the attestation to the active agent session identity (`agent:<client_id>`). Agents only provide `cid` and optional `method`.
 * **Preserve verification debt awareness**: When modifying a verified note, be aware that its tier drops to `stale-verified` until re-verified.
 
 ---
@@ -50,7 +72,7 @@ Always prioritize native Cadabby MCP tools over raw bash commands or filesystem 
    - `vault_search`: Semantic and keyword BM25 search boosted by epistemic trust.
    - `vault_ground`: Retrieve note content, 1-hop links, backlinks, and sources.
 2. **Authoring & Maintenance**:
-   - `vault_scaffold_note`: Create new notes with schema-compliant OKF frontmatter in the correct folder.
+   - `vault_scaffold_note`: Create new notes with schema-compliant OKF frontmatter in the correct folder or domain.
    - `vault_update_note`: Non-destructive frontmatter patching and section append/replace.
    - `vault_verify_note`: Attest to note factual accuracy against sources.
    - `vault_status`: Check vault health, unprocessed sources, and verification debt.
