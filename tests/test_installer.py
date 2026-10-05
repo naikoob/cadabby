@@ -9,8 +9,11 @@ from pathlib import Path
 
 from cadabby.installer import (
     CADABBY_MCP_SERVER_ENTRY,
+    default_antigravity_path,
+    default_claude_path,
     install_antigravity,
     install_claude,
+    make_mcp_server_entry,
     run_install,
     uninstall_antigravity,
     uninstall_claude,
@@ -131,6 +134,167 @@ class TestInstaller(unittest.TestCase):
         self.assertNotIn("cadabby", data.get("mcpServers", {}))
         self.assertTrue(data.get("existing"))
 
+    def test_make_mcp_server_entry(self):
+        # Without vault
+        entry = make_mcp_server_entry(None)
+        self.assertEqual(entry, {"command": "python3", "args": ["-m", "cadabby", "mcp"]})
+
+        # With vault
+        vault_dir = self.root / "my-vault"
+        entry_vault = make_mcp_server_entry(vault_dir)
+        self.assertEqual(
+            entry_vault,
+            {
+                "command": "python3",
+                "args": ["-m", "cadabby", "mcp", "--vault", str(vault_dir.resolve())],
+            },
+        )
+
+    def test_claude_install_vault_path(self):
+        claude_cfg = self.root / "claude_vault.json"
+        vault1 = self.root / "vault-one"
+        vault2 = self.root / "vault-two"
+
+        # 1. Install bound to vault1
+        ok, msg = install_claude(dest_path=claude_cfg, vault_path=vault1)
+        self.assertTrue(ok)
+        data = json.loads(claude_cfg.read_text("utf-8"))
+        self.assertEqual(
+            data["mcpServers"]["cadabby"]["args"],
+            ["-m", "cadabby", "mcp", "--vault", str(vault1.resolve())],
+        )
+
+        # 2. Idempotent install with same vault
+        ok, msg = install_claude(dest_path=claude_cfg, vault_path=vault1)
+        self.assertTrue(ok)
+        self.assertIn("unchanged", msg)
+
+        # 3. Conflict when pointing to vault2 without force
+        ok, msg = install_claude(dest_path=claude_cfg, vault_path=vault2, force=False)
+        self.assertFalse(ok)
+        self.assertIn("Conflict", msg)
+
+        # 4. Overwrite when force=True
+        ok, msg = install_claude(dest_path=claude_cfg, vault_path=vault2, force=True)
+        self.assertTrue(ok)
+        data = json.loads(claude_cfg.read_text("utf-8"))
+        self.assertEqual(
+            data["mcpServers"]["cadabby"]["args"],
+            ["-m", "cadabby", "mcp", "--vault", str(vault2.resolve())],
+        )
+
+    def test_antigravity_install_vault_path(self):
+        plugin_dest = self.root / "antigravity" / "plugins" / "cadabby"
+        vault1 = self.root / "ag-vault-1"
+        vault2 = self.root / "ag-vault-2"
+
+        # 1. Install bound to vault1 (copies repo plugin and writes mcp_config.json)
+        ok, msg = install_antigravity(dest_path=plugin_dest, vault_path=vault1)
+        self.assertTrue(ok)
+        self.assertTrue(plugin_dest.exists())
+        self.assertFalse(plugin_dest.is_symlink())
+        mcp_cfg = json.loads((plugin_dest / "mcp_config.json").read_text("utf-8"))
+        self.assertEqual(
+            mcp_cfg["mcpServers"]["cadabby"]["args"],
+            ["-m", "cadabby", "mcp", "--vault", str(vault1.resolve())],
+        )
+
+        # 2. Idempotent install with same vault
+        ok, msg = install_antigravity(dest_path=plugin_dest, vault_path=vault1)
+        self.assertTrue(ok)
+        self.assertIn("unchanged", msg)
+
+        # 3. Conflict when installing for vault2 without force
+        ok, msg = install_antigravity(dest_path=plugin_dest, vault_path=vault2, force=False)
+        self.assertFalse(ok)
+        self.assertIn("Conflict", msg)
+
+        # 4. Overwrite with force
+        ok, msg = install_antigravity(dest_path=plugin_dest, vault_path=vault2, force=True)
+        self.assertTrue(ok)
+        mcp_cfg = json.loads((plugin_dest / "mcp_config.json").read_text("utf-8"))
+        self.assertEqual(
+            mcp_cfg["mcpServers"]["cadabby"]["args"],
+            ["-m", "cadabby", "mcp", "--vault", str(vault2.resolve())],
+        )
+
+    def test_antigravity_replace_symlink_with_vault_bound(self):
+        plugin_dest = self.root / "antigravity_symlink" / "cadabby"
+        # First install unbound (symlink)
+        ok, _ = install_antigravity(dest_path=plugin_dest)
+        self.assertTrue(ok)
+        if plugin_dest.is_symlink():
+            vault = self.root / "bound-vault"
+            # Without force: conflict
+            ok, msg = install_antigravity(dest_path=plugin_dest, vault_path=vault, force=False)
+            self.assertFalse(ok)
+            self.assertIn("Conflict", msg)
+
+            # With force: replaces symlink with copy and writes mcp_config.json
+            ok, msg = install_antigravity(dest_path=plugin_dest, vault_path=vault, force=True)
+            self.assertTrue(ok)
+            self.assertFalse(plugin_dest.is_symlink())
+            mcp_cfg = json.loads((plugin_dest / "mcp_config.json").read_text("utf-8"))
+            self.assertEqual(
+                mcp_cfg["mcpServers"]["cadabby"]["args"],
+                ["-m", "cadabby", "mcp", "--vault", str(vault.resolve())],
+            )
+
+    def test_default_paths_workspace_and_global(self):
+        vault = self.root / "path-vault"
+        # Claude paths
+        self.assertEqual(default_claude_path(None, is_global=False), Path.home() / ".claude.json")
+        self.assertEqual(default_claude_path(vault, is_global=False), vault.resolve() / ".mcp.json")
+        self.assertEqual(default_claude_path(vault, is_global=True), Path.home() / ".claude.json")
+
+        # Antigravity paths
+        self.assertEqual(
+            default_antigravity_path(None, is_global=False),
+            Path.home() / ".gemini" / "antigravity" / "plugins" / "cadabby",
+        )
+        self.assertEqual(
+            default_antigravity_path(vault, is_global=False),
+            vault.resolve() / ".agents" / "plugins" / "cadabby",
+        )
+        self.assertEqual(
+            default_antigravity_path(vault, is_global=True),
+            Path.home() / ".gemini" / "antigravity" / "plugins" / "cadabby",
+        )
+
+    def test_workspace_install_defaults(self):
+        vault = self.root / "ws-defaults-vault"
+        vault.mkdir(parents=True, exist_ok=True)
+
+        # Run install targeting all harnesses in workspace mode (default)
+        ret = run_install(all_targets=True, vault_path=vault, is_global=False)
+        self.assertEqual(ret, 0)
+
+        # Check Claude workspace config
+        claude_mcp = vault / ".mcp.json"
+        self.assertTrue(claude_mcp.exists())
+        claude_data = json.loads(claude_mcp.read_text("utf-8"))
+        self.assertEqual(
+            claude_data["mcpServers"]["cadabby"]["args"],
+            ["-m", "cadabby", "mcp", "--vault", str(vault.resolve())],
+        )
+
+        # Check Antigravity workspace plugin
+        ag_plugin = vault / ".agents" / "plugins" / "cadabby"
+        self.assertTrue(ag_plugin.exists())
+        ag_cfg = json.loads((ag_plugin / "mcp_config.json").read_text("utf-8"))
+        self.assertEqual(
+            ag_cfg["mcpServers"]["cadabby"]["args"],
+            ["-m", "cadabby", "mcp", "--vault", str(vault.resolve())],
+        )
+
+        # Uninstall in workspace mode
+        ret = run_install(all_targets=True, vault_path=vault, is_global=False, uninstall=True)
+        self.assertEqual(ret, 0)
+        self.assertFalse(ag_plugin.exists())
+        claude_after = json.loads(claude_mcp.read_text("utf-8"))
+        self.assertNotIn("cadabby", claude_after.get("mcpServers", {}))
+
 
 if __name__ == "__main__":
     unittest.main()
+

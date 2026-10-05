@@ -32,8 +32,9 @@ from cadabby.vault import Vault
 def resolve_cli_vault(args: argparse.Namespace) -> Vault:
     """Resolve vault from CLI arguments or environment, failing fast if not inside a vault.
 
-    An explicit --vault names the root exactly; without it the vault is
-    discovered by walking up from CADABBY_VAULT or the cwd.
+    An explicit --vault names the root exactly. Without it, CADABBY_VAULT names
+    the root exactly if set (and errors if it is not a vault); otherwise the
+    vault is discovered by walking up from the cwd.
     """
     vault_arg = getattr(args, "vault", None)
     if vault_arg is not None:
@@ -101,6 +102,14 @@ def cmd_init(args: argparse.Namespace) -> int:
         dst = target_dir / filename
         copy_template_file(src, dst)
 
+    # Configure .mcp.json with the initialized vault path for Claude Code workspace MCP
+    mcp_json_dst = target_dir / ".mcp.json"
+    if mcp_json_dst.exists():
+        from cadabby.installer import make_mcp_server_entry
+
+        claude_mcp_data = {"mcpServers": {"cadabby": make_mcp_server_entry(target_dir)}}
+        atomic_write(mcp_json_dst, json.dumps(claude_mcp_data, indent=2) + "\n")
+
     # 3. Touch empty log.md
     log_file = target_dir / "log.md"
     if not log_file.exists():
@@ -134,6 +143,14 @@ def cmd_init(args: argparse.Namespace) -> int:
                 target_file = dst_plugin / rel
                 target_file.parent.mkdir(parents=True, exist_ok=True)
                 copy_template_file(p, target_file)
+
+        # Configure mcp_config.json with the initialized vault path so Antigravity connects seamlessly
+        mcp_cfg_file = dst_plugin / "mcp_config.json"
+        if mcp_cfg_file.exists():
+            from cadabby.installer import make_mcp_server_entry
+
+            mcp_data = {"mcpServers": {"cadabby": make_mcp_server_entry(target_dir)}}
+            atomic_write(mcp_cfg_file, json.dumps(mcp_data, indent=2) + "\n")
 
     # 7. Optional Obsidian config
     if args.obsidian:
@@ -497,14 +514,37 @@ def cmd_install(args: argparse.Namespace) -> int:
     """Install or uninstall Cadabby harness configurations (§7.6)."""
     from cadabby.installer import run_install
 
-    dest_path = Path(args.path) if args.path else None
+    dest_path = Path(args.path) if getattr(args, "path", None) else None
+    is_global = getattr(args, "is_global", False)
+    vault_path: Path | None = None
+    vault_arg = getattr(args, "vault", None)
+
+    if vault_arg is not None:
+        vault_path = Vault.at(vault_arg).root
+    elif not is_global and dest_path is None:
+        try:
+            vault_path = Vault.open().root
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                "No Cadabby vault found in current working directory. "
+                "Run inside a vault, pass --vault <path>, or pass --global for user-level installation."
+            )
+    else:
+        if not args.uninstall:
+            try:
+                vault_path = Vault.open().root
+            except FileNotFoundError:
+                vault_path = None
+
     return run_install(
         antigravity=args.antigravity,
         claude=args.claude,
         all_targets=args.all,
+        is_global=is_global,
         uninstall=args.uninstall,
         dry_run=args.dry_run,
         dest_path=dest_path,
+        vault_path=vault_path,
         force=args.force,
     )
 
@@ -524,7 +564,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--vault",
         type=Path,
         default=argparse.SUPPRESS,
-        help="Path to vault root (default: discovered from cwd)",
+        help="Path to vault root (default: $CADABBY_VAULT, else discovered from cwd)",
     )
 
     parser = argparse.ArgumentParser(
@@ -535,7 +575,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--vault",
         type=Path,
         default=None,
-        help="Path to vault root (default: discovered from cwd)",
+        help="Path to vault root (default: $CADABBY_VAULT, else discovered from cwd)",
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -635,6 +675,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_install.add_argument("--antigravity", action="store_true", help="Install Antigravity plugin")
     p_install.add_argument("--claude", action="store_true", help="Install Claude Code MCP configuration")
     p_install.add_argument("--all", action="store_true", help="Install into all supported harnesses")
+    p_install.add_argument(
+        "--global",
+        dest="is_global",
+        action="store_true",
+        help="Install into user-global harness configurations instead of active vault workspace",
+    )
     p_install.add_argument("--uninstall", action="store_true", help="Remove Cadabby harness configurations")
     p_install.add_argument("--dry-run", action="store_true", help="Print changes without modifying files")
     p_install.add_argument("--path", help="Override destination install path")

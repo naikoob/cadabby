@@ -141,8 +141,11 @@ class TestMcpServer(unittest.TestCase):
             r_bytes = r.encode("utf-8")
             hdr = f"Content-Length: {len(r_bytes)}\r\n\r\n".encode("ascii")
             input_chunks.append(hdr + r_bytes)
+        return self._drive_server_raw(b"".join(input_chunks))
 
-        stdin_stream = io.BytesIO(b"".join(input_chunks))
+    def _drive_server_raw(self, stdin_bytes):
+        """Feed arbitrary stdin bytes through run_mcp_server and parse responses."""
+        stdin_stream = io.BytesIO(stdin_bytes)
         stdout_stream = io.BytesIO()
 
         class DummyStdStream:
@@ -208,6 +211,54 @@ class TestMcpServer(unittest.TestCase):
         # The well-formed request after the batch is still served
         self.assertEqual(responses[1]["id"], 2)
         self.assertEqual(responses[1]["result"], {})
+
+    def test_run_mcp_server_notification_only_batch_is_silent(self):
+        # JSON-RPC 2.0 §6: a batch holding only notifications draws no reply,
+        # so the unsupported-batch error must not be emitted for one.
+        requests = [
+            json.dumps([
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {"jsonrpc": "2.0", "method": "notifications/cancelled"},
+            ]),
+            json.dumps({"jsonrpc": "2.0", "id": 9, "method": "ping"}),
+        ]
+        responses = self._drive_server(requests)
+
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(responses[0]["id"], 9)
+        self.assertEqual(responses[0]["result"], {})
+
+    def test_run_mcp_server_answers_parse_errors(self):
+        # Unparseable JSON must draw a -32700 rather than silence: a client
+        # holding a pending id would otherwise block until timeout.
+        good = json.dumps({"jsonrpc": "2.0", "id": 4, "method": "ping"}).encode("utf-8")
+        bad_framed = b'{"jsonrpc": "2.0", truncated'
+        stdin_bytes = (
+            b"{not json at all\n"
+            + b"Content-Length: %d\r\n\r\n" % len(bad_framed)
+            + bad_framed
+            + b"Content-Length: %d\r\n\r\n" % len(good)
+            + good
+        )
+        responses = self._drive_server_raw(stdin_bytes)
+
+        self.assertEqual(len(responses), 3)
+        for resp in responses[:2]:
+            self.assertIsNone(resp["id"])
+            self.assertEqual(resp["error"]["code"], -32700)
+        # The stream stays framed, so the following request is still served
+        self.assertEqual(responses[2]["id"], 4)
+        self.assertEqual(responses[2]["result"], {})
+
+    def test_run_mcp_server_rejects_unparseable_content_length(self):
+        # The payload length is unknown, so the body cannot be consumed and the
+        # stream cannot be resynchronized: reply, then stop reading.
+        for header in (b"Content-Length: notanumber", b"Content-Length: -5"):
+            with self.subTest(header=header):
+                responses = self._drive_server_raw(header + b'\r\n\r\n{"jsonrpc": "2.0"}')
+                self.assertEqual(len(responses), 1)
+                self.assertIsNone(responses[0]["id"])
+                self.assertEqual(responses[0]["error"]["code"], -32700)
 
     def test_run_mcp_server_framing_and_resource_error(self):
         # Build stdin bytes with Content-Length headers containing multi-byte characters and invalid resource read

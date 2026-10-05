@@ -161,6 +161,35 @@ class TestVault(unittest.TestCase):
         with self.assertRaises(VaultConfigError):
             load_vault_config(self.dir)
 
+    def test_load_vault_config_mistyped_value_raises(self):
+        # A null or mistyped value must fail at the config file rather than as
+        # an opaque TypeError inside whichever consumer reads the key.
+        cfg_file = self.dir / FILE_CONFIG
+        cases = [
+            ('{"raw_text_extensions": null}', "raw_text_extensions"),
+            ('{"identities": null}', "identities"),
+            ('{"log_rotate_bytes": "262144"}', "log_rotate_bytes"),
+            ('{"log_rotate_bytes": true}', "log_rotate_bytes"),
+            ('{"ranking": null}', "ranking"),
+            ('{"ranking": {"trust": null}}', "ranking.trust"),
+            ('{"obsidian": {"materialize_trust_tags": "yes"}}', "obsidian.materialize_trust_tags"),
+        ]
+        for content, key in cases:
+            with self.subTest(key=key):
+                cfg_file.write_text(content, "utf-8")
+                with self.assertRaises(VaultConfigError) as ctx:
+                    load_vault_config(self.dir)
+                self.assertIn(f"'{key}'", str(ctx.exception))
+
+    def test_load_vault_config_passes_through_unknown_keys(self):
+        # Type checking is scoped to keys with defaults, so forward-compatible
+        # additions are not rejected by an older build.
+        cfg_file = self.dir / FILE_CONFIG
+        cfg_file.write_text('{"future_key": null, "log_rotate_bytes": 999}', "utf-8")
+        cfg = load_vault_config(self.dir)
+        self.assertIsNone(cfg["future_key"])
+        self.assertEqual(cfg["log_rotate_bytes"], 999)
+
     def test_path_and_cid_mappings(self):
         # Wiki note
         wiki_rel = "wiki/concepts/Epistemic-Trust-Tiers.md"

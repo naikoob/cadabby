@@ -663,10 +663,13 @@ Behavior lives in `.agents/skills/` and `AGENTS.md`, both of which are vault con
 
 ### 7.6. Harness Registration (`cadabby install`)
 
+By default, `cadabby install` configures the **active vault workspace** (`.mcp.json` for Claude Code and `.agents/plugins/cadabby` for Antigravity), ensuring harness integrations are bound and refreshed for the current vault without polluting the user's global environment. For multi-project universal access, `--global` targets the user-level configuration directories (`~/.claude.json` and `~/.gemini/antigravity/plugins/cadabby`).
+
 ```bash
-cadabby install --antigravity      # install plugin into the Antigravity plugin directory
-cadabby install --claude           # register the MCP server with Claude Code
-cadabby install --all              # both
+cadabby install --all              # configure local vault workspace for all harnesses (default)
+cadabby install --claude           # register Cadabby in vault workspace .mcp.json
+cadabby install --antigravity      # configure vault workspace .agents/plugins/cadabby
+cadabby install --all --global     # register globally across user home configs
 cadabby install --claude --uninstall
 cadabby install --all --dry-run    # print every file that would change, write nothing
 ```

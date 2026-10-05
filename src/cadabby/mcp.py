@@ -393,6 +393,10 @@ def run_mcp_server(vault: Vault) -> int:
         sys.stdout.buffer.write(header + out_bytes)
         sys.stdout.buffer.flush()
 
+    def write_error(code: int, message: str) -> None:
+        """Emit an id-less error so a client awaiting a reply fails fast."""
+        write_response({"jsonrpc": "2.0", "id": None, "error": {"code": code, "message": message}})
+
     with McpServer(vault) as server:
         # Read lines from stdin using binary buffer for exact byte counts
         while True:
@@ -408,28 +412,47 @@ def run_mcp_server(vault: Vault) -> int:
             if line.lower().startswith("content-length:"):
                 try:
                     length = int(line.split(":", 1)[1].strip())
-                    # Read through any remaining header lines until empty line
-                    while True:
-                        hdr_bytes = sys.stdin.buffer.readline()
-                        if hdr_bytes in (b"\r\n", b"\n", b""):
-                            break
-                    payload_bytes = sys.stdin.buffer.read(length)
+                except ValueError:
+                    length = -1
+                if length < 0:
+                    # The payload length is unknown, so the following bytes
+                    # cannot be consumed and the stream cannot be resynchronized;
+                    # reply and stop rather than reading payload as headers.
+                    write_error(-32700, "Parse error: malformed Content-Length header")
+                    break
+                # Read through any remaining header lines until empty line
+                while True:
+                    hdr_bytes = sys.stdin.buffer.readline()
+                    if hdr_bytes in (b"\r\n", b"\n", b""):
+                        break
+                payload_bytes = sys.stdin.buffer.read(length)
+                try:
                     req = json.loads(payload_bytes.decode("utf-8", errors="replace"))
-                except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                except json.JSONDecodeError:
+                    write_error(-32700, "Parse error: request body is not valid JSON")
                     continue
             else:
                 try:
                     req = json.loads(line)
                 except json.JSONDecodeError:
+                    write_error(-32700, "Parse error: request body is not valid JSON")
                     continue
 
             if not isinstance(req, dict):
-                # Batches and scalar payloads are unsupported; answer so a
-                # client waiting on a reply fails fast instead of blocking.
-                write_response({"jsonrpc": "2.0", "id": None, "error": {
-                    "code": -32600,
-                    "message": "Invalid Request: batch and non-object payloads are not supported",
-                }})
+                # Batches and scalar payloads are unsupported. A batch holding
+                # only notifications must draw no reply at all (JSON-RPC 2.0 §6);
+                # anything else gets an error so a client waiting on a reply
+                # fails fast instead of blocking.
+                if (
+                    isinstance(req, list)
+                    and req
+                    and all(isinstance(item, dict) and item.get("id") is None for item in req)
+                ):
+                    continue
+                write_error(
+                    -32600,
+                    "Invalid Request: batch and non-object payloads are not supported",
+                )
                 continue
 
             req_id = req.get("id")

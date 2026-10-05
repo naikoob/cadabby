@@ -69,13 +69,18 @@ def vault_search_start(start_path: Path | str | None = None) -> Path:
 def find_vault_root(start_path: Path | str | None = None) -> Path | None:
     """Locate the vault root, in order of precedence.
 
-    1. Explicit start_path (e.g. from --vault CLI flag), walked upward.
+    1. Explicit start_path (e.g. a caller-supplied search origin), walked upward.
     2. CADABBY_VAULT environment variable, taken as an exact root.
     3. The current working directory, walked upward.
 
-    Walking upward looks for a root marker (.cadabby.json or .obsidian). A start
-    point with no marker above it yields None rather than being accepted as a root.
-    Raises FileNotFoundError if CADABBY_VAULT is set but does not name a vault.
+    CADABBY_VAULT is consulted only when start_path is None, since an explicit
+    start point is the more specific request. Walking upward looks for a root
+    marker (.cadabby.json or .obsidian); a start point with no marker above it
+    yields None rather than being accepted as a root. Raises FileNotFoundError
+    if CADABBY_VAULT is set but does not name a vault.
+
+    Note that --vault does not reach here: it designates a root exactly, via
+    Vault.at(), which never walks up.
     """
     if start_path is None:
         env_root = env_vault_root()
@@ -127,8 +132,49 @@ def default_vault_config(vault_name: str = "vault") -> dict[str, Any]:
     }
 
 
+def _type_name(value: Any) -> str:
+    """Describe a JSON value's type using JSON vocabulary."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return type(value).__name__
+
+
+def _check_config_type(cfg_file: Path, key: str, value: Any, default: Any) -> None:
+    """Reject a user-supplied value whose JSON type differs from the default's.
+
+    Keys absent from the defaults are unconstrained, so forward-compatible
+    additions still pass through. Without this, a null or mistyped value reaches
+    consumers far from the config file and fails as an opaque TypeError.
+    """
+    if isinstance(default, bool):
+        ok = isinstance(value, bool)
+    elif isinstance(default, (int, float)):
+        ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+    else:
+        ok = isinstance(value, type(default))
+    if not ok:
+        raise VaultConfigError(
+            f"Invalid configuration value in {cfg_file}: '{key}' must be "
+            f"{_type_name(default)}, got {_type_name(value)}"
+        )
+
+
 def load_vault_config(vault_root: Path) -> dict[str, Any]:
-    """Load and merge .cadabby.json configuration with standard defaults."""
+    """Load and merge .cadabby.json configuration with standard defaults.
+
+    Raises VaultConfigError if the file is malformed or if a known key carries a
+    value of the wrong JSON type.
+    """
     cfg = default_vault_config(vault_root.name)
     cfg_file = vault_root / FILE_CONFIG
 
@@ -146,10 +192,17 @@ def load_vault_config(vault_root: Path) -> dict[str, Any]:
                 f"Invalid configuration format in {cfg_file}: root must be a JSON object, got {type(user_data).__name__}"
             )
 
-        # Deep merge top-level keys and nested dictionaries
+        # Deep merge top-level keys and nested dictionaries, type-checking every
+        # value that has a default so mistyped config fails here and not deep
+        # inside an unrelated consumer.
+        defaults = default_vault_config(vault_root.name)
         for k, v in user_data.items():
-            if k in ("ranking", "obsidian") and isinstance(v, dict):
+            if k in defaults:
+                _check_config_type(cfg_file, k, v, defaults[k])
+            if k in ("ranking", "obsidian"):
                 for sub_k, sub_v in v.items():
+                    if sub_k in defaults[k]:
+                        _check_config_type(cfg_file, f"{k}.{sub_k}", sub_v, defaults[k][sub_k])
                     if isinstance(sub_v, dict) and isinstance(cfg[k].get(sub_k), dict):
                         cfg[k][sub_k].update(sub_v)
                     else:
@@ -230,7 +283,11 @@ class Vault:
 
     @classmethod
     def open(cls, start_path: Path | str | None = None) -> Vault:
-        """Discover and open a vault by walking up from start_path or the cwd."""
+        """Discover and open a vault, per find_vault_root's precedence.
+
+        With no start_path, CADABBY_VAULT names the root exactly if set;
+        otherwise discovery walks up from the cwd.
+        """
         root = find_vault_root(start_path)
         if root is None:
             raise FileNotFoundError(_no_vault_message(vault_search_start(start_path)))

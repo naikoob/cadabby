@@ -11,6 +11,7 @@ from pathlib import Path
 from cadabby.cli import (
     cmd_ground,
     cmd_init,
+    cmd_install,
     cmd_lint,
     cmd_scaffold,
     cmd_search,
@@ -60,7 +61,18 @@ class TestCli(unittest.TestCase):
         # Verify mcp_config.json specifies the vault-scoped cadabby MCP server
         mcp_cfg = json.loads((vault_path / ".agents" / "plugins" / "cadabby" / "mcp_config.json").read_text("utf-8"))
         self.assertIn("cadabby", mcp_cfg.get("mcpServers", {}))
-        self.assertEqual(mcp_cfg["mcpServers"]["cadabby"]["args"], ["-m", "cadabby", "mcp"])
+        self.assertEqual(
+            mcp_cfg["mcpServers"]["cadabby"]["args"],
+            ["-m", "cadabby", "mcp", "--vault", str(vault_path.resolve())],
+        )
+
+        # Verify .mcp.json specifies the vault-scoped cadabby MCP server for Claude Code
+        claude_mcp = json.loads((vault_path / ".mcp.json").read_text("utf-8"))
+        self.assertIn("cadabby", claude_mcp.get("mcpServers", {}))
+        self.assertEqual(
+            claude_mcp["mcpServers"]["cadabby"]["args"],
+            ["-m", "cadabby", "mcp", "--vault", str(vault_path.resolve())],
+        )
 
         self.assertTrue((vault_path / ".claude" / "commands" / "ingest.md").exists())
         self.assertTrue((vault_path / ".obsidian" / "app.json").exists())
@@ -187,7 +199,134 @@ class TestCli(unittest.TestCase):
         )
         self.assertEqual(cmd_verify(args_verify), 1)
 
+    def test_cmd_install_workspace_defaults(self):
+        vault_root = self.dir / "ws-install-vault"
+        args_init = DummyArgs(vault=str(vault_root), name="ws-install-vault", obsidian=False)
+        cmd_init(args_init)
+
+        # Re-install with all harnesses, no explicit path, no is_global flag -> workspace mode
+        args_inst = DummyArgs(
+            vault=str(vault_root),
+            path=None,
+            is_global=False,
+            antigravity=False,
+            claude=False,
+            all=True,
+            uninstall=False,
+            dry_run=False,
+            force=True,
+        )
+        self.assertEqual(cmd_install(args_inst), 0)
+
+        claude_mcp = vault_root / ".mcp.json"
+        self.assertTrue(claude_mcp.exists())
+        claude_data = json.loads(claude_mcp.read_text("utf-8"))
+        self.assertEqual(
+            claude_data["mcpServers"]["cadabby"]["args"],
+            ["-m", "cadabby", "mcp", "--vault", str(vault_root.resolve())],
+        )
+
+        ag_mcp = vault_root / ".agents" / "plugins" / "cadabby" / "mcp_config.json"
+        self.assertTrue(ag_mcp.exists())
+        ag_data = json.loads(ag_mcp.read_text("utf-8"))
+        self.assertEqual(
+            ag_data["mcpServers"]["cadabby"]["args"],
+            ["-m", "cadabby", "mcp", "--vault", str(vault_root.resolve())],
+        )
+
+    def test_cmd_install_with_explicit_path(self):
+        vault_root = self.dir / "install-vault"
+        args_init = DummyArgs(vault=str(vault_root), name="install-vault", obsidian=False)
+        cmd_init(args_init)
+
+        claude_cfg = self.dir / ".claude.json"
+        ag_dest = self.dir / "antigravity-dest"
+        args_inst = DummyArgs(
+            vault=str(vault_root),
+            path=str(claude_cfg),
+            is_global=False,
+            antigravity=False,
+            claude=True,
+            all=False,
+            uninstall=False,
+            dry_run=False,
+            force=False,
+        )
+        self.assertEqual(cmd_install(args_inst), 0)
+
+        claude_data = json.loads(claude_cfg.read_text("utf-8"))
+        self.assertEqual(
+            claude_data["mcpServers"]["cadabby"]["args"],
+            ["-m", "cadabby", "mcp", "--vault", str(vault_root.resolve())],
+        )
+
+        # Also test antigravity install with explicit vault
+        args_ag = DummyArgs(
+            vault=str(vault_root),
+            path=str(ag_dest),
+            is_global=False,
+            antigravity=True,
+            claude=False,
+            all=False,
+            uninstall=False,
+            dry_run=False,
+            force=False,
+        )
+        self.assertEqual(cmd_install(args_ag), 0)
+        ag_mcp = json.loads((ag_dest / "mcp_config.json").read_text("utf-8"))
+        self.assertEqual(
+            ag_mcp["mcpServers"]["cadabby"]["args"],
+            ["-m", "cadabby", "mcp", "--vault", str(vault_root.resolve())],
+        )
+
+    def test_cmd_install_outside_vault_requires_global(self):
+        # When outside a vault, no --path and no --global should raise FileNotFoundError
+        import os
+        old_cwd = os.getcwd()
+        empty_dir = self.dir / "empty-dir"
+        empty_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chdir(empty_dir)
+            args_fail = DummyArgs(
+                vault=None,
+                path=None,
+                is_global=False,
+                antigravity=False,
+                claude=True,
+                all=False,
+                uninstall=False,
+                dry_run=False,
+                force=False,
+            )
+            with self.assertRaises(FileNotFoundError) as ctx:
+                cmd_install(args_fail)
+            self.assertIn("No Cadabby vault found", str(ctx.exception))
+            self.assertIn("--global", str(ctx.exception))
+        finally:
+            os.chdir(old_cwd)
+
+    def test_cmd_install_global_flag(self):
+        claude_cfg = self.dir / "global-claude.json"
+        args_inst = DummyArgs(
+            vault=None,
+            path=str(claude_cfg),
+            is_global=True,
+            antigravity=False,
+            claude=True,
+            all=False,
+            uninstall=False,
+            dry_run=False,
+            force=False,
+        )
+        self.assertEqual(cmd_install(args_inst), 0)
+        claude_data = json.loads(claude_cfg.read_text("utf-8"))
+        self.assertEqual(
+            claude_data["mcpServers"]["cadabby"]["args"],
+            ["-m", "cadabby", "mcp"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
