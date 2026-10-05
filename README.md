@@ -92,6 +92,8 @@ my-vault/
 │   ├── AGENTS.md         # Domain constitution & schema rules
 │   └── acme-corp/        # Flexible, unconstrained subdirectory layout
 │
+├── templates/            # (Optional) Starter note templates, excluded from discovery
+│
 ├── .agents/skills/       # Reusable skills: librarian and technician
 ├── .claude/commands/     # Claude Code slash commands (/ingest, /vault-status, /vault-lint)
 └── .obsidian/            # (Optional) Pre-tuned Obsidian desktop settings
@@ -143,6 +145,16 @@ my-vault/
 1. Open `my-vault/` in **Obsidian**:
    - Wikilinks `[[Note-Stem]]` resolve automatically across subdirectories.
    - `index.md` acts as your curated table of contents.
+   - The **core Templates plugin** works as-is. Cadabby reads `.obsidian/templates.json`, skips the folder it names so your templates are never mistaken for notes, and can scaffold from them:
+     ```bash
+     cadabby scaffold "Flash-Attention" --type concept --desc "IO-aware attention" --template concept
+     ```
+     The template's body is used with `{{title}}` substituted; its frontmatter is discarded, because OKF frontmatter is engine-owned. Foam's `.foam/templates/` needs no configuration.
+   - To start from Cadabby's own note shape, scaffold the starters once:
+     ```bash
+     cadabby init --vault my-vault --obsidian-templates
+     ```
+     This writes `templates/Concept.md` and `templates/MOC.md` and points Obsidian at them, so *Insert template* produces correct OKF frontmatter. It is opt-in because it reserves `templates/`, which would otherwise be a normal cognitive domain; an existing template folder is honored instead, and a `templates/` that already holds notes is refused rather than swallowed. Starters fill `title` but leave `description` empty — the plugin cannot prompt for it — so a fresh note fails `cadabby lint` with `FIELD_MISSING` until you write one. That is deliberate: a `TODO` placeholder would pass lint and quietly seed a field that feeds search ranking.
 2. **Review and certify notes**:
    When a human inspects a note and certifies its accuracy:
    ```bash
@@ -265,12 +277,12 @@ Conforming to §5.1-§5.2 of the Technical Specification, Cadabby exposes exactl
 
 | Command | Description | Example |
 | :--- | :--- | :--- |
-| `cadabby init` | Scaffold a new vault with all config & skills | `cadabby init --vault my-vault --obsidian` |
+| `cadabby init` | Scaffold a new vault with all config & skills, optionally with Obsidian starter templates (`--obsidian-templates`) | `cadabby init --vault my-vault --obsidian` |
 | `cadabby sync` | Scan files, update SQLite cache & rebuild `index.md` | `cadabby sync` |
 | `cadabby status` | Report note counts, trust tiers, and verification debt | `cadabby status` |
 | `cadabby search` | Epistemic BM25 search with trust boosts & domain filters | `cadabby search "attention mechanism" --domain wiki` |
 | `cadabby ground` | Retrieve note content and 1-hop neighborhood | `cadabby ground wiki/Attention` |
-| `cadabby scaffold` | Scaffold a new typed note in any domain | `cadabby scaffold "Transformer" --type concept --domain wiki --desc "Attention model"` |
+| `cadabby scaffold` | Scaffold a new typed note in any domain, optionally from an Obsidian template (`--template`) | `cadabby scaffold "Transformer" --type concept --domain wiki --desc "Attention model"` |
 | `cadabby update` | Patch frontmatter or append/replace sections | `cadabby update wiki/Transformer --replace-section "Overview:New text"` |
 | `cadabby verify` | Stamp cryptographic attestation on note | `cadabby verify wiki/Transformer --human` |
 | `cadabby lint` | Run the six normative epistemic linting gates across all domains | `cadabby lint` |

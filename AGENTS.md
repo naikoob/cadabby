@@ -118,7 +118,9 @@ cadabby/
 │   │   └── memory_storage.py   # Hermetic InMemoryNoteStorage, InMemoryLedger for tests
 │   │
 │   └── assets/                 # Shipped inside the wheel
-│       ├── vault/              # Starter templates (.cadabby.json, AGENTS.md, STYLE.md, index.md, etc.)
+│       ├── vault/              # Starter files (.cadabby.json, AGENTS.md, STYLE.md, index.md, etc.)
+│       │   ├── obsidian/       # app.json, plus templates.json for --obsidian-templates
+│       │   └── templates/      # Starter note templates (Concept.md, MOC.md)
 │       ├── skills/             # Canonical persona runbooks (librarian, technician)
 │       ├── commands/           # Thin slash-command shims (ingest, vault-status, vault-lint)
 │       └── plugins/cadabby/    # Bundled Antigravity plugin (plugin.json, mcp_config.json, skills, agents)
@@ -137,6 +139,7 @@ cadabby/
     ├── test_ops.py             # Scaffolding, attribution, conflict detection, atomicity
     ├── test_domain.py          # Note entity and use cases driven through memory adapters
     ├── test_domains.py         # Multi-domain discovery, cache, linting, ops, MCP resources
+    ├── test_templates.py       # Template folder exclusion, scaffold from template, starters
     ├── test_mcp.py             # MCP handshake, tool execution, human:* refusal
     ├── test_cli.py             # Command surface, flags, JSON output, install refresh
     ├── test_installer.py       # init scaffolding, idempotency, merge, uninstall, dry-run
@@ -220,6 +223,8 @@ When implementing features, fixing bugs, or refactoring code:
 - **Do Not Touch `notes` Directly**: Never execute raw `INSERT`, `UPDATE`, or `DELETE` statements against the `notes` table. Always use `cache.upsert_note()` and `cache.delete_note()` to ensure FTS retraction consistency.
 - **Do Not Expand MCP Tools**: Keep the tool count at exactly 7. New capabilities must fit within the parameters of existing tools or MCP resources.
 - **Do Not Create Domain Index Files**: Never generate `{domain}/index.md` for cognitive domains.
+- **Do Not Let Templates Own Frontmatter**: Obsidian templates (§7.5) seed a note's *body* only. `generated`, `verified`, and the body hash they bind to are engine-owned; a template able to set them could mint notes whose trust tier asserts more than the vault can back. The shipped starters in `assets/vault/templates/` obey the same rule, and leave `description` empty on purpose — a `TODO` placeholder would lint clean and quietly seed a required epistemic field with filler, where an empty one fails loudly and names the note.
+- **Do Not Reserve `templates/` By Default**: `.obsidian/templates.json` is read everywhere and written by exactly one code path, `init --obsidian-templates`, which is opt-in and writes the setting only together with the folder it names. Defaulting it would silently cost a user who wants `templates/` as a cognitive domain (§2.2). An existing declaration always wins, including under `--force`.
 - **Do Not Duplicate Persona Text**: Never inline runbook or persona instructions into subagent manifests, command shims, or plugin configs. Keep them strictly in `.agents/skills/<persona>/SKILL.md`.
 - **Always Run the Test Suite**: Run `PYTHONPATH=src python3 -m unittest discover tests` after any edit. All tests must pass before concluding any task.
 - **Maintain Traceability**: If you add or modify behavior specified in `SPECIFICATION.md`, ensure the corresponding criteria and traceability rows in §10 are updated, and confirm that `TestAcceptanceTraceability` passes.

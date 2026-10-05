@@ -19,6 +19,7 @@ from cadabby.constants import (
     DIR_CLAUDE,
     DIR_OBSIDIAN,
     DIR_RAW,
+    DIR_TEMPLATES,
     DIR_WIKI,
     FILE_AGENTS,
     FILE_CLAUDE,
@@ -27,6 +28,7 @@ from cadabby.constants import (
     FILE_INDEX,
     FILE_LOG,
     FILE_MCP,
+    FILE_OBSIDIAN_TEMPLATES,
     FILE_STYLE,
     NOTE_TYPES,
     TRUST_TIERS,
@@ -50,7 +52,7 @@ from cadabby.ops import (
     update_note,
     verify_note,
 )
-from cadabby.vault import Vault
+from cadabby.vault import Vault, obsidian_template_dir
 
 
 def resolve_cli_vault(args: argparse.Namespace) -> Vault:
@@ -171,12 +173,47 @@ def cmd_init(args: argparse.Namespace) -> int:
         if wrote_mcp_cfg:
             bind_mcp_config(dst_plugin / "mcp_config.json")
 
-    # 7. Optional Obsidian config
-    if args.obsidian:
-        obsidian_dir = target_dir / DIR_OBSIDIAN
+    # 7. Optional Obsidian config. --obsidian-templates implies it: the starter
+    # templates are useless to a vault Obsidian cannot open, and the flag names
+    # the harness it is asking for.
+    obsidian_dir = target_dir / DIR_OBSIDIAN
+    want_templates = getattr(args, "obsidian_templates", False)
+    if args.obsidian or want_templates:
         obsidian_dir.mkdir(parents=True, exist_ok=True)
         (target_dir / DIR_RAW / "attachments").mkdir(parents=True, exist_ok=True)
         copy_template_file(vault_tpl / "obsidian" / "app.json", obsidian_dir / "app.json")
+
+    # 8. Optional starter note templates, opt-in because they reserve a folder.
+    if want_templates:
+        # An existing declaration always wins, so a user who already pointed
+        # Obsidian at `meta/templates` gets the starters there and keeps their
+        # setting. Only a vault with no declaration gets one written, and only
+        # together with the folder it names -- declaring an empty folder would
+        # reserve a name while nothing used it.
+        declared = obsidian_template_dir(target_dir)
+        tpl_dest = declared if declared is not None else target_dir / DIR_TEMPLATES
+
+        # Refuse to reserve a folder that is already carrying notes. Declaring
+        # it would drop a whole cognitive domain out of the vault's view with
+        # no error at all -- the silent loss that reading the setting, rather
+        # than defaulting it, exists to prevent (§7.5).
+        if declared is None and tpl_dest.is_dir() and any(tpl_dest.rglob("*.md")):
+            print(
+                f"Refusing to use {DIR_TEMPLATES}/ for templates: it already holds notes, "
+                f"and declaring it would hide them from the vault. Point Obsidian at "
+                f"another folder in {DIR_OBSIDIAN}/{FILE_OBSIDIAN_TEMPLATES} and re-run.",
+                file=sys.stderr,
+            )
+            return EXIT_ENVIRONMENT
+
+        tpl_dest.mkdir(parents=True, exist_ok=True)
+        for src in sorted((vault_tpl / DIR_TEMPLATES).glob("*.md")):
+            copy_template_file(src, tpl_dest / src.name)
+        if declared is None:
+            copy_template_file(
+                vault_tpl / "obsidian" / FILE_OBSIDIAN_TEMPLATES,
+                obsidian_dir / FILE_OBSIDIAN_TEMPLATES,
+            )
 
     print(f"Initialized Cadabby vault '{vault_name}' in {target_dir}")
     return EXIT_OK
@@ -282,6 +319,7 @@ def cmd_scaffold(args: argparse.Namespace) -> int:
         actor=args.actor or f"human:{getpass.getuser()}",
         domain=getattr(args, "domain", "wiki"),
         path=getattr(args, "path", None),
+        template=getattr(args, "template", None),
     )
     print(f"Scaffolded note: {vault.rel_path(path)}")
     return EXIT_OK
@@ -622,6 +660,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--name", help="Name of the vault")
     p_init.add_argument("--force", action="store_true", help="Overwrite existing files")
     p_init.add_argument("--obsidian", action="store_true", help="Scaffold Obsidian configuration")
+    p_init.add_argument(
+        "--obsidian-templates",
+        action="store_true",
+        help="Also write starter note templates and declare their folder (implies --obsidian)",
+    )
     p_init.set_defaults(func=cmd_init)
 
     # sync
@@ -661,6 +704,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_scaffold.add_argument("--path", help="Custom relative path within domain or vault")
     p_scaffold.add_argument("--tags", help="Comma-separated tags")
     p_scaffold.add_argument("--sources", help="Comma-separated raw sources")
+    p_scaffold.add_argument(
+        "--template",
+        help="Obsidian template whose body seeds the note; {{title}} is substituted",
+    )
     p_scaffold.add_argument("--actor", help="Actor identity (default: human:<user>)")
     p_scaffold.set_defaults(func=cmd_scaffold)
 

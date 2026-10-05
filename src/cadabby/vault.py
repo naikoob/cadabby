@@ -30,6 +30,7 @@ from cadabby.constants import (
     FILE_INDEX,
     FILE_LOCK,
     FILE_LOG,
+    FILE_OBSIDIAN_TEMPLATES,
     SCHEMA_VERSION,
 )
 from cadabby.domain import DomainDefinition
@@ -37,7 +38,7 @@ from cadabby.domain import DomainDefinition
 # Re-exported: the taxonomy lives in errors.py (§5.4), but every existing
 # `from cadabby.vault import VaultConfigError` still resolves.
 from cadabby.errors import VaultConfigError  # noqa: F401
-from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter
+from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter, split_frontmatter
 
 
 def is_vault_root(path: Path | str) -> bool:
@@ -267,6 +268,53 @@ def path_to_stem(rel_path: str | Path) -> str:
     return Path(rel_path).stem
 
 
+def obsidian_template_dir(root: Path | str) -> Path | None:
+    """The folder Obsidian's core Templates plugin writes templates into (§7.5).
+
+    Read from `.obsidian/templates.json` rather than mirrored into
+    `.cadabby.json` because that file is where the user already declared it:
+    a duplicated setting goes stale the moment they rename the folder in
+    Obsidian, and the symptom would be `lint` turning red with no hint why.
+
+    Taking a bare root rather than a Vault is what lets `init` ask the question
+    before a vault is loadable, so the one command that may write this file
+    agrees by construction with the engine that reads it.
+
+    Returns None when Obsidian is absent, the plugin is unconfigured, or the
+    setting is unusable. Failing safe is deliberate -- a corrupt third-party
+    config should cost a lint finding that names the template, not a vault
+    that refuses to open.
+    """
+    root = Path(root).resolve()
+    settings = root / DIR_OBSIDIAN / FILE_OBSIDIAN_TEMPLATES
+    try:
+        data = json.loads(settings.read_text("utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    folder = data.get("folder")
+    if not isinstance(folder, str) or not folder.strip():
+        return None
+
+    rel = folder.replace("\\", "/").strip("/")
+    parts = [p for p in rel.split("/") if p and p != "."]
+    # Checked before stripping made it invisible: '/etc' survives strip('/')
+    # as 'etc' and would silently exclude <vault>/etc.
+    if not parts or Path(folder).is_absolute():
+        return None
+
+    # The one containment test, run after resolve() so it also catches a
+    # '..' segment and a template folder symlinked out of the vault. A
+    # string-level '..' check alongside it would be a second rule saying
+    # less, and no test could tell the two apart.
+    candidate = (root / Path(*parts)).resolve()
+    if candidate != root and root not in candidate.parents:
+        return None
+    return candidate
+
+
 @dataclass
 class Vault:
     """Encapsulates a local Cadabby vault directory and configuration."""
@@ -358,6 +406,44 @@ class Vault:
         """Resolve a vault-relative path to an absolute Path."""
         return (self.root / rel_path).resolve()
 
+    def template_dir(self) -> Path | None:
+        """The folder Obsidian's core Templates plugin writes templates into (§7.5)."""
+        return obsidian_template_dir(self.root)
+
+    def read_template_body(self, name: str) -> str:
+        """Body of a named Obsidian template, with its frontmatter discarded.
+
+        Only the body is returned. A template's frontmatter is placeholder-ridden
+        by design (`title: {{title}}` is flow style, `tags: []` a flow sequence)
+        and would not survive §3.2, but more importantly OKF frontmatter is
+        engine-owned: `generated`, `verified` and the hash they bind to are
+        epistemic infrastructure, and a template controlling them could mint
+        notes whose trust tier asserts more than the vault can back (§7.5).
+        """
+        tpl_dir = self.template_dir()
+        if tpl_dir is None:
+            raise FileNotFoundError(
+                "No Obsidian template folder is configured; expected a 'folder' key in "
+                f"{DIR_OBSIDIAN}/{FILE_OBSIDIAN_TEMPLATES}"
+            )
+
+        # is_absolute is asked of the original, as in template_dir: strip('/')
+        # would turn '/etc/passwd' into a plausible-looking relative name.
+        stem = name.replace("\\", "/").strip("/")
+        if not stem or Path(name).is_absolute():
+            raise ValueError(f"Invalid template name '{name}'")
+        filename = stem if stem.endswith(".md") else f"{stem}.md"
+
+        # As in template_dir, containment is tested once, after resolve().
+        path = (tpl_dir / filename).resolve()
+        if tpl_dir not in path.parents:
+            raise ValueError(f"Invalid template name '{name}'")
+        if not path.is_file():
+            raise FileNotFoundError(f"Template not found: {self.rel_path(path)}")
+
+        _, body, _ = split_frontmatter(path.read_text("utf-8"))
+        return body
+
     def discover_domains(self) -> dict[str, DomainDefinition]:
         """Discover all cognitive domains in the vault."""
         domains: dict[str, DomainDefinition] = {}
@@ -378,6 +464,7 @@ class Vault:
 
         # 2. Discover arbitrary top-level directories
         if self.root.exists():
+            tpl_dir = self.template_dir()
             for entry in sorted(self.root.iterdir()):
                 if not entry.is_dir():
                     continue
@@ -387,6 +474,9 @@ class Vault:
                     or name in (DIR_WIKI, DIR_RAW, DIR_LOG)
                     or name in DEFAULT_IGNORED_DIRS
                 ):
+                    continue
+                # A template folder holds pre-notes, not notes (§7.5).
+                if tpl_dir is not None and entry.resolve() == tpl_dir:
                     continue
 
                 agents_md = entry / FILE_AGENTS
@@ -417,12 +507,21 @@ class Vault:
         one of the three discard the rest; what matters is that "which files
         are notes" is answered in exactly one place.
         """
+        # Prunes a nested template folder such as `meta/templates`, where the
+        # parent is a real domain and only the subtree is excluded. A top-level
+        # one never reaches here, discover_domains having already dropped it.
+        tpl_dir = self.template_dir()
+
         for domain_name, domain_def in self.discover_domains().items():
             if not domain_def.path.exists():
                 continue
             for root, dirs, files in os.walk(domain_def.path, topdown=True):
                 dirs[:] = sorted(
-                    d for d in dirs if d not in DEFAULT_IGNORED_DIRS and not d.startswith(".")
+                    d
+                    for d in dirs
+                    if d not in DEFAULT_IGNORED_DIRS
+                    and not d.startswith(".")
+                    and (tpl_dir is None or (Path(root) / d).resolve() != tpl_dir)
                 )
                 for f in sorted(files):
                     # AGENTS.md is the domain's own manifest, not a note in it.

@@ -98,6 +98,16 @@ FILE_MCP = ".mcp.json"
 FILE_CACHE_DB = "cache.db"
 FILE_LOCK = "vault.lock"
 
+# Settings file of Obsidian's core Templates plugin. The engine only ever reads
+# it (§7.5); `init --obsidian-templates` is the single exception, and it writes
+# the file once, as part of creating the folder the file names.
+FILE_OBSIDIAN_TEMPLATES = "templates.json"
+TEMPLATE_TITLE_PLACEHOLDER = "{{title}}"
+
+# Folder `init --obsidian-templates` creates and declares when the vault has no
+# template folder of its own. An existing declaration always wins.
+DIR_TEMPLATES = "templates"
+
 # Validation patterns
 ACTOR_PATTERN = r"^(human|agent|process):[A-Za-z0-9._\-/]+$"
 RFC3339_TIMESTAMP_PATTERN = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$"

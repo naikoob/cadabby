@@ -111,6 +111,15 @@ TOOLS = [
                 "tags": {"type": "array", "items": {"type": "string"}, "description": "List of tags"},
                 "sources": {"type": "array", "items": {"type": "string"}, "description": "Paths to raw sources"},
                 "body": {"type": "string", "description": "Initial markdown body text"},
+                "template": {
+                    "type": "string",
+                    "description": (
+                        "Name of an Obsidian template whose body seeds the note, so an agent "
+                        "and a human writing in Obsidian produce the same shape. '{{title}}' is "
+                        "substituted; the template's own frontmatter is discarded because OKF "
+                        "frontmatter is engine-owned. Mutually exclusive with 'body'."
+                    ),
+                },
             },
             "required": ["title", "type", "description"],
         },
@@ -283,6 +292,7 @@ class McpServer:
                     actor=self.client_id,
                     domain=args.get("domain", "wiki"),
                     path=args.get("path"),
+                    template=args.get("template"),
                 )
                 rel = self.vault.rel_path(path)
                 return _tool_ok(f"Scaffolded note: {rel} (CID: {path_to_cid(rel)})")

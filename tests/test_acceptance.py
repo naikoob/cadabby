@@ -521,7 +521,12 @@ class TestSpecVaultTree(unittest.TestCase):
         self.names = self._tree_names(self.tree)
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.vault = Path(self.tmp_dir.name) / "tree-vault"
-        args = DummyArgs(vault=str(self.vault), name="tree-vault", obsidian=True)
+        # Every optional flag on, because the tree documents the union of what
+        # `init` can write and annotates which flag writes what. Scaffolding
+        # the default subset would let the tree promise files no run produces.
+        args = DummyArgs(
+            vault=str(self.vault), name="tree-vault", obsidian=True, obsidian_templates=True
+        )
         with contextlib.redirect_stdout(io.StringIO()):
             cmd_init(args)
 

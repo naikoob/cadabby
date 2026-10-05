@@ -105,7 +105,12 @@ my-vault/
 │       └── vault-lint.md
 │
 ├── .obsidian/                # Optional: written only by init --obsidian (7.5)
-│   └── app.json              # Routes pasted attachments to raw/attachments/
+│   ├── app.json              # Routes pasted attachments to raw/attachments/
+│   └── templates.json        # Only with --obsidian-templates; names templates/ (7.5)
+│
+├── templates/                # Optional: pre-notes, excluded from discovery (7.5)
+│   ├── Concept.md
+│   └── MOC.md
 │
 ├── raw/                      # LAYER 1: Immutable Ground Truth
 │   ├── attachments/          # Obsidian paste/drop target, so media lands in Layer 1 (7.5)
@@ -153,6 +158,8 @@ In `wiki/`, all notes reside directly in `wiki/*.md` with zero subdirectories. K
 ### 2.2. Self-Describing Cognitive Domains (`{domain}/AGENTS.md`)
 
 Cadabby treats any non-reserved top-level directory in the vault as an independent **Cognitive Domain**. Reserved directories (`raw/`, `log/`, `.cadabby/`, `.obsidian/`, `.git/`, `.agents/`, `.claude/`) and standard tool ignore folders (`DEFAULT_IGNORED_DIRS`: `.venv/`, `node_modules/`, `target/`, `dist/`, etc.) are excluded automatically.
+
+One further directory is excluded, and only when the user has declared it: the folder named by Obsidian's core Templates plugin, which holds pre-notes rather than notes (§7.5). The exclusion applies wherever that folder sits — a top-level one never becomes a domain, and a nested one such as `meta/templates/` is pruned from its parent domain's walk while the parent remains a domain in full.
 
 A domain defines its governance rules and AI operational constraints through a local `{domain}/AGENTS.md` file:
 
@@ -798,10 +805,24 @@ The third row is not a kind of ownership but its absence: these files have no au
 
 ### 7.5. Obsidian Configuration (optional)
 
-`init` can write a minimal `.obsidian/app.json`. Three key behaviors and constraints:
+`init` can write a minimal `.obsidian/app.json`. Five key behaviors and constraints:
 
 * **Attachment routing defaults to `raw/attachments/`.** Sets `"attachmentFolderPath": "raw/attachments"` and `"newLinkFormat": "relative"`. Any screenshots, PDFs, or media pasted or dropped into Obsidian automatically land in Layer 1 (immutable raw evidence) rather than polluting vault root or cognitive domains.
 * **`.gitignore` must exclude `.obsidian/workspace*.json`.** Obsidian rewrites workspace state constantly, and committing it produces a diff on every session.
+* **The core Templates plugin's folder is excluded from note discovery, and its bodies are available to `scaffold_note`.** A template is a *pre-note*: valid only once its placeholders are substituted. `title: {{title}}` is a flow mapping and `tags: []` a flow sequence, both outside the restricted subset (§3.2), so a template folder walked as a cognitive domain reports `FRONTMATTER_UNPARSEABLE` against every template it holds and `lint` exits non-zero for as long as the user keeps using the plugin. The folder is therefore excluded (§2.2). Foam needs no equivalent rule — its `.foam/templates/` is dot-prefixed and already invisible to domain discovery.
+
+  Which folder it is comes from reading `.obsidian/templates.json`, never from mirroring the setting into `.cadabby.json`. A duplicated setting goes stale the moment the folder is renamed in Obsidian, and the symptom — lint turning red again — points nowhere near the cause. The file is read defensively: an absent, malformed, empty, absolute, or vault-escaping value excludes nothing. Failing safe costs a lint finding that names the offending template, which is diagnosable; failing loudly would let a third-party config brick the vault. Exactly one command writes this file, under the conditions in the next bullet; every other code path only reads it.
+
+  `vault_scaffold_note` and `cadabby scaffold` accept a `template` naming a file in that folder, substitute `{{title}}`, and use the result as the note body. This is what keeps the two authoring paths convergent: a human pressing *Insert template* in Obsidian and an agent calling the tool produce the same note shape. **Only the body is taken.** A template's own frontmatter is discarded, because OKF frontmatter is engine-owned — `generated`, `verified`, and the body hash they bind to are epistemic infrastructure (§3.4), and a template able to set them could mint notes whose trust tier asserts more than the vault can back, by typo rather than by intent. `{{date}}` and `{{time}}` are deliberately not substituted: the plugin stores their formats as moment.js tokens, converting those to `strftime` is a parser nobody needs, and Obsidian already renders them correctly on its own side.
+
+* **`init --obsidian-templates` writes starter templates, and is opt-in because it reserves a folder.** The flag implies `--obsidian`, creates `templates/`, populates it with a `concept` and a `moc` starter, and declares it in `.obsidian/templates.json` — the one write described above. Doing this by default would reserve `templates/` in every Obsidian vault, and §2.2's rule that any non-reserved top-level directory is a cognitive domain means a user who wanted a real `templates/` domain would lose it with no error at all. That silent loss is the whole reason the folder is read from the user's setting rather than defaulted, so the engine must not re-introduce it from the other side.
+
+  Three rules keep the two halves consistent. **An existing declaration always wins**: a vault already pointing Obsidian at `meta/templates` gets its starters there and keeps its settings file byte-for-byte, under `--force` as well — resetting the setting while the starters went elsewhere would leave the declared folder empty and the populated one a live domain full of pre-notes. **The folder is never declared empty**: the setting is written only together with the files it names, so the reservation never outlives its purpose. And **a `templates/` that already holds notes is refused** with a message naming the collision, because declaring it is precisely the silent domain loss above.
+
+  The starters are **user-owned** (§7.4), written once and never refreshed by `install`. A template carries content rather than naming behavior, so unlike a shim, regenerating one destroys an edit.
+
+  They set `type`, `title` via `{{title}}`, and `status`, and deliberately **leave `description` empty**. The core plugin has no input prompt — that is Templater and Foam territory — so the field cannot be templated, and a note inserted from a starter therefore fails `lint` with `FIELD_MISSING` naming the note until a human writes one. That is the intended outcome, not a rough edge: a placeholder such as `TODO` would lint clean and quietly seed a required epistemic field, one that feeds BM25 ranking and `index.md`, with filler that nothing would ever flag. A loud error is the honest report of an undescribed note. For the same reason no starter carries `verified` or `generated`, which would let every hand-created note claim an attestation nobody made (§3.4).
+
 * **Trust-tier graph coloring is deliberately not offered.** Obsidian colors graph nodes from stored properties, but `trust_tier` is *derived* from the `verified` array and the current body hash (§3.4) and never written to the file, so there is nothing for Obsidian to query. Coloring the graph by tier would require the engine to maintain a real `trust/<tier>` tag in every note's frontmatter.
 
   A materialized tier is correct only until the next body edit. The hash moves, the true tier drops to `stale-verified`, and the frontmatter goes on asserting `trust/human-reviewed` until something runs a sync — claiming human review of text no human has read, which is the single thing §3.4 exists to prevent, committed by the engine rather than by an agent. `index.md` is derived state that Cadabby *does* materialize (§2.5), and the contrast is the rule: a stale gap report under-states outstanding work in an engine-owned file that announces itself as generated, while a stale trust tag over-states confidence inside user-owned frontmatter. Materializing derived state is acceptable when going stale fails safe.
@@ -938,6 +959,7 @@ cadabby/
     ├── test_ops.py             # Scaffolding, attribution, conflict detection, atomicity
     ├── test_domain.py          # Note entity and use cases driven through in-memory adapters
     ├── test_domains.py         # Multi-domain discovery, cache, linting, ops, MCP resources
+    ├── test_templates.py       # Template folder exclusion, scaffold from template, starters (7.5)
     ├── test_mcp.py             # Handshake, tool execution, human:* refusal
     ├── test_cli.py             # Command surface, flags, JSON output
     ├── test_installer.py       # init scaffolding, idempotency, merge, uninstall, dry-run
@@ -996,6 +1018,8 @@ A note on scope: the five-phase build order that used to open this section was r
 * **C22.** `cadabby install --all` run twice changes no bytes on the second run; `--uninstall` restores the pre-install config exactly.
 * **C23.** Grep any distinctive sentence from a persona runbook across the repository: it occurs once. The plugin's subagent manifests name `.agents/skills/<persona>/SKILL.md` instead of repeating it.
 * **C24.** Call an MCP tool with a required argument omitted, then with a stale `expected_hash`: the first reports `INVALID_ARGUMENT` naming the field, the second `VAULT_CONFLICT` with `retryable: true`. No failure in either surface produces a code absent from §5.4's table, and only the two race codes say retry.
+* **C25.** Point `.obsidian/templates.json` at a folder and put a stock Obsidian template in it: `lint` stays clean and no domain is reported for that folder. Delete the settings file and the same folder becomes an ordinary cognitive domain again. Nest it one level down and its parent keeps every note but the templates. Scaffold with `template:` and the note carries the template's headings with `{{title}}` substituted, engine-generated frontmatter, and nothing from the template's own.
+* **C26.** Run `init --obsidian`: no `templates/` and no `templates.json` appear. Run `init --obsidian-templates` instead and both do, the folder it declares is the folder discovery skips, and `lint` is clean. Copy a starter into `wiki/` with `{{title}}` substituted and the only error is `FIELD_MISSING` for `description`. Re-run the flag over an edited starter and the edit survives; re-run it against a vault that already declares another folder, with or without `--force`, and the starters land there while the settings file is untouched; run it where `templates/` already holds a note and the command refuses, writing no settings file.
 
 ### Traceability
 
@@ -1027,6 +1051,8 @@ A criterion nobody can point to a test for is a wish. This table is the map, and
 | C22 | §7.6 | `test_ac18_installer_idempotency_and_uninstall`, `test_run_install_all_and_uninstall`, `test_install_on_a_fresh_vault_is_a_no_op` |
 | C23 | §7.4, §9 | `test_ac19_single_definition_invariant`, `test_shims_point_at_vault_content_rather_than_restating_it` |
 | C24 | §5.4 | `test_a_missing_required_argument_blames_the_caller`, `test_a_conflict_tells_the_caller_to_retry`, `test_a_failure_is_json_not_prose`, `test_only_races_are_retryable`, `test_spec_table_matches_the_module`, `test_spec_table_agrees_with_the_exit_map`, `test_spec_table_agrees_on_which_codes_retry` |
+| C25 | §2.2, §7.5 | `test_a_template_folder_does_not_turn_lint_red`, `test_a_declared_template_folder_is_not_a_cognitive_domain`, `test_without_the_setting_the_folder_is_an_ordinary_domain`, `test_a_nested_template_folder_is_pruned_but_its_parent_survives`, `test_the_template_body_seeds_the_note_with_the_title_substituted`, `test_the_templates_own_frontmatter_is_discarded`, `test_an_escaping_or_absolute_folder_is_refused` |
+| C26 | §7.4, §7.5 | `test_plain_obsidian_init_writes_no_templates`, `test_the_flag_writes_the_folder_and_declares_it_together`, `test_the_declared_folder_is_the_one_the_engine_skips`, `test_inserting_a_starter_leaves_exactly_the_field_it_cannot_fill`, `test_re_running_leaves_an_edited_starter_untouched`, `test_an_existing_declaration_wins_and_is_left_alone`, `test_force_does_not_redirect_an_existing_declaration`, `test_a_templates_folder_already_holding_notes_is_refused`, `test_shipped_starters_never_carry_epistemic_frontmatter` |
 
 C17-C20 were unmet together for several releases -- all four were the §2.5 gap report, specified and never built, while an older catalog occupied the file. They were closed as a group, since each depended on the same two queries. C2 and C4 followed: C2 needed the `status` payload asserted rather than only the tier behind it, and C4 needed a fixture seeding one instance of every lint code, which turned the taxonomy itself into something a test can hold. C1 is the last partial, and the reason it is still open is that it needs a decision rather than a test — equal-scoring search rows have no tiebreak, so byte-stability across rebuilds is currently luck. C24 arrived last and in the opposite order from the rest: §5.4 was written because the surface it describes was already shipped and undocumented, with one code living inside a message string and every other failure flattened to prose at the boundary. The criterion exists to keep that from recurring, which is why it checks the shape of a failure rather than any particular one.
 

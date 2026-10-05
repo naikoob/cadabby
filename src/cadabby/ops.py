@@ -14,7 +14,7 @@ from typing import Any
 
 from cadabby.adapters.disk_storage import DiskNoteStorage, FileLedger
 from cadabby.cache import VaultCache
-from cadabby.constants import NOTE_TYPES
+from cadabby.constants import NOTE_TYPES, TEMPLATE_TITLE_PLACEHOLDER
 from cadabby.domain import Note, VerificationResult, split_markdown_sections
 from cadabby.frontmatter import serialize_frontmatter
 from cadabby.graph import LinkTargetIndex
@@ -54,9 +54,19 @@ class ScaffoldNoteUseCase:
         actor: str = "agent:unknown",
         domain: str = "wiki",
         path: str | None = None,
+        template: str | None = None,
     ) -> Note:
         if not type_ or not isinstance(type_, str) or not type_.strip():
             raise ValueError("Note type must be a non-empty string")
+
+        if template:
+            if body.strip():
+                raise ValueError("Pass either 'body' or 'template', not both")
+            if self.vault is None:
+                raise ValueError("Templates require a vault; none is bound to this use case")
+            body = self.vault.read_template_body(template).replace(
+                TEMPLATE_TITLE_PLACEHOLDER, title
+            )
 
         target_domain = domain or "wiki"
 
@@ -358,6 +368,7 @@ def scaffold_note(
     actor: str = "agent:unknown",
     domain: str = "wiki",
     path: str | None = None,
+    template: str | None = None,
     storage: NoteStoragePort | None = None,
     ledger: LedgerPort | None = None,
 ) -> Path:
@@ -374,6 +385,7 @@ def scaffold_note(
         actor=actor,
         domain=domain,
         path=path,
+        template=template,
     )
     return vault.abs_path(note.rel_path)
 
