@@ -26,6 +26,7 @@ from cadabby.vault import (
     Vault,
     VaultConfigError,
     cid_to_path,
+    default_vault_config,
     find_vault_root,
     load_vault_config,
     path_to_cid,
@@ -172,7 +173,6 @@ class TestVault(unittest.TestCase):
             ('{"log_rotate_bytes": true}', "log_rotate_bytes"),
             ('{"ranking": null}', "ranking"),
             ('{"ranking": {"trust": null}}', "ranking.trust"),
-            ('{"obsidian": {"materialize_trust_tags": "yes"}}', "obsidian.materialize_trust_tags"),
         ]
         for content, key in cases:
             with self.subTest(key=key):
@@ -189,6 +189,36 @@ class TestVault(unittest.TestCase):
         cfg = load_vault_config(self.dir)
         self.assertIsNone(cfg["future_key"])
         self.assertEqual(cfg["log_rotate_bytes"], 999)
+
+    def test_every_default_config_key_is_read_by_something(self):
+        """A shipped key that no code reads is a promise the engine breaks.
+
+        The pass-through above is what makes this necessary: unknown keys do
+        not raise, so a key the engine ships but never consults behaves
+        exactly like one it does, and nothing tells the user their setting is
+        inert. `obsidian.materialize_trust_tags` lived that way through
+        0.3.1 -- defaulted, type-checked, documented in two spec sections,
+        and read by no code path -- and was removed rather than implemented
+        (§7.5).
+        """
+        src = Path(__file__).resolve().parent.parent / "src" / "cadabby"
+        sources = "\n".join(p.read_text("utf-8") for p in src.rglob("*.py"))
+
+        # `schema` is a format marker written for a future migration to read,
+        # not a knob, so it has no consumer by design. It is listed here
+        # rather than skipped silently because the migration story it implies
+        # does not exist yet either.
+        exempt = {"schema"}
+
+        for key in default_vault_config("v"):
+            if key in exempt:
+                continue
+            with self.subTest(key=key):
+                self.assertIn(
+                    f'config.get("{key}"',
+                    sources,
+                    f"'{key}' is shipped in .cadabby.json defaults but nothing reads it",
+                )
 
     def test_path_and_cid_mappings(self):
         # Wiki note

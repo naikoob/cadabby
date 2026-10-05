@@ -268,16 +268,15 @@ The config file doubles as the vault root marker. Root discovery walks up from t
   "identities": {
     "human:owner": ["owner@example.com"]
   },
-  "obsidian": {
-    "materialize_trust_tags": false
-  },
   "log_rotate_bytes": 262144
 }
 ```
 
 `integrity` selects cache invalidation strategy: `"mtime_size"` (default, fast) or `"hash"` (stat plus SHA-256 of file bytes; immune to clock skew and same-second edits, costs a full read per file per scan).
 
-`identities` maps OKF actor strings to Git author emails and is consumed only by `cadabby audit` (§3.5). `obsidian.materialize_trust_tags` is explained in §7.5.
+`identities` maps OKF actor strings to Git author emails and is consumed only by `cadabby audit` (§3.5).
+
+Unrecognized keys are carried through the merge untouched rather than rejected, so a config written for a newer or older Cadabby still loads. The cost is that a misspelled key is silently inert, and the engine must therefore never ship a key it does not read — see §7.5 for the one time it did.
 
 ### 2.7. Vault Resolution (normative)
 
@@ -769,9 +768,11 @@ The third row is not a kind of ownership but its absence: these files have no au
 
 * **Attachment routing defaults to `raw/attachments/`.** Sets `"attachmentFolderPath": "raw/attachments"` and `"newLinkFormat": "relative"`. Any screenshots, PDFs, or media pasted or dropped into Obsidian automatically land in Layer 1 (immutable raw evidence) rather than polluting vault root or cognitive domains.
 * **`.gitignore` must exclude `.obsidian/workspace*.json`.** Obsidian rewrites workspace state constantly, and committing it produces a diff on every session.
-* **Trust-tier graph coloring requires materialized tags.** Obsidian colors graph nodes from stored properties, but `trust_tier` is *derived* from the `verified` array (§3.4) and never written to the file, so there is nothing for Obsidian to query. The feature only works if the engine maintains a real tag. Setting `obsidian.materialize_trust_tags: true` (§2.6) makes `sync` keep a `trust/<tier>` entry in each note's `tags`, and `init` then writes a `graph.json` with matching color groups.
+* **Trust-tier graph coloring is deliberately not offered.** Obsidian colors graph nodes from stored properties, but `trust_tier` is *derived* from the `verified` array and the current body hash (§3.4) and never written to the file, so there is nothing for Obsidian to query. Coloring the graph by tier would require the engine to maintain a real `trust/<tier>` tag in every note's frontmatter.
 
-  This is **off by default** and deliberately so: it writes derived state into the source of truth, which contradicts the project's central principle, and it dirties the frontmatter of every note whose tier changes. It is offered because a colored graph is genuinely useful, not because it is clean. Note that materialized tags do *not* invalidate verification — the body hash excludes frontmatter (§3.3).
+  A materialized tier is correct only until the next body edit. The hash moves, the true tier drops to `stale-verified`, and the frontmatter goes on asserting `trust/human-reviewed` until something runs a sync — claiming human review of text no human has read, which is the single thing §3.4 exists to prevent, committed by the engine rather than by an agent. `index.md` is derived state that Cadabby *does* materialize (§2.5), and the contrast is the rule: a stale gap report under-states outstanding work in an engine-owned file that announces itself as generated, while a stale trust tag over-states confidence inside user-owned frontmatter. Materializing derived state is acceptable when going stale fails safe.
+
+  No query is a substitute either. Graph color groups take search queries, so a group can match notes carrying a `verified` block at all, but no query can distinguish a current attestation from a broken one — that comparison *is* the hash check. The available choices are a two-way attested/unattested split that writes nothing, or no coloring. A `materialize_trust_tags` flag sat in the `obsidian` section of `.cadabby.json` up to and including 0.3.1, type-checked on load and read by no code path; it was removed, and §2.6's permissive merge means vaults that still carry it load without complaint.
 
 ### 7.6. Harness Registration (`cadabby install`)
 

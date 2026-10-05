@@ -125,9 +125,6 @@ def default_vault_config(vault_name: str = "vault") -> dict[str, Any]:
             "status": dict(DEFAULT_STATUS_MULTIPLIERS),
         },
         "identities": {},
-        "obsidian": {
-            "materialize_trust_tags": False,
-        },
         "log_rotate_bytes": DEFAULT_LOG_ROTATE_BYTES,
     }
 
@@ -199,7 +196,7 @@ def load_vault_config(vault_root: Path) -> dict[str, Any]:
         for k, v in user_data.items():
             if k in defaults:
                 _check_config_type(cfg_file, k, v, defaults[k])
-            if k in ("ranking", "obsidian"):
+            if k == "ranking":
                 for sub_k, sub_v in v.items():
                     if sub_k in defaults[k]:
                         _check_config_type(cfg_file, f"{k}.{sub_k}", sub_v, defaults[k][sub_k])
@@ -208,6 +205,11 @@ def load_vault_config(vault_root: Path) -> dict[str, Any]:
                     else:
                         cfg[k][sub_k] = sub_v
             else:
+                # Unrecognized keys survive the merge rather than raising, so a
+                # config written for another version still loads (§2.6). The
+                # price is that the engine must never ship a key it does not
+                # read: `obsidian.materialize_trust_tags` was one, and nothing
+                # could have told its users it did nothing.
                 cfg[k] = v
 
     return cfg

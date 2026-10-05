@@ -20,8 +20,5 @@
     }
   },
   "identities": {},
-  "obsidian": {
-    "materialize_trust_tags": false
-  },
   "log_rotate_bytes": 262144
 }
