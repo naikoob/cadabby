@@ -13,9 +13,26 @@ from typing import Any, Self
 
 from cadabby import __version__
 from cadabby.cache import VaultCache
+from cadabby.errors import HUMAN_ATTESTATION_REFUSED, INVALID_ARGUMENT, UNKNOWN_TOOL, classify
 from cadabby.lint import run_vault_lint
 from cadabby.ops import ground_notes, scaffold_note, update_note, verify_note
 from cadabby.vault import Vault, path_to_cid
+
+
+def _tool_error(tool: str, code: str, message: str, *, retryable: bool) -> dict[str, Any]:
+    """Render a tool failure as structured JSON rather than prose (§5.4).
+
+    The payload goes in the text content because MCP has no typed error
+    channel for tool results -- `isError` is a single boolean. Emitting JSON
+    there gives the caller something to branch on without parsing English,
+    which is what the previous `f"Error executing {name}: {e}"` forced.
+    """
+    payload = {"error": {"code": code, "message": message, "retryable": retryable, "tool": tool}}
+    return {
+        "content": [{"type": "text", "text": json.dumps(payload, indent=2)}],
+        "isError": True,
+    }
+
 
 TOOLS = [
     {
@@ -139,6 +156,15 @@ TOOLS = [
     },
 ]
 
+_REQUIRED_ARGS: dict[str, tuple[str, ...]] = {
+    t["name"]: tuple(t["inputSchema"].get("required", ())) for t in TOOLS  # type: ignore[index]
+}
+
+
+def _required_args(tool: str) -> tuple[str, ...]:
+    """Required fields a tool declares. Empty for tools that declare none."""
+    return _REQUIRED_ARGS.get(tool, ())
+
 
 class McpServer:
     """JSON-RPC 2.0 stdio MCP Server implementation."""
@@ -197,6 +223,21 @@ class McpServer:
     def handle_tools_call(self, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
         """Route tool invocation to underlying engine functions."""
         args = args or {}
+
+        # Checked here rather than left to the `args["cids"]` lookups below,
+        # which raise KeyError and classify as INTERNAL -- telling a caller
+        # who omitted a required field that the server has a bug. The
+        # requirement is already declared in each tool's inputSchema, so
+        # reading it back is the only way the two cannot drift.
+        missing = [k for k in _required_args(name) if k not in args]
+        if missing:
+            return _tool_error(
+                name,
+                INVALID_ARGUMENT,
+                f"Missing required argument(s): {', '.join(missing)}",
+                retryable=False,
+            )
+
         try:
             if name == "vault_search":
                 res = self.cache.search(
@@ -268,12 +309,12 @@ class McpServer:
             elif name == "vault_verify_note":
                 actor_param = args.get("actor") or args.get("by")
                 if actor_param and str(actor_param).startswith("human:"):
-                    return {
-                        "content": [
-                            {"type": "text", "text": "Error: Verification by human:* cannot be performed over MCP."}
-                        ],
-                        "isError": True,
-                    }
+                    return _tool_error(
+                        name,
+                        HUMAN_ATTESTATION_REFUSED,
+                        "Verification by human:* cannot be performed over MCP.",
+                        retryable=False,
+                    )
 
                 res = verify_note(
                     vault=self.vault,
@@ -311,16 +352,11 @@ class McpServer:
                 }
 
             else:
-                return {
-                    "content": [{"type": "text", "text": f"Unknown tool: {name}"}],
-                    "isError": True,
-                }
+                return _tool_error(name, UNKNOWN_TOOL, f"Unknown tool: {name}", retryable=False)
 
         except Exception as e:  # noqa: BLE001
-            return {
-                "content": [{"type": "text", "text": f"Error executing {name}: {e!s}"}],
-                "isError": True,
-            }
+            info = classify(e)
+            return _tool_error(name, info.code, info.message, retryable=info.retryable)
 
     def handle_resources_list(self) -> dict[str, Any]:
         """List exposed MCP resources representing cognitive domains and directives."""

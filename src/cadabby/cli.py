@@ -15,6 +15,7 @@ from pathlib import Path
 from cadabby.audit import run_vault_audit
 from cadabby.cache import VaultCache
 from cadabby.constants import DIR_RAW, DIR_WIKI, NOTE_TYPES
+from cadabby.errors import EXIT_ENVIRONMENT, EXIT_USAGE, classify, exit_code_for
 from cadabby.fsutil import atomic_write
 from cadabby.graph import get_note_graph, resolve_link_target
 from cadabby.indexer import append_vault_log, rotate_vault_log, sync_vault_index
@@ -297,12 +298,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
     if args.human and args.agent:
         print("Error: --human and --agent are mutually exclusive.", file=sys.stderr)
-        return 1
+        return EXIT_USAGE
 
     if args.human:
         if not sys.stdin.isatty():
             print("Error: --human requires an interactive TTY.", file=sys.stderr)
-            return 1
+            return EXIT_USAGE
         actor = f"human:{getpass.getuser()}"
         is_human = True
     elif args.agent:
@@ -461,7 +462,7 @@ def cmd_graph(args: argparse.Namespace) -> int:
         graph_data = get_note_graph(conn, cid)
         if not graph_data:
             print(f"Error: Note not found: '{args.cid}'", file=sys.stderr)
-            return 1
+            return EXIT_ENVIRONMENT
 
         if args.json:
             print(json.dumps(graph_data, indent=2))
@@ -715,14 +716,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    """CLI entry point."""
+    """CLI entry point.
+
+    Failures exit with a status derived from the error taxonomy (§5.4) so a
+    script can tell "the vault has findings" from "your vault path is wrong"
+    from "another process holds the lock, try again". Previously every one of
+    those was exit 1.
+    """
     parser = build_parser()
     args = parser.parse_args()
     try:
         sys.exit(args.func(args))
     except Exception as e:  # noqa: BLE001
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+        info = classify(e)
+        print(f"Error [{info.code}]: {info.message}", file=sys.stderr)
+        if info.retryable:
+            print("This is transient; the same command may succeed if retried.", file=sys.stderr)
+        sys.exit(exit_code_for(info.code))
 
 
 if __name__ == "__main__":

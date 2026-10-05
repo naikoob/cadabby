@@ -32,6 +32,10 @@ from cadabby.constants import (
     SCHEMA_VERSION,
 )
 from cadabby.domain import DomainDefinition
+
+# Re-exported: the taxonomy lives in errors.py (§5.4), but every existing
+# `from cadabby.vault import VaultConfigError` still resolves.
+from cadabby.errors import VaultConfigError  # noqa: F401
 from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter
 
 
@@ -107,10 +111,6 @@ def _no_vault_message(location: Path | str) -> str:
         f"No Cadabby vault found at {location} (missing {FILE_CONFIG} or marker). "
         "Run 'cadabby init' to create one."
     )
-
-
-class VaultConfigError(ValueError):
-    """Raised when .cadabby.json is missing required structure or contains malformed JSON."""
 
 
 def default_vault_config(vault_name: str = "vault") -> dict[str, Any]:

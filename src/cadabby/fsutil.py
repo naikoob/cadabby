@@ -13,13 +13,10 @@ import uuid
 from collections.abc import Generator
 from pathlib import Path
 
-
-class VaultConflictError(Exception):
-    """Raised when an atomic write detects a concurrent file modification."""
-
-
-class LockTimeoutError(Exception):
-    """Raised when an advisory lock cannot be acquired within the timeout."""
+# Imported rather than defined here: the taxonomy lives in one place (§5.4),
+# and every existing `from cadabby.fsutil import VaultConflictError` still
+# resolves.
+from cadabby.errors import LockTimeoutError, VaultConflictError
 
 
 def compute_file_sha256(path: Path | str) -> str:

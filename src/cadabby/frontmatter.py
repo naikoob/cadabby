@@ -10,6 +10,9 @@ import re
 from typing import Any
 
 from cadabby.constants import RFC3339_TIMESTAMP_PATTERN, SCHEMA_KEY_ORDER
+from cadabby.errors import CadabbyError
+from cadabby.errors import FRONTMATTER_UNPARSEABLE as _CODE_UNPARSEABLE
+from cadabby.errors import FRONTMATTER_UNSERIALIZABLE as _CODE_UNSERIALIZABLE
 from cadabby.okf import canonicalize_tags
 
 RE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -17,8 +20,15 @@ RE_BARE_SAFE = re.compile(r"^[A-Za-z0-9._\-/]+$")
 RE_TIMESTAMP = re.compile(RFC3339_TIMESTAMP_PATTERN)
 
 
-class FrontmatterParseError(ValueError):
-    """Raised when frontmatter violates the restricted YAML subset."""
+class FrontmatterParseError(CadabbyError, ValueError):
+    """Raised when frontmatter violates the restricted YAML subset.
+
+    ValueError stays in the bases because `vault.py` catches
+    `(FrontmatterParseError, ValueError)` and `cache.py` relies on the
+    builtin arm elsewhere; removing it would reroute live handlers.
+    """
+
+    code = _CODE_UNPARSEABLE
 
     def __init__(self, message: str, line_number: int):
         self.message = message
@@ -301,8 +311,10 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     return data, body
 
 
-class FrontmatterSerializeError(ValueError):
+class FrontmatterSerializeError(CadabbyError, ValueError):
     """Raised when a value cannot be written inside the restricted YAML subset."""
+
+    code = _CODE_UNSERIALIZABLE
 
 
 def format_scalar(val: Any) -> str:

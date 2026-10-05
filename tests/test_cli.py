@@ -12,6 +12,7 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
+from cadabby.errors import EXIT_USAGE
 from cadabby.cli import (
     cmd_ground,
     cmd_init,
@@ -231,7 +232,9 @@ class TestCli(unittest.TestCase):
             agent="test-agent",
             method=None,
         )
-        self.assertEqual(cmd_verify(args_verify), 1)
+        # EXIT_USAGE, not 1: the command never ran, so a caller must not read
+        # this as "the vault has findings" (§5.4).
+        self.assertEqual(cmd_verify(args_verify), EXIT_USAGE)
 
     def test_cmd_install_workspace_defaults(self):
         vault_root = self.dir / "ws-install-vault"

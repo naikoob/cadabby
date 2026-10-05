@@ -613,6 +613,38 @@ Standard MCP clients (including Antigravity, Claude Code, and Inspector) query M
 | `cadabby mcp` | Runs the JSON-RPC 2.0 stdio MCP server exposing the 7 tools and domain resources. With no `--vault`, resolves the vault per launch (§2.7), which is what makes an unbound global install work. |
 | `cadabby install` | Harness registration (§7.6). `--antigravity`, `--claude`, `--all` select targets; `--global` installs to the user-level configs instead of the vault workspace; `--vault <path>` binds a global install to one vault; `--path` overrides a single target's destination; `--force` overwrites a conflicting entry Cadabby did not write; `--uninstall`, `--dry-run`. |
 
+### 5.4. Error Surface (normative)
+
+A failure is useless to a caller that cannot tell what kind of failure it was. Every error crossing the CLI or MCP boundary therefore carries a **stable code**, a human-readable message, and a **`retryable`** flag meaning an identical request could plausibly succeed later without the caller changing anything. The codes are a public contract; the messages are not, and must never be parsed.
+
+| Code | Retryable | Raised when | Exit |
+| :--- | :--- | :--- | :--- |
+| `VAULT_CONFLICT` | yes | A read-modify-write found the file had changed since the operation began (§8). | 4 |
+| `LOCK_TIMEOUT` | yes | The advisory lock could not be acquired within the timeout. | 4 |
+| `CONFIG_INVALID` | no | `.cadabby.json` is malformed or structurally wrong (§2.6). | 3 |
+| `FRONTMATTER_UNPARSEABLE` | no | A note's frontmatter falls outside the restricted subset (§3.2). | 3 |
+| `FRONTMATTER_UNSERIALIZABLE` | no | A patch value cannot be written inside the restricted subset. | 3 |
+| `NOT_FOUND` | no | A vault, note, or source that was addressed does not exist. | 3 |
+| `ALREADY_EXISTS` | no | A scaffold would overwrite an existing note. | 3 |
+| `INVALID_ARGUMENT` | no | An argument is absent, mistyped, or outside its enum. | 3 |
+| `HUMAN_ATTESTATION_REFUSED` | no | `by: human:*` was requested over MCP (§3.4). | 3 |
+| `PERMISSION_DENIED` | no | The filesystem refused the operation. | 3 |
+| `UNKNOWN_TOOL` | no | A `tools/call` named a tool outside the seven (§5.1). | 2 |
+| `IO_ERROR` | no | Any other `OSError` — a full disk, a vanished mount. | 5 |
+| `INTERNAL` | no | Anything unrecognized. A bug. | 5 |
+
+**`retryable` is the field that matters.** It is the one an agent branches on, and the one prose structurally cannot carry. Exactly two codes set it, and both mean the request was well-formed and lost a race. `HUMAN_ATTESTATION_REFUSED` is deliberately distinct from `INVALID_ARGUMENT` for the same reason: an agent reading "invalid argument" may reasonably try another spelling of the actor, and this refusal is categorical.
+
+**MCP.** Tool failures return `isError: true` with the content being a JSON object `{"error": {"code", "message", "retryable", "tool"}}`. The payload rides in the text content because MCP's tool-result channel has no typed error field — `isError` is a single boolean — so the structure has to go somewhere the caller can still parse. This is separate from the JSON-RPC protocol errors (`-32700` through `-32603`), which govern malformed envelopes rather than failed operations and are unchanged.
+
+**CLI.** Six exit statuses, because each calls for a different reaction from a script: `0` success, `1` the command ran and the vault has findings, `2` the command was invoked wrongly, `3` fix the input or the environment, `4` transient, retry, `5` unexpected. `1` keeps its existing meaning because pre-commit hooks already depend on it, and `2` is not reused for anything else because argparse owns it.
+
+**Classification is total.** Anything unrecognized becomes `INTERNAL` rather than propagating: an MCP server that dies on a surprise is worse than one that reports the surprise badly, and the caller still learns that the request failed and that retrying it unchanged will not help.
+
+`FRONTMATTER_UNPARSEABLE` is intentionally the same string as the lint code in §6.3. It is one condition observed from two surfaces, and giving it two names would be the defect.
+
+---
+
 **Token budgeting** (`--budget`, `vault_ground`) uses a `len(text) / 4` character heuristic. A zero-dependency engine has no tokenizer; the estimate is documented as approximate, deliberately conservative, and truncates at section boundaries with an explicit `[truncated: N of M sections]` marker rather than mid-prose.
 
 ---
@@ -846,6 +878,7 @@ cadabby/
 │       ├── cli.py              # argparse surface and terminal formatting
 │       ├── constants.py        # Enums, default config, schema constants
 │       ├── domain.py           # Note entity, cognitive domain definitions, AGENTS.md parsing (2.2)
+│       ├── errors.py           # Error taxonomy, classify(), exit-code map (5.4)
 │       ├── vault.py            # Root discovery, config loading, path/cid mapping
 │       ├── frontmatter.py      # Restricted-subset parser + canonicalizing writer (3.2)
 │       ├── okf.py              # Schema validation, body hashing, trust tier derivation (3.3-3.4)
@@ -901,6 +934,7 @@ cadabby/
     ├── test_graph.py           # Alias/anchor/path wikilink resolution, dead links
     ├── test_indexer.py         # index.md gap report, MOC reachability, regeneration
     ├── test_lint.py            # Each gate's codes and severities
+    ├── test_errors.py          # Code taxonomy, retryability, MCP payload, exit codes (5.4)
     ├── test_ops.py             # Scaffolding, attribution, conflict detection, atomicity
     ├── test_domain.py          # Note entity and use cases driven through in-memory adapters
     ├── test_domains.py         # Multi-domain discovery, cache, linting, ops, MCP resources
@@ -949,7 +983,7 @@ A note on scope: the five-phase build order that used to open this section was r
 * **C9.** With `wiki/Architecture` and `projects/apollo/Architecture` both present, `[[Architecture]]` resolves to the wiki note, and `[[apollo/Architecture]]` is the form that reaches the other. Neither is reported as a dead link.
 * **C10.** Count the entries `tools/list` returns: seven, and the same seven the plugin's frozen `cadabby-wiki/SKILL.md` names. `initialize` advertises `"resources": {}`, and `resources/list` then `resources/read` serve `vault://domains` and a `domain://{domain}/directives` for each discovered domain.
 * **C11.** `wiki/sub/Note.md` raises `WIKI_NESTING_DISALLOWED`; `customers/acme/Q3/Note.md` at the same depth raises nothing. A customer note linking to an otherwise-isolated wiki concept keeps that concept off gate 5's orphan list.
-* **C12.** Call `vault_verify_note` with any argument shaped to produce `by: human:*`: it returns a JSON-RPC error and the note's bytes are unchanged. No MCP argument reaches the human tier.
+* **C12.** Call `vault_verify_note` with any argument shaped to produce `by: human:*`: it fails with `HUMAN_ATTESTATION_REFUSED` and the note's bytes are unchanged. No MCP argument reaches the human tier.
 * **C13.** `cadabby audit` detects a `human:owner` entry introduced by a commit authored by an unmapped email.
 * **C14.** A note renamed on disk leaves no stale row in `notes`, `links`, `sources`, or either FTS index, and `INSERT INTO <index>(<index>) VALUES('integrity-check')` passes afterward for both `notes_fts` and `raw_fts` (§4.2).
 * **C15.** A `human-reviewed` note outranks an identically-matching `unverified` note, and a `deprecated` one is pushed below both.
@@ -961,6 +995,7 @@ A note on scope: the five-phase build order that used to open this section was r
 * **C21.** `cadabby init` into a directory with an existing `CLAUDE.md` leaves that file untouched and says so.
 * **C22.** `cadabby install --all` run twice changes no bytes on the second run; `--uninstall` restores the pre-install config exactly.
 * **C23.** Grep any distinctive sentence from a persona runbook across the repository: it occurs once. The plugin's subagent manifests name `.agents/skills/<persona>/SKILL.md` instead of repeating it.
+* **C24.** Call an MCP tool with a required argument omitted, then with a stale `expected_hash`: the first reports `INVALID_ARGUMENT` naming the field, the second `VAULT_CONFLICT` with `retryable: true`. No failure in either surface produces a code absent from §5.4's table, and only the two race codes say retry.
 
 ### Traceability
 
@@ -991,7 +1026,8 @@ A criterion nobody can point to a test for is a wish. This table is the map, and
 | C21 | §5.3, §7.4 | `test_ac17_init_untouched_claude_notification`, `test_init_without_force_does_not_rewrite_existing_mcp_configs` |
 | C22 | §7.6 | `test_ac18_installer_idempotency_and_uninstall`, `test_run_install_all_and_uninstall`, `test_install_on_a_fresh_vault_is_a_no_op` |
 | C23 | §7.4, §9 | `test_ac19_single_definition_invariant`, `test_shims_point_at_vault_content_rather_than_restating_it` |
+| C24 | §5.4 | `test_a_missing_required_argument_blames_the_caller`, `test_a_conflict_tells_the_caller_to_retry`, `test_a_failure_is_json_not_prose`, `test_only_races_are_retryable`, `test_spec_table_matches_the_module`, `test_spec_table_agrees_with_the_exit_map`, `test_spec_table_agrees_on_which_codes_retry` |
 
-C17-C20 were unmet together for several releases -- all four were the §2.5 gap report, specified and never built, while an older catalog occupied the file. They were closed as a group, since each depended on the same two queries. C2 and C4 followed: C2 needed the `status` payload asserted rather than only the tier behind it, and C4 needed a fixture seeding one instance of every lint code, which turned the taxonomy itself into something a test can hold. C1 is the last partial, and the reason it is still open is that it needs a decision rather than a test — equal-scoring search rows have no tiebreak, so byte-stability across rebuilds is currently luck.
+C17-C20 were unmet together for several releases -- all four were the §2.5 gap report, specified and never built, while an older catalog occupied the file. They were closed as a group, since each depended on the same two queries. C2 and C4 followed: C2 needed the `status` payload asserted rather than only the tier behind it, and C4 needed a fixture seeding one instance of every lint code, which turned the taxonomy itself into something a test can hold. C1 is the last partial, and the reason it is still open is that it needs a decision rather than a test — equal-scoring search rows have no tiebreak, so byte-stability across rebuilds is currently luck. C24 arrived last and in the opposite order from the rest: §5.4 was written because the surface it describes was already shipped and undocumented, with one code living inside a message string and every other failure flattened to prose at the boundary. The criterion exists to keep that from recurring, which is why it checks the shape of a failure rather than any particular one.
 
 Several tests retain `acN` prefixes from the superseded numbering. Their names are left alone — renaming costs churn and buys nothing the table does not already give — but each docstring now cites the criterion it actually satisfies, and the five that correspond to no current criterion (`test_ac1`, `ac5`, `ac8`, `ac9`, `ac12`) say so and cite the section they really pin.

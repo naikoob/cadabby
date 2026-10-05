@@ -285,7 +285,12 @@ class TestAcceptanceCriteria(unittest.TestCase):
             {"cid": "wiki/Flash-Attention", "actor": "human:attacker"},
         )
         self.assertTrue(res_actor["isError"])
-        self.assertIn("Error: Verification by human:* cannot be performed over MCP", res_actor["content"][0]["text"])
+        refusal = json.loads(res_actor["content"][0]["text"])["error"]
+        self.assertEqual(refusal["code"], "HUMAN_ATTESTATION_REFUSED")
+        self.assertFalse(
+            refusal["retryable"],
+            "a categorical refusal must not invite a retry with a different spelling",
+        )
 
         res_by = server.handle_tools_call(
             "vault_verify_note",
