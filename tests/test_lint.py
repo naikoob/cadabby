@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import tempfile
 import unittest
@@ -143,6 +144,80 @@ verified:
         self.assertIn("ACTOR_MALFORMED", codes)
         self.assertIn("VERIFICATION_UNBOUND", codes)
 
+    def test_gate1_invalid_timestamps_in_both_blocks(self):
+        """`generated.at` and `verified[].at` are separate branches (§6.3 gate 1).
+
+        Asserting only one leaves the other free to be unreachable, which is
+        the failure mode an unasserted emission site actually has.
+        """
+        (self.vault.wiki_dir / "Bad-Generated-At.md").write_text(
+            "---\ntype: concept\ntitle: Bad Generated\ndescription: Test\nstatus: active\n"
+            "generated:\n  at: 'last Tuesday'\n  by: agent:test\n---\n# Note\n\n[[SQLite]]\n",
+            "utf-8",
+        )
+        (self.vault.wiki_dir / "Bad-Verified-At.md").write_text(
+            "---\ntype: concept\ntitle: Bad Verified\ndescription: Test\nstatus: active\n"
+            "verified:\n  - by: agent:test\n    at: '03/10/2026'\n    of: 'sha256:0000'\n"
+            "---\n# Note\n\n[[SQLite]]\n",
+            "utf-8",
+        )
+
+        findings = run_vault_lint(self.vault)
+        offenders = {f.rel_path for f in findings if f.code == "TIMESTAMP_INVALID"}
+        self.assertEqual(offenders, {"wiki/Bad-Generated-At.md", "wiki/Bad-Verified-At.md"})
+        for f in findings:
+            if f.code == "TIMESTAMP_INVALID":
+                self.assertEqual(f.severity, "error")
+
+    def test_gate3_anchor_missing_only_when_the_target_resolves(self):
+        """A dead target is LINK_DEAD; ANCHOR_MISSING is for a live one (§6.3).
+
+        The gates share a branch, so a fixture that gets the target wrong
+        exercises the wrong arm and still passes on the code alone.
+        """
+        note = self.vault.wiki_dir / "Epistemic-Trust-Tiers.md"
+        note.write_text(
+            note.read_text("utf-8") + "\n\nSee [[SQLite#No-Such-Heading]].\n",
+            "utf-8",
+        )
+
+        findings = run_vault_lint(self.vault)
+        anchors = [f for f in findings if f.code == "ANCHOR_MISSING"]
+        self.assertEqual(len(anchors), 1)
+        self.assertEqual(anchors[0].rel_path, "wiki/Epistemic-Trust-Tiers.md")
+        self.assertEqual(anchors[0].severity, "warning")
+        self.assertNotIn("LINK_DEAD", {f.code for f in findings})
+
+    def test_gate3_anchor_that_exists_is_silent(self):
+        """Pins the negative arm: otherwise 'always flag' passes the test above."""
+        target = self.vault.wiki_dir / "SQLite.md"
+        target.write_text(target.read_text("utf-8") + "\n\n## Storage Engine\n\nDetail.\n", "utf-8")
+        note = self.vault.wiki_dir / "Epistemic-Trust-Tiers.md"
+        note.write_text(note.read_text("utf-8") + "\n\nSee [[SQLite#Storage Engine]].\n", "utf-8")
+
+        findings = run_vault_lint(self.vault)
+        self.assertEqual([f for f in findings if f.code == "ANCHOR_MISSING"], [])
+
+    def test_gate6_stale_verification_is_debt_not_an_error(self):
+        """A drifted attestation is warning-severity: it is work, not corruption.
+
+        Erroring would make `lint` fail on every honest edit-before-reverify,
+        which is the normal state of a vault being written to.
+        """
+        (self.vault.wiki_dir / "Stale-Verified.md").write_text(
+            "---\ntype: concept\ntitle: Stale Verified\ndescription: Test\nstatus: active\n"
+            "verified:\n  - by: human:owner\n    at: '2026-01-01T00:00:00Z'\n"
+            "    of: 'sha256:deadbeef'\n---\n# Note\n\nBody has moved on. [[SQLite]]\n",
+            "utf-8",
+        )
+
+        findings = run_vault_lint(self.vault)
+        stale = [f for f in findings if f.code == "VERIFICATION_STALE"]
+        self.assertEqual(len(stale), 1)
+        self.assertEqual(stale[0].rel_path, "wiki/Stale-Verified.md")
+        self.assertEqual(stale[0].severity, "warning")
+        self.assertNotIn("VERIFICATION_UNBOUND", {f.code for f in findings})
+
     def test_gate5_orphan_detection_single_query(self):
         # Scaffold an orphan note with no inbound and no outbound links
         orphan = self.vault.wiki_dir / "Lonely-Orphan.md"
@@ -165,6 +240,171 @@ There are no links here.
         self.assertEqual(len(orphan_findings), 1)
         self.assertEqual(orphan_findings[0].rel_path, "wiki/Lonely-Orphan.md")
         self.assertEqual(orphan_findings[0].severity, "warning")
+
+
+class TestLintTaxonomyIsClosed(unittest.TestCase):
+    """§10 C4. One fixture seeding every code, and three lists held together.
+
+    The per-gate tests above each assert the codes they care about, which
+    leaves the taxonomy itself unguarded: a code can be added to lint.py and
+    never documented, documented and never emitted, or emitted and never
+    exercised, and no single test notices. These pin the set rather than its
+    members, so adding a gate forces all three lists to move together.
+    """
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.vault_root = Path(self.tmp_dir.name) / "demo-vault"
+        demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
+        shutil.copytree(demo_src, self.vault_root, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
+        self.vault = Vault(self.vault_root)
+        self._seed_one_of_everything()
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def _write(self, rel, text):
+        path = self.vault_root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, "utf-8")
+
+    def _fm(self, title, *extra, type_="concept", status="active", body="Body."):
+        lines = [
+            "---",
+            f"type: {type_}",
+            f"title: {title}",
+            "description: Fixture note",
+            f"status: {status}",
+            *extra,
+            "---",
+            f"# {title}",
+            "",
+            body,
+        ]
+        return "\n".join(lines) + "\n"
+
+    def _seed_one_of_everything(self):
+        # Gate 1 -- schema integrity.
+        self._write("wiki/F-Unparseable.md", "---\ntags: [inline, list]\n---\n# Bad\n")
+        self._write(
+            "wiki/F-Field-Missing.md",
+            "---\ntype: concept\ntitle: No Description\nstatus: active\n---\n# Note\n\n[[SQLite]]\n",
+        )
+        self._write("wiki/F-Enum-Invalid.md", self._fm("Enum Invalid", status="nonexistent", body="[[SQLite]]"))
+        self._write(
+            "wiki/F-Timestamp-Invalid.md",
+            self._fm("Timestamp Invalid", "generated:", "  at: 'last Tuesday'", "  by: agent:test", body="[[SQLite]]"),
+        )
+        # TAG_MALFORMED is the one code with two severities, so it needs two
+        # notes: whitespace is unrepairable and errors, case is repaired on
+        # the next agent write and only warns (§6.3 gate 1).
+        self._write(
+            "wiki/F-Tag-Malformed.md",
+            self._fm("Tag Malformed", "tags:", "  - machine learning", body="[[SQLite]]"),
+        )
+        self._write(
+            "wiki/F-Tag-Cased.md",
+            self._fm("Tag Cased", "tags:", "  - Machine-Learning", body="[[SQLite]]"),
+        )
+        # Gate 2 -- flat wiki.
+        self._write("wiki/nested/F-Nested.md", self._fm("Nested", body="[[SQLite]]"))
+        # Gate 3 -- links. Dead target vs live target with a bad anchor.
+        self._write("wiki/F-Link-Dead.md", self._fm("Link Dead", body="[[Does-Not-Exist]]"))
+        self._write("wiki/F-Anchor-Missing.md", self._fm("Anchor Missing", body="[[SQLite#No-Such-Heading]]"))
+        # Gate 4 -- provenance.
+        self._write(
+            "wiki/F-Source-Missing.md",
+            self._fm("Source Missing", "sources:", "  - raw/ghost.pdf", body="[[SQLite]]"),
+        )
+        # Gate 5 -- connectivity. No links in either direction.
+        self._write("wiki/F-Orphan.md", self._fm("Orphan", body="Nothing links here and it links nowhere."))
+        # Gate 6 -- verification.
+        self._write(
+            "wiki/F-Actor-Malformed.md",
+            self._fm(
+                "Actor Malformed",
+                "verified:",
+                "  - by: no-prefix-actor",
+                "    at: '2026-01-01T00:00:00Z'",
+                "    of: 'sha256:0000'",
+                body="[[SQLite]]",
+            ),
+        )
+        self._write(
+            "wiki/F-Verification-Unbound.md",
+            self._fm(
+                "Verification Unbound",
+                "verified:",
+                "  - by: agent:test",
+                "    at: '2026-01-01T00:00:00Z'",
+                body="[[SQLite]]",
+            ),
+        )
+        self._write(
+            "wiki/F-Verification-Stale.md",
+            self._fm(
+                "Verification Stale",
+                "verified:",
+                "  - by: human:owner",
+                "    at: '2026-01-01T00:00:00Z'",
+                "    of: 'sha256:deadbeef'",
+                body="[[SQLite]]",
+            ),
+        )
+
+    @staticmethod
+    def _codes_emitted_by_lint():
+        src = Path(__file__).resolve().parent.parent / "src" / "cadabby" / "lint.py"
+        return set(re.findall(r'code="([A-Z_]+)"', src.read_text("utf-8")))
+
+    @staticmethod
+    def _codes_named_by_spec():
+        """Codes backticked inside §6.3, bounded at the next top-level heading.
+
+        Bounding matters: §8 names `VAULT_CONFLICT` and `O_APPEND`, which are
+        error conditions rather than lint codes, and a greedy read of the
+        section swallows them.
+        """
+        spec = (Path(__file__).resolve().parent.parent / "SPECIFICATION.md").read_text("utf-8")
+        body = spec.split("### 6.3.", 1)[1].split("\n## ", 1)[0]
+        return set(re.findall(r"`([A-Z][A-Z_]{3,})`", body))
+
+    def test_the_fixture_seeds_one_of_every_code(self):
+        produced = {f.code for f in run_vault_lint(self.vault)}
+        self.assertEqual(
+            produced,
+            self._codes_emitted_by_lint(),
+            "fixture and lint.py disagree; a code is unreachable or unseeded",
+        )
+
+    def test_the_spec_names_exactly_the_codes_lint_emits(self):
+        self.assertEqual(self._codes_named_by_spec(), self._codes_emitted_by_lint())
+
+    def test_every_code_carries_a_severity_the_spec_allows(self):
+        for finding in run_vault_lint(self.vault):
+            with self.subTest(code=finding.code):
+                self.assertIn(finding.severity, ("error", "warning"))
+
+    def test_only_connectivity_and_debt_are_warnings(self):
+        """Severity is the difference between 'broken' and 'owed' (§6.3).
+
+        Promoting a warning to an error makes `lint` fail on vaults that are
+        merely incomplete, which is every vault mid-ingestion; demoting an
+        error hides corruption. The split is a contract, so it is pinned.
+        """
+        by_severity = {}
+        for finding in run_vault_lint(self.vault):
+            by_severity.setdefault(finding.severity, set()).add(finding.code)
+
+        self.assertEqual(
+            by_severity["warning"],
+            {"NOTE_ORPHAN", "VERIFICATION_STALE", "ANCHOR_MISSING", "TAG_MALFORMED"},
+        )
+        self.assertEqual(
+            by_severity["error"] & by_severity["warning"],
+            {"TAG_MALFORMED"},
+            "TAG_MALFORMED is the only code that is both, and only for the case arm",
+        )
 
 
 if __name__ == "__main__":

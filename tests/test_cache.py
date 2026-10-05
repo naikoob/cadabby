@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 from cadabby.cache import VaultCache, sanitize_fts5_query
+from cadabby.indexer import generate_index_markdown
 from cadabby.vault import Vault
 
 
@@ -113,6 +114,49 @@ class TestVaultCache(unittest.TestCase):
         self.cache.scan()
         cur = conn.execute("SELECT trust_tier FROM notes WHERE cid = 'wiki/Epistemic-Trust-Tiers';")
         self.assertEqual(cur.fetchone()[0], "stale-verified")
+
+    def _drift(self, stem):
+        """Edit a verified note's body so its attestation stops binding."""
+        path = self.vault.wiki_dir / f"{stem}.md"
+        path.write_text(path.read_text("utf-8") + "\n\nDrifted paragraph.\n", "utf-8")
+
+    def test_status_counts_verification_debt(self):
+        """§10 C2. The tier is already asserted via SQL; the payload is not.
+
+        `vault_status` is how an agent learns it owes verification work, so
+        the count reaching the payload is the part that matters to a caller.
+        """
+        self.cache.scan()
+        self.assertEqual(self.cache.get_status()["verification_debt"], 0)
+
+        self._drift("Epistemic-Trust-Tiers")
+        self.cache.scan()
+        self.assertEqual(self.cache.get_status()["verification_debt"], 1)
+
+        self._drift("SQLite")
+        self.cache.scan()
+        self.assertEqual(self.cache.get_status()["verification_debt"], 2)
+
+    def test_status_debt_agrees_with_the_index_report(self):
+        """One number, two renderings, two different queries (§2.5, §5.2).
+
+        `get_status` counts `trust_tier = 'stale-verified'` over non-raw rows
+        while the gap report adds `parse_error IS NULL`. The extra clause is
+        currently redundant -- an unparseable note is stored with a NULL tier
+        -- so the two agree today. This holds them together if either query
+        moves, because a status count that disagrees with the file the user
+        is looking at is worse than either number alone.
+        """
+        self._drift("Epistemic-Trust-Tiers")
+        self._drift("SQLite")
+        self.cache.scan()
+
+        reported = generate_index_markdown(self.vault, cache=self.cache)
+        section = reported.split("## Verification Debt", 1)[1].split("\n## ", 1)[0]
+        listed = [ln for ln in section.splitlines() if ln.startswith("| `")]
+
+        self.assertEqual(len(listed), 2, "fixture stopped producing debt; the test below is vacuous without it")
+        self.assertEqual(len(listed), self.cache.get_status()["verification_debt"])
 
     def test_epistemic_ranking_boosts_and_status_penalty(self):
         self.cache.scan()
