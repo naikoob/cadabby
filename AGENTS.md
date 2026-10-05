@@ -143,7 +143,7 @@ cadabby/
     ├── test_mcp.py             # MCP handshake, tool execution, human:* refusal
     ├── test_cli.py             # Command surface, flags, JSON output, install refresh
     ├── test_installer.py       # init scaffolding, idempotency, merge, uninstall, dry-run
-    └── test_acceptance.py      # §10 Acceptance criteria C1-C23 and TestAcceptanceTraceability
+    └── test_acceptance.py      # §10 Acceptance criteria and TestAcceptanceTraceability
 ```
 
 ---
@@ -195,7 +195,7 @@ uv build
 
 Cadabby maintains an automated traceability contract between [`SPECIFICATION.md`](SPECIFICATION.md) and the test suite:
 
-1. **Section 10 Acceptance Criteria (C1–C23)**:
+1. **Section 10 Acceptance Criteria**:
    - Criteria must be phrased as **falsifiable observations** (something you can do to a vault to observe whether it complies).
    - Criteria must never duplicate requirement prose from earlier sections. The **Defined in** column in §10's Traceability Table points to the requirement.
 2. **`TestAcceptanceTraceability` Guard**:
