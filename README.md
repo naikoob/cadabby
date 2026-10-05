@@ -48,7 +48,7 @@ library), so installation never pulls in a transitive dependency tree.
 Working on Cadabby itself:
 
 ```bash
-git clone https://github.com/your-org/cadabby.git
+git clone https://github.com/naikoob/cadabby.git
 cd cadabby
 uv sync                    # or: pip install -e .
 uv run python -m unittest discover -s tests

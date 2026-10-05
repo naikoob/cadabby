@@ -27,6 +27,6 @@ dependencies = []
 cadabby = "cadabby.cli:main"
 
 [project.urls]
-Documentation = "https://github.com/bookian/cadabby#readme"
-Issues = "https://github.com/bookian/cadabby/issues"
-Source = "https://github.com/bookian/cadabby"
+Documentation = "https://github.com/naikoob/cadabby#readme"
+Issues = "https://github.com/naikoob/cadabby/issues"
+Source = "https://github.com/naikoob/cadabby"
