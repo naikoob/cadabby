@@ -12,7 +12,6 @@ import unittest
 from pathlib import Path
 
 from cadabby.cache import VaultCache
-from cadabby.constants import NOTE_TYPES
 from cadabby.domain import DomainDefinition
 from cadabby.lint import run_vault_lint
 from cadabby.mcp import McpServer

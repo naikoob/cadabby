@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ from cadabby.constants import (
     DEFAULT_TRUST_MULTIPLIERS,
     DIR_DOT_CADABBY,
     DIR_LOG,
+    DIR_OBSIDIAN,
     DIR_RAW,
     DIR_WIKI,
     FILE_AGENTS,
@@ -28,7 +30,6 @@ from cadabby.constants import (
     FILE_INDEX,
     FILE_LOCK,
     FILE_LOG,
-    NOTE_TYPES,
     SCHEMA_VERSION,
 )
 from cadabby.domain import DomainDefinition
@@ -42,7 +43,7 @@ from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter
 def is_vault_root(path: Path | str) -> bool:
     """Return True if path is a directory carrying a vault root marker."""
     p = Path(path)
-    return (p / FILE_CONFIG).exists() or (p / ".obsidian").is_dir()
+    return (p / FILE_CONFIG).exists() or (p / DIR_OBSIDIAN).is_dir()
 
 
 def env_vault_root() -> Path | None:
@@ -401,6 +402,33 @@ class Vault:
                         directives_markdown="",
                     )
         return domains
+
+    def iter_domain_notes(self) -> Iterator[tuple[Path, str, DomainDefinition]]:
+        """Every note file across every cognitive domain, in a stable order.
+
+        Four modules walked the domains themselves and the copies had already
+        drifted: `cache.py` omitted the `.md` filter, so a PNG dropped into
+        `wiki/` was read with `errors="replace"`, indexed as a note, listed in
+        `index.md` as unfiled work and reported by gate 5 as an orphan. Two of
+        the four also left `os.walk`'s `files` unsorted, making row insertion
+        order depend on readdir order (§4.4, C1).
+
+        Yields `(absolute path, domain name, domain)`. Callers that need only
+        one of the three discard the rest; what matters is that "which files
+        are notes" is answered in exactly one place.
+        """
+        for domain_name, domain_def in self.discover_domains().items():
+            if not domain_def.path.exists():
+                continue
+            for root, dirs, files in os.walk(domain_def.path, topdown=True):
+                dirs[:] = sorted(
+                    d for d in dirs if d not in DEFAULT_IGNORED_DIRS and not d.startswith(".")
+                )
+                for f in sorted(files):
+                    # AGENTS.md is the domain's own manifest, not a note in it.
+                    if not f.endswith(".md") or f.startswith(".") or f == FILE_AGENTS:
+                        continue
+                    yield Path(root) / f, domain_name, domain_def
 
     def _load_domain_from_agents_md(
         self, name: str, dir_path: Path, agents_md: Path

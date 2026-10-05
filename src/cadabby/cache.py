@@ -21,7 +21,6 @@ from cadabby.constants import (
     DEFAULT_RAW_TEXT_EXTENSIONS,
     DEFAULT_STATUS_MULTIPLIERS,
     DEFAULT_TRUST_MULTIPLIERS,
-    FILE_AGENTS,
     FTS_COLUMN_WEIGHTS,
     SCHEMA_VERSION,
 )
@@ -495,18 +494,8 @@ class VaultCache:
                             disk_files[rel] = p
 
         # 2. Cognitive domains (wiki, customers, projects, etc.)
-        domains = self.vault.discover_domains()
-        for domain_def in domains.values():
-            if domain_def.path.exists():
-                for root, dirs, files in os.walk(domain_def.path, topdown=True):
-                    dirs[:] = [d for d in dirs if d not in DEFAULT_IGNORED_DIRS and not d.startswith(".")]
-                    for f in files:
-                        if not f.startswith("."):
-                            if f == FILE_AGENTS:
-                                continue
-                            p = Path(root) / f
-                            rel = self.vault.rel_path(p)
-                            disk_files[rel] = p
+        for p, _, _ in self.vault.iter_domain_notes():
+            disk_files[self.vault.rel_path(p)] = p
 
         # 1. Deletion reconciliation: find notes in DB missing from disk
         cur = conn.execute("SELECT rel_path FROM notes;")
@@ -705,10 +694,6 @@ class VaultCache:
                 cur = conn.execute("SELECT cid FROM notes WHERE layer != 'raw' AND parse_error IS NULL;")
                 all_cids = [row["cid"] for row in cur.fetchall()]
         return LinkTargetIndex(all_cids)
-
-    def resolve_target(self, target: str) -> str | None:
-        """Resolve a target stem, relative path, or CID against the cache."""
-        return self.get_link_resolver().resolve(target)
 
     def search(
         self,

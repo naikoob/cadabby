@@ -17,7 +17,6 @@ from pathlib import Path
 from cadabby.cache import VaultCache
 from cadabby.indexer import generate_index_markdown, sync_vault_index
 from cadabby.lint import run_vault_lint
-from cadabby.ops import scaffold_note
 from cadabby.vault import Vault
 
 

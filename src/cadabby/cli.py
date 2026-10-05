@@ -14,12 +14,35 @@ from pathlib import Path
 
 from cadabby.audit import run_vault_audit
 from cadabby.cache import VaultCache
-from cadabby.constants import DIR_RAW, DIR_WIKI, NOTE_TYPES
-from cadabby.errors import EXIT_ENVIRONMENT, EXIT_USAGE, classify, exit_code_for
+from cadabby.constants import (
+    DIR_AGENTS,
+    DIR_CLAUDE,
+    DIR_OBSIDIAN,
+    DIR_RAW,
+    DIR_WIKI,
+    FILE_AGENTS,
+    FILE_CLAUDE,
+    FILE_CONFIG,
+    FILE_GEMINI,
+    FILE_INDEX,
+    FILE_LOG,
+    FILE_MCP,
+    FILE_STYLE,
+    NOTE_TYPES,
+    TRUST_TIERS,
+)
+from cadabby.errors import (
+    EXIT_ENVIRONMENT,
+    EXIT_FINDINGS,
+    EXIT_OK,
+    EXIT_USAGE,
+    classify,
+    exit_code_for,
+)
 from cadabby.fsutil import atomic_write
 from cadabby.graph import get_note_graph, resolve_link_target
 from cadabby.indexer import append_vault_log, rotate_vault_log, sync_vault_index
-from cadabby.installer import get_assets_dir
+from cadabby.installer import get_assets_dir, make_mcp_server_entry
 from cadabby.lint import run_vault_lint
 from cadabby.ops import (
     ground_notes,
@@ -43,6 +66,9 @@ def resolve_cli_vault(args: argparse.Namespace) -> Vault:
     return Vault.open()
 
 
+# The two persona runbooks shipped in assets/skills (§7.1). Named here rather
+# than globbed so `init` creates the directories before copying into them.
+PERSONAS = ("librarian", "technician")
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -58,9 +84,9 @@ def cmd_init(args: argparse.Namespace) -> int:
     # Create directories
     (target_dir / DIR_RAW).mkdir(parents=True, exist_ok=True)
     (target_dir / DIR_WIKI).mkdir(parents=True, exist_ok=True)
-    (target_dir / ".claude" / "commands").mkdir(parents=True, exist_ok=True)
-    (target_dir / ".agents" / "skills" / "librarian").mkdir(parents=True, exist_ok=True)
-    (target_dir / ".agents" / "skills" / "technician").mkdir(parents=True, exist_ok=True)
+    (target_dir / DIR_CLAUDE / "commands").mkdir(parents=True, exist_ok=True)
+    for persona in PERSONAS:
+        (target_dir / DIR_AGENTS / "skills" / persona).mkdir(parents=True, exist_ok=True)
 
     def copy_template_file(src: Path, dst: Path) -> bool:
         """Copy a template into the vault, honoring --force. True if dst was written."""
@@ -76,11 +102,22 @@ def cmd_init(args: argparse.Namespace) -> int:
         shutil.copy(src, dst)
         return True
 
+    def bind_mcp_config(dst: Path) -> None:
+        """Point an MCP config at this vault and this interpreter.
+
+        Callers gate this on having actually written the template: rewriting
+        one that --force just declined to touch would contradict the message
+        copy_template_file printed. Use 'cadabby install' to re-bind an
+        existing config.
+        """
+        entry = {"mcpServers": {"cadabby": make_mcp_server_entry(target_dir)}}
+        atomic_write(dst, json.dumps(entry, indent=2) + "\n")
+
     # 1. Config .cadabby.json
-    cfg_src = vault_tpl / ".cadabby.json"
-    cfg_dst = target_dir / ".cadabby.json"
+    cfg_src = vault_tpl / FILE_CONFIG
+    cfg_dst = target_dir / FILE_CONFIG
     if cfg_dst.exists() and not force:
-        print("Existing file left untouched: .cadabby.json (use --force to overwrite)")
+        print(f"Existing file left untouched: {FILE_CONFIG} (use --force to overwrite)")
     elif cfg_src.exists():
         cfg_data = json.loads(cfg_src.read_text("utf-8"))
         cfg_data["vault_name"] = vault_name
@@ -88,48 +125,39 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     # 2. Files from vault template
     wrote_mcp_json = False
-    for filename in (".gitignore", ".mcp.json", "AGENTS.md", "CLAUDE.md", "GEMINI.md", "STYLE.md", "index.md"):
-        src = vault_tpl / filename
-        dst = target_dir / filename
-        written = copy_template_file(src, dst)
-        if filename == ".mcp.json":
+    for filename in (".gitignore", FILE_MCP, FILE_AGENTS, FILE_CLAUDE, FILE_GEMINI, FILE_STYLE, FILE_INDEX):
+        written = copy_template_file(vault_tpl / filename, target_dir / filename)
+        if filename == FILE_MCP:
             wrote_mcp_json = written
 
-    # Bind the freshly written .mcp.json to this vault and interpreter, so Claude
-    # Code can mount the workspace server with no further configuration. Gated on
-    # having actually written the file: rewriting one that --force just declined to
-    # touch would contradict the message printed above. Use 'cadabby install' to
-    # re-bind an existing config.
+    # Bind so Claude Code can mount the workspace server with no further setup.
     if wrote_mcp_json:
-        from cadabby.installer import make_mcp_server_entry
-
-        claude_mcp_data = {"mcpServers": {"cadabby": make_mcp_server_entry(target_dir)}}
-        atomic_write(target_dir / ".mcp.json", json.dumps(claude_mcp_data, indent=2) + "\n")
+        bind_mcp_config(target_dir / FILE_MCP)
 
     # 3. Touch empty log.md
-    log_file = target_dir / "log.md"
+    log_file = target_dir / FILE_LOG
     if not log_file.exists():
         atomic_write(log_file, "# Activity Ledger\n\n")
 
     # 4. Copy canonical persona skills to .agents/skills/
     skills_dir = assets / "skills"
     if skills_dir.exists():
-        for skill_name in ("librarian", "technician"):
-            src_skill = skills_dir / skill_name / "SKILL.md"
-            dst_skill = target_dir / ".agents" / "skills" / skill_name / "SKILL.md"
-            copy_template_file(src_skill, dst_skill)
+        for persona in PERSONAS:
+            copy_template_file(
+                skills_dir / persona / "SKILL.md",
+                target_dir / DIR_AGENTS / "skills" / persona / "SKILL.md",
+            )
 
     # 5. Copy slash command templates to .claude/commands/
     cmds_dir = assets / "commands"
     if cmds_dir.exists():
-        for cmd_file in cmds_dir.glob("*.md"):
-            dst_cmd = target_dir / ".claude" / "commands" / cmd_file.name
-            copy_template_file(cmd_file, dst_cmd)
+        for cmd_file in sorted(cmds_dir.glob("*.md")):
+            copy_template_file(cmd_file, target_dir / DIR_CLAUDE / "commands" / cmd_file.name)
 
     # 6. Copy Antigravity vault-scoped plugin & MCP configuration to .agents/plugins/cadabby/
     plugin_src = assets / "plugins" / "cadabby"
     if plugin_src.exists():
-        dst_plugin = target_dir / ".agents" / "plugins" / "cadabby"
+        dst_plugin = target_dir / DIR_AGENTS / "plugins" / "cadabby"
         wrote_mcp_cfg = False
         for p in sorted(plugin_src.rglob("*")):
             if p.is_file():
@@ -140,23 +168,18 @@ def cmd_init(args: argparse.Namespace) -> int:
                 if rel.as_posix() == "mcp_config.json":
                     wrote_mcp_cfg = written
 
-        # Bind the plugin's MCP config the same way, under the same --force rule
         if wrote_mcp_cfg:
-            from cadabby.installer import make_mcp_server_entry
-
-            mcp_data = {"mcpServers": {"cadabby": make_mcp_server_entry(target_dir)}}
-            atomic_write(dst_plugin / "mcp_config.json", json.dumps(mcp_data, indent=2) + "\n")
+            bind_mcp_config(dst_plugin / "mcp_config.json")
 
     # 7. Optional Obsidian config
     if args.obsidian:
-        obsidian_dir = target_dir / ".obsidian"
+        obsidian_dir = target_dir / DIR_OBSIDIAN
         obsidian_dir.mkdir(parents=True, exist_ok=True)
         (target_dir / DIR_RAW / "attachments").mkdir(parents=True, exist_ok=True)
-        obs_src = vault_tpl / "obsidian" / "app.json"
-        copy_template_file(obs_src, obsidian_dir / "app.json")
+        copy_template_file(vault_tpl / "obsidian" / "app.json", obsidian_dir / "app.json")
 
     print(f"Initialized Cadabby vault '{vault_name}' in {target_dir}")
-    return 0
+    return EXIT_OK
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
@@ -181,7 +204,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
     if rotated:
         msg += f" (Rotated active log to {vault.rel_path(rotated)})"
     print(msg)
-    return 0
+    return EXIT_OK
 
 
 def cmd_search(args: argparse.Namespace) -> int:
@@ -201,11 +224,11 @@ def cmd_search(args: argparse.Namespace) -> int:
     if args.json:
         out = [r.to_dict() for r in results]
         print(json.dumps(out, indent=2))
-        return 0
+        return EXIT_OK
 
     if not results:
         print(f"No results found matching '{args.query}'.")
-        return 0
+        return EXIT_OK
 
     print(f"\nFound {len(results)} matches for '{args.query}':\n")
     print(f"{'CID':<42} {'TRUST':<18} {'STATUS':<12} {'SCORE':<8} {'TITLE'}")
@@ -216,7 +239,7 @@ def cmd_search(args: argparse.Namespace) -> int:
         title = (r.title or "")[:35]
         print(f"{r.cid:<42} {tier:<18} {st:<12} {r.score:<8.3f} {title}")
     print()
-    return 0
+    return EXIT_OK
 
 
 def cmd_ground(args: argparse.Namespace) -> int:
@@ -228,7 +251,7 @@ def cmd_ground(args: argparse.Namespace) -> int:
 
     if args.json:
         print(json.dumps(grounded, indent=2))
-        return 0
+        return EXIT_OK
 
     for item in grounded:
         print("=" * 80)
@@ -240,7 +263,7 @@ def cmd_ground(args: argparse.Namespace) -> int:
         print("-" * 80)
         print(item["content"])
         print()
-    return 0
+    return EXIT_OK
 
 
 def cmd_scaffold(args: argparse.Namespace) -> int:
@@ -261,7 +284,7 @@ def cmd_scaffold(args: argparse.Namespace) -> int:
         path=getattr(args, "path", None),
     )
     print(f"Scaffolded note: {vault.rel_path(path)}")
-    return 0
+    return EXIT_OK
 
 
 def cmd_update(args: argparse.Namespace) -> int:
@@ -289,7 +312,7 @@ def cmd_update(args: argparse.Namespace) -> int:
         actor=args.actor or f"human:{getpass.getuser()}",
     )
     print(f"Updated note: {vault.rel_path(path)}")
-    return 0
+    return EXIT_OK
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
@@ -327,7 +350,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     )
     status_label = "already verified" if res.get("already_verified") else "verified"
     print(f"{status_label.capitalize()}: {res['cid']} as '{res['actor']}' -> tier: '{res['trust_tier']}' ({res['of'][:16]}...)")
-    return 0
+    return EXIT_OK
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -339,7 +362,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     if args.json:
         print(json.dumps(status_data, indent=2))
-        return 0
+        return EXIT_OK
 
     print(f"\n=== Vault Status: {status_data['vault_name']} ===")
     print(f"Path: {vault.root}")
@@ -349,7 +372,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     )
     print(f"Verification Debt (stale): {status_data['verification_debt']}")
     print("\nTrust Tiers:")
-    for tier in ("human-reviewed", "machine-confirmed", "stale-verified", "unverified"):
+    for tier in TRUST_TIERS:
         print(f"  - {tier:<20}: {status_data['trust_tiers'].get(tier, 0)}")
     print("\nDomains:")
     for d, count in status_data.get("domains", {}).items():
@@ -362,7 +385,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     for s, count in status_data["statuses"].items():
         print(f"  - {s:<20}: {count}")
     print()
-    return 0
+    return EXIT_OK
 
 
 def cmd_lint(args: argparse.Namespace) -> int:
@@ -375,14 +398,14 @@ def cmd_lint(args: argparse.Namespace) -> int:
         out = [f.to_dict() for f in findings]
         print(json.dumps(out, indent=2))
         has_errors = any(f.severity == "error" for f in findings)
-        return 1 if has_errors else 0
+        return EXIT_FINDINGS if has_errors else EXIT_OK
 
     errors = [f for f in findings if f.severity == "error"]
     warnings = [f for f in findings if f.severity == "warning"]
 
     if not findings:
         print("Vault is clean. All six normative gates passed.")
-        return 0
+        return EXIT_OK
 
     print(f"\nEpistemic Lint Results: {len(errors)} error(s), {len(warnings)} warning(s)\n")
     for f in findings:
@@ -391,7 +414,7 @@ def cmd_lint(args: argparse.Namespace) -> int:
         print(f"[{sev_color}] {f.code:<22} {loc:<45} {f.message}")
     print()
 
-    return 1 if errors else 0
+    return EXIT_FINDINGS if errors else EXIT_OK
 
 
 def cmd_audit(args: argparse.Namespace) -> int:
@@ -404,7 +427,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
             print(json.dumps({"notice": notice, "findings": []}))
         else:
             print(f"Notice: {notice}")
-        return 0
+        return EXIT_OK
 
     if args.json:
         out = [
@@ -419,17 +442,17 @@ def cmd_audit(args: argparse.Namespace) -> int:
             for f in findings
         ]
         print(json.dumps(out, indent=2))
-        return 1 if findings else 0
+        return EXIT_FINDINGS if findings else EXIT_OK
 
     if not findings:
         print("Audit clean: all human:* endorsements match Git author provenance.")
-        return 0
+        return EXIT_OK
 
     print(f"\nAudit Findings: {len(findings)} issue(s) detected\n")
     for f in findings:
         print(f"[{f.code}] {f.rel_path}:{f.line} ({f.actor} in {f.commit[:8]}) - {f.message}")
     print()
-    return 1
+    return EXIT_FINDINGS
 
 
 def cmd_log(args: argparse.Namespace) -> int:
@@ -443,7 +466,7 @@ def cmd_log(args: argparse.Namespace) -> int:
             actor = "process:cli"
     append_vault_log(vault, args.message, actor=actor)
     print(f"Logged entry to {vault.rel_path(vault.log_path)}")
-    return 0
+    return EXIT_OK
 
 
 def cmd_graph(args: argparse.Namespace) -> int:
@@ -466,7 +489,7 @@ def cmd_graph(args: argparse.Namespace) -> int:
 
         if args.json:
             print(json.dumps(graph_data, indent=2))
-            return 0
+            return EXIT_OK
 
         note = graph_data["note"]
         print(f"Graph for [[{note['cid']}]] ({note['type']}, {note['trust_tier']}):\n")
@@ -507,7 +530,7 @@ def cmd_graph(args: argparse.Namespace) -> int:
         else:
             print("  (none)")
 
-        return 0
+        return EXIT_OK
 
 
 def cmd_install(args: argparse.Namespace) -> int:

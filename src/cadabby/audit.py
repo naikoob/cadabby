@@ -5,13 +5,10 @@ Conforms strictly to Cadabby Technical Specification §3.5.
 
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
 
-from cadabby.constants import DEFAULT_IGNORED_DIRS, FILE_AGENTS
 from cadabby.vault import Vault
 
 
@@ -52,17 +49,7 @@ def run_vault_audit(vault: Vault, require_signed: bool = False) -> tuple[list[Au
     identities: dict[str, list[str]] = vault.config.get("identities", {})
     findings: list[AuditFinding] = []
 
-    all_note_files: list[Path] = []
-    domains = vault.discover_domains()
-    for domain_def in domains.values():
-        if domain_def.path.exists():
-            for root, dirs, files in os.walk(domain_def.path, topdown=True):
-                dirs[:] = [d for d in dirs if d not in DEFAULT_IGNORED_DIRS and not d.startswith(".")]
-                for f in sorted(files):
-                    if f.endswith(".md") and not f.startswith("."):
-                        if f == FILE_AGENTS:
-                            continue
-                        all_note_files.append(Path(root) / f)
+    all_note_files = [p for p, _, _ in vault.iter_domain_notes()]
 
     re_human_by = re.compile(r"^\s*-\s*by:\s*(human:[A-Za-z0-9._\-/]+)\s*")
 

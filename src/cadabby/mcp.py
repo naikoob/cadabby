@@ -19,6 +19,17 @@ from cadabby.ops import ground_notes, scaffold_note, update_note, verify_note
 from cadabby.vault import Vault, path_to_cid
 
 
+def _tool_ok(payload: Any) -> dict[str, Any]:
+    """Render a successful tool result.
+
+    The counterpart to _tool_error. A str payload is returned verbatim --
+    several tools answer with a human-readable confirmation line rather than
+    a document -- and anything else is serialized as JSON.
+    """
+    text = payload if isinstance(payload, str) else json.dumps(payload, indent=2)
+    return {"content": [{"type": "text", "text": text}], "isError": False}
+
+
 def _tool_error(tool: str, code: str, message: str, *, retryable: bool) -> dict[str, Any]:
     """Render a tool failure as structured JSON rather than prose (§5.4).
 
@@ -249,8 +260,7 @@ class McpServer:
                     domain=args.get("domain"),
                     limit=args.get("limit", 20),
                 )
-                data = [r.to_dict() for r in res]
-                return {"content": [{"type": "text", "text": json.dumps(data, indent=2)}], "isError": False}
+                return _tool_ok([r.to_dict() for r in res])
 
             elif name == "vault_ground":
                 grounded = ground_notes(
@@ -259,7 +269,7 @@ class McpServer:
                     budget_tokens=args.get("budget_tokens"),
                     cache=self.cache,
                 )
-                return {"content": [{"type": "text", "text": json.dumps(grounded, indent=2)}], "isError": False}
+                return _tool_ok(grounded)
 
             elif name == "vault_scaffold_note":
                 path = scaffold_note(
@@ -275,10 +285,7 @@ class McpServer:
                     path=args.get("path"),
                 )
                 rel = self.vault.rel_path(path)
-                return {
-                    "content": [{"type": "text", "text": f"Scaffolded note: {rel} (CID: {path_to_cid(rel)})"}],
-                    "isError": False,
-                }
+                return _tool_ok(f"Scaffolded note: {rel} (CID: {path_to_cid(rel)})")
 
             elif name == "vault_update_note":
                 app_sec = None
@@ -301,10 +308,7 @@ class McpServer:
                     actor=self.client_id,
                 )
                 rel = self.vault.rel_path(path)
-                return {
-                    "content": [{"type": "text", "text": f"Updated note: {rel}"}],
-                    "isError": False,
-                }
+                return _tool_ok(f"Updated note: {rel}")
 
             elif name == "vault_verify_note":
                 actor_param = args.get("actor") or args.get("by")
@@ -323,29 +327,25 @@ class McpServer:
                     method=args.get("method", "automated-check"),
                     is_human_authorized=False,
                 )
-                return {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                f"Attested {res['cid']} by {res['actor']} "
-                                f"with content-binding {res['of'][:16]}... "
-                                f"-> derived trust tier: '{res['trust_tier']}'"
-                            ),
-                        }
-                    ],
-                    "isError": False,
-                }
+                return _tool_ok(
+                    f"Attested {res['cid']} by {res['actor']} "
+                    f"with content-binding {res['of'][:16]}... "
+                    f"-> derived trust tier: '{res['trust_tier']}'"
+                )
 
             elif name == "vault_status":
                 self.cache.scan()
                 status_out = self.cache.get_status()
-                return {"content": [{"type": "text", "text": json.dumps(status_out, indent=2)}], "isError": False}
+                return _tool_ok(status_out)
 
             elif name == "vault_lint":
                 findings = run_vault_lint(self.vault, cache=self.cache)
                 out = [f.to_dict() for f in findings]
                 has_errors = any(f.severity == "error" for f in findings)
+                # Deliberately neither _tool_ok nor _tool_error: the call
+                # succeeded, and isError mirrors the CLI's exit 1 for "the
+                # vault has findings" (§5.4). The body is the findings list,
+                # not an error envelope.
                 return {
                     "content": [{"type": "text", "text": json.dumps(out, indent=2)}],
                     "isError": has_errors,

@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from cadabby.constants import DIR_AGENTS, FILE_MCP
 from cadabby.fsutil import atomic_write
 
 
@@ -177,7 +178,7 @@ def default_antigravity_path(vault_path: Path | str | None = None, is_global: bo
     """
     if is_global or vault_path is None:
         return Path.home() / ".gemini" / "antigravity" / "plugins" / "cadabby"
-    return Path(vault_path).resolve() / ".agents" / "plugins" / "cadabby"
+    return Path(vault_path).resolve() / DIR_AGENTS / "plugins" / "cadabby"
 
 
 def default_claude_path(vault_path: Path | str | None = None, is_global: bool = False) -> Path:
@@ -189,7 +190,7 @@ def default_claude_path(vault_path: Path | str | None = None, is_global: bool = 
     """
     if is_global or vault_path is None:
         return Path.home() / ".claude.json"
-    return Path(vault_path).resolve() / ".mcp.json"
+    return Path(vault_path).resolve() / FILE_MCP
 
 
 def _wrong_kind(dest: Path, want: str) -> str | None:

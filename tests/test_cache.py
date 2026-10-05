@@ -248,16 +248,81 @@ class TestVaultCache(unittest.TestCase):
 
     def test_cache_target_resolution(self):
         self.cache.scan()
+        resolver = self.cache.get_link_resolver()
 
         # Bare stem
-        self.assertEqual(self.cache.resolve_target("SQLite"), "wiki/SQLite")
-        self.assertEqual(self.cache.resolve_target("Flash-Attention"), "wiki/Flash-Attention")
+        self.assertEqual(resolver.resolve("SQLite"), "wiki/SQLite")
+        self.assertEqual(resolver.resolve("Flash-Attention"), "wiki/Flash-Attention")
 
         # Exact CID
-        self.assertEqual(self.cache.resolve_target("wiki/Flash-Attention"), "wiki/Flash-Attention")
+        self.assertEqual(resolver.resolve("wiki/Flash-Attention"), "wiki/Flash-Attention")
 
         # Nonexistent
-        self.assertIsNone(self.cache.resolve_target("NonExistentStem"))
+        self.assertIsNone(resolver.resolve("NonExistentStem"))
+
+
+class TestOnlyMarkdownIsANote(unittest.TestCase):
+    """§2.1. A cognitive domain holds notes; the other files in it are not notes.
+
+    `cache.py` had its own copy of the domain walk and that copy omitted the
+    `.md` filter the other three copies applied, so any file in a domain became
+    a row in `notes`. A PNG was read with `errors="replace"`, its bytes were
+    fed to FTS5, it was listed in `index.md` as unfiled work, and gate 5 called
+    it an orphan -- telling the reader to go file a diagram. The walk is now
+    `Vault.iter_domain_notes()` and there is one filter to get wrong.
+    """
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp_dir.name) / "v"
+        (self.root / "wiki").mkdir(parents=True)
+        (self.root / "raw").mkdir(parents=True)
+        (self.root / ".cadabby.json").write_text('{"vault_name": "v"}\n', encoding="utf-8")
+        (self.root / "wiki" / "Real-Note.md").write_text(
+            "---\ntype: concept\ntitle: Real Note\ndescription: A note.\nstatus: active\n---\n\nBody.\n",
+            encoding="utf-8",
+        )
+        self.vault = Vault(self.root)
+        self.cache = VaultCache(self.vault)
+
+    def tearDown(self):
+        self.cache.close()
+        self.tmp_dir.cleanup()
+
+    def _indexed(self):
+        self.cache.scan()
+        rows = self.cache.get_connection().execute("SELECT rel_path FROM notes;").fetchall()
+        return {r["rel_path"] for r in rows}
+
+    def test_non_markdown_files_in_a_domain_are_not_notes(self):
+        (self.root / "wiki" / "diagram.png").write_bytes(bytes(range(256)) * 4)
+        (self.root / "wiki" / "scratch.txt").write_text("not a note", encoding="utf-8")
+        self.assertEqual(self._indexed(), {"wiki/Real-Note.md"})
+
+    def test_a_binary_in_a_domain_is_not_reported_as_unfiled_work(self):
+        """The visible symptom: index.md told the reader to go file a PNG."""
+        (self.root / "wiki" / "diagram.png").write_bytes(bytes(range(256)) * 4)
+        self.cache.scan()
+        self.assertNotIn("diagram", generate_index_markdown(self.vault, self.cache))
+
+    def test_raw_keeps_accepting_non_markdown(self):
+        """The filter is scoped to domains. `raw/` is evidence, not notes (§2.4)."""
+        (self.root / "raw" / "transcript.txt").write_text("collected evidence", encoding="utf-8")
+        self.assertIn("raw/transcript.txt", self._indexed())
+
+    def test_a_domains_own_manifest_is_not_one_of_its_notes(self):
+        (self.root / "wiki" / "AGENTS.md").write_text("# Wiki directives\n", encoding="utf-8")
+        self.assertEqual(self._indexed(), {"wiki/Real-Note.md"})
+
+    def test_the_walk_is_ordered(self):
+        """Insertion order sets rowids, and rowid is the BM25 tiebreak (§4.4)."""
+        for stem in ("Zulu", "Alpha", "Mike"):
+            (self.root / "wiki" / f"{stem}.md").write_text(
+                f"---\ntype: concept\ntitle: {stem}\ndescription: d\nstatus: active\n---\n\nb\n",
+                encoding="utf-8",
+            )
+        walked = [p.name for p, _, _ in self.vault.iter_domain_notes()]
+        self.assertEqual(walked, sorted(walked))
 
 
 class TestRawSourceSearch(unittest.TestCase):

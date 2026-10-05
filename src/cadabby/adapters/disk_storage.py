@@ -10,7 +10,7 @@ import os
 from collections.abc import Sequence
 from pathlib import Path
 
-from cadabby.constants import DEFAULT_IGNORED_DIRS, FILE_AGENTS
+from cadabby.constants import DEFAULT_IGNORED_DIRS
 from cadabby.domain import Note
 from cadabby.fsutil import atomic_replace_checked
 from cadabby.indexer import append_vault_log
@@ -51,19 +51,7 @@ class DiskNoteStorage(NoteStoragePort):
         return target.is_file()
 
     def list_note_cids(self) -> Sequence[str]:
-        domains = self.vault.discover_domains()
-        cids = []
-        for domain_def in domains.values():
-            if domain_def.path.exists():
-                for root, dirs, files in os.walk(domain_def.path, topdown=True):
-                    dirs[:] = [d for d in dirs if d not in DEFAULT_IGNORED_DIRS and not d.startswith(".")]
-                    for f in files:
-                        if f.endswith(".md") and not f.startswith("."):
-                            if f == FILE_AGENTS:
-                                continue
-                            p = Path(root) / f
-                            rel = self.vault.rel_path(p)
-                            cids.append(path_to_cid(rel))
+        cids = [path_to_cid(self.vault.rel_path(p)) for p, _, _ in self.vault.iter_domain_notes()]
         return sorted(cids)
 
     def list_raw_sources(self) -> Sequence[str]:

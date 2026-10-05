@@ -5,21 +5,16 @@ Conforms strictly to Cadabby Technical Specification §6.3.
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from cadabby.cache import VaultCache
 from cadabby.constants import (
-    DEFAULT_IGNORED_DIRS,
     DIR_WIKI,
-    FILE_AGENTS,
     NOTE_STATUSES,
     REQUIRED_FRONTMATTER_FIELDS,
 )
-from cadabby.domain import DomainDefinition
 from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter
 from cadabby.okf import (
     compute_body_hash,
@@ -77,21 +72,7 @@ def _run_vault_lint_impl(vault: Vault, cache: VaultCache) -> list[LintFinding]:
     cur = conn.execute("SELECT cid, rel_path, body FROM notes WHERE layer != 'raw';")
     notes_by_cid = {r["cid"]: dict(r) for r in cur.fetchall()}
 
-    domains = vault.discover_domains()
-
-    # Scan all markdown files across all discovered cognitive domains
-    all_note_files: list[tuple[Path, str, DomainDefinition]] = []
-    for domain_name, domain_def in domains.items():
-        if domain_def.path.exists():
-            for root, dirs, files in os.walk(domain_def.path, topdown=True):
-                dirs[:] = [d for d in dirs if d not in DEFAULT_IGNORED_DIRS and not d.startswith(".")]
-                for f in sorted(files):
-                    if f.endswith(".md") and not f.startswith("."):
-                        if f == FILE_AGENTS:
-                            continue
-                        all_note_files.append((Path(root) / f, domain_name, domain_def))
-
-    for file_path, domain_name, domain_def in all_note_files:
+    for file_path, domain_name, domain_def in vault.iter_domain_notes():
         rel_path = vault.rel_path(file_path)
         content = file_path.read_text("utf-8", errors="replace")
 
