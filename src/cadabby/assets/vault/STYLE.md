@@ -4,4 +4,5 @@
 * **Titles**: Capitalized Human-Readable Stems (e.g., `Flash-Attention`, `Epistemic-Trust-Tiers`).
 * **Cross-Linking**: Generously link entities and concepts using `[[Wikilinks]]` or `[[Wikilinks|Aliases]]`.
 * **OKF Frontmatter**: Every note across all cognitive domains (both `wiki/` and custom domains like `customers/` or `projects/`) must begin with strict YAML frontmatter specifying `type`, `title`, `description`, and `status`.
+* **Tags**: Lowercase kebab-case, with `/` for hierarchy (e.g. `knowledge-base`, `trust/human-reviewed`). Tags must never contain whitespace — write `machine-learning`, not `machine learning` — because a tag with a space silently breaks `--tag` filtering. Casing is normalized on write; whitespace is rejected outright.
 * **Governance**: Consult `AGENTS.md` for cognitive domain manifests, epistemic trust tiers, and operational rules.

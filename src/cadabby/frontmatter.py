@@ -10,6 +10,7 @@ import re
 from typing import Any
 
 from cadabby.constants import RFC3339_TIMESTAMP_PATTERN, SCHEMA_KEY_ORDER
+from cadabby.okf import canonicalize_tags
 
 RE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 RE_BARE_SAFE = re.compile(r"^[A-Za-z0-9._\-/]+$")
@@ -300,8 +301,23 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     return data, body
 
 
+class FrontmatterSerializeError(ValueError):
+    """Raised when a value cannot be written inside the restricted YAML subset."""
+
+
 def format_scalar(val: Any) -> str:
-    """Format a scalar into its canonical restricted YAML representation."""
+    """Format a scalar into its canonical restricted YAML representation.
+
+    Raises:
+        FrontmatterSerializeError: if val is a collection. The subset has no flow
+            style, so there is no legal rendering; falling through to str() would
+            emit a Python repr that this module's own parser rejects (§3.2).
+    """
+    if isinstance(val, (dict, list, tuple, set)):
+        raise FrontmatterSerializeError(
+            f"Cannot serialize {type(val).__name__} as a scalar. The restricted "
+            "YAML subset nests only one level deep (§3.2)"
+        )
     if val is None:
         return "null"
     if isinstance(val, bool):
@@ -341,14 +357,35 @@ def format_scalar(val: Any) -> str:
     return f'"{escaped}"'
 
 
+def _scalar_at(val: Any, where: str) -> str:
+    """format_scalar, with the offending key named in the error message."""
+    try:
+        return format_scalar(val)
+    except FrontmatterSerializeError as exc:
+        raise FrontmatterSerializeError(f"'{where}': {exc}") from None
+
+
 def serialize_frontmatter(data: dict[str, Any], body: str = "") -> str:
     """Canonicalizing frontmatter serializer conforming to §3.2.
 
     Emits keys in schema order, followed by unknown keys alphabetically.
     Guarantees two-space sequence indent and single-quoted timestamps.
+
+    The writer is as strict as the parser: a value outside the subset raises
+    rather than being coerced. Emitting a Python repr would destroy the value
+    and leave a file the parser rejects, silently dropping the note from search.
+
+    Raises:
+        FrontmatterSerializeError: on a value the restricted subset cannot express.
+        ValueError: on a tag containing whitespace (§3.1).
     """
     if not data and not body:
         return ""
+
+    # Canonicalize tags: lowercase, de-duplicate, reject whitespace (§3.1).
+    # Copied rather than mutated — callers hold the original dict.
+    if isinstance(data.get("tags"), list):
+        data = {**data, "tags": canonicalize_tags(data["tags"])}
 
     # Sort keys: SCHEMA_KEY_ORDER first, then extra keys alphabetically
     ordered_keys = [k for k in SCHEMA_KEY_ORDER if k in data]
@@ -375,11 +412,11 @@ def serialize_frontmatter(data: dict[str, Any], body: str = "") -> str:
                     if not sub_keys:
                         continue
                     first_k = sub_keys[0]
-                    lines.append(f"  - {first_k}: {format_scalar(item[first_k])}")
+                    lines.append(f"  - {first_k}: {_scalar_at(item[first_k], f'{k}[].{first_k}')}")
                     for other_k in sub_keys[1:]:
-                        lines.append(f"    {other_k}: {format_scalar(item[other_k])}")
+                        lines.append(f"    {other_k}: {_scalar_at(item[other_k], f'{k}[].{other_k}')}")
                 else:
-                    lines.append(f"  - {format_scalar(item)}")
+                    lines.append(f"  - {_scalar_at(item, f'{k}[]')}")
             continue
 
         # Nested mapping (e.g. 'generated:')
@@ -388,11 +425,11 @@ def serialize_frontmatter(data: dict[str, Any], body: str = "") -> str:
                 continue
             lines.append(f"{k}:")
             for sub_k, sub_v in val.items():
-                lines.append(f"  {sub_k}: {format_scalar(sub_v)}")
+                lines.append(f"  {sub_k}: {_scalar_at(sub_v, f'{k}.{sub_k}')}")
             continue
 
         # Top-level scalar
-        lines.append(f"{k}: {format_scalar(val)}")
+        lines.append(f"{k}: {_scalar_at(val, k)}")
 
     lines.append("---")
     fm_text = "\n".join(lines) + "\n"

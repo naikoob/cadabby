@@ -80,9 +80,7 @@ class TestDomainDiscovery(unittest.TestCase):
         wiki_def = domains["wiki"]
         self.assertIsInstance(wiki_def, DomainDefinition)
         self.assertEqual(wiki_def.name, "wiki")
-        self.assertEqual(wiki_def.allowed_types, list(NOTE_TYPES))
-        self.assertTrue(wiki_def.enforce_layout)
-        self.assertTrue(wiki_def.searchable)
+        self.assertIsNone(wiki_def.allowed_types)  # Open / permissive by default
         self.assertFalse(wiki_def.require_sources)
         self.assertEqual(wiki_def.directives_markdown, "")
 
@@ -94,13 +92,11 @@ class TestDomainDiscovery(unittest.TestCase):
             """---
 domain: customers
 description: Customer accounts and intelligence
-searchable: true
 allowed_types:
   - account
   - meeting
   - requirement
 require_sources: true
-enforce_layout: false
 ---
 # Customer Intelligence Directives
 
@@ -115,10 +111,8 @@ Always cite raw evidence.
         cust_def = domains["customers"]
         self.assertEqual(cust_def.name, "customers")
         self.assertEqual(cust_def.description, "Customer accounts and intelligence")
-        self.assertTrue(cust_def.searchable)
         self.assertEqual(cust_def.allowed_types, ["account", "meeting", "requirement"])
         self.assertTrue(cust_def.require_sources)
-        self.assertFalse(cust_def.enforce_layout)
         self.assertIn("# Customer Intelligence Directives", cust_def.directives_markdown)
         self.assertIn("Always cite raw evidence.", cust_def.directives_markdown)
 
@@ -131,10 +125,51 @@ Always cite raw evidence.
         proj_def = domains["projects"]
         self.assertEqual(proj_def.name, "projects")
         self.assertIsNone(proj_def.allowed_types)  # Open / permissive
-        self.assertFalse(proj_def.enforce_layout)
         self.assertFalse(proj_def.require_sources)
-        self.assertTrue(proj_def.searchable)
         self.assertEqual(proj_def.directives_markdown, "")
+
+    def test_search_inclusion_is_structural_not_configurable(self):
+        """A legacy `searchable: false` manifest key is inert: every discovered domain is searched.
+
+        Search inclusion is decided before discovery (reserved names, dot-prefixed
+        directories, DEFAULT_IGNORED_DIRS). A per-domain opt-out would make search
+        lie by omission, so the field was removed (SPECIFICATION.md §2.2).
+        """
+        archive_dir = self.vault_dir / "archive"
+        archive_dir.mkdir()
+        (archive_dir / "AGENTS.md").write_text(
+            """---
+domain: archive
+description: Retired material
+searchable: false
+---
+Directives...
+""",
+            encoding="utf-8",
+        )
+        (archive_dir / "Decommissioned-Pipeline.md").write_text(
+            """---
+type: synthesis
+title: Decommissioned Pipeline
+description: Retired ingestion pipeline notes
+status: deprecated
+---
+# Decommissioned Pipeline
+The pipeline relied on quasicrystalline sharding.
+""",
+            encoding="utf-8",
+        )
+
+        domains = self.vault.discover_domains()
+        self.assertIn("archive", domains)
+        # The key is not parsed into the definition at all.
+        self.assertFalse(hasattr(domains["archive"], "searchable"))
+
+        # An unfiltered search still reaches the domain.
+        with VaultCache(self.vault) as cache:
+            cache.scan()
+            hits = cache.search("quasicrystalline")
+            self.assertEqual([r.cid for r in hits], ["archive/Decommissioned-Pipeline"])
 
     def test_discover_domains_ignores_reserved_and_ignored_directories(self):
         for ignored in [".git", ".cadabby", ".obsidian", ".venv", "venv", "node_modules", "target"]:
@@ -469,9 +504,9 @@ status: active
         )
 
         findings = run_vault_lint(self.vault)
-        mismatch_findings = [f for f in findings if f.code == "TYPE_DIR_MISMATCH"]
+        mismatch_findings = [f for f in findings if f.code == "WIKI_NESTING_DISALLOWED"]
 
-        # Only wiki note triggers TYPE_DIR_MISMATCH, customers note does NOT!
+        # Only wiki note triggers WIKI_NESTING_DISALLOWED, customers note does NOT!
         self.assertEqual(len(mismatch_findings), 1)
         self.assertEqual(mismatch_findings[0].rel_path, "wiki/concepts/Mismatched.md")
 
@@ -570,7 +605,6 @@ class TestMultiDomainOpsAndMcp(unittest.TestCase):
             """---
 domain: customers
 description: Customer accounts and contracts
-searchable: true
 allowed_types:
   - account
   - contract
@@ -721,7 +755,6 @@ class TestMultiDomainEndToEnd(unittest.TestCase):
             """---
 domain: customers
 description: Enterprise client profiles
-searchable: true
 allowed_types:
   - account
   - meeting
@@ -737,7 +770,6 @@ Ensure client confidentiality and verify CRM sync.
             """---
 domain: projects
 description: Engineering and research initiatives
-searchable: true
 allowed_types:
   - project
   - rfc

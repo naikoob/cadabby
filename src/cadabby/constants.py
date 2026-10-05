@@ -1,9 +1,27 @@
 """System constants, defaults, enums, and schema order for Cadabby."""
 
-SCHEMA_VERSION = 2
+# Bumped to 3 when raw sources began being written to the FTS index (§2.4).
+# A cache built before that holds no raw rows and no amount of incremental
+# scanning adds them, since the files are unchanged; the version mismatch is
+# what forces the one-time rebuild that picks them up.
+SCHEMA_VERSION = 3
 
-# Note frontmatter enums
-NOTE_TYPES = ("entity", "concept", "synthesis", "comparison", "guide")
+# Note frontmatter enums and constants
+TYPE_MOC = "moc"
+TYPE_CONCEPT = "concept"
+TYPE_ENTITY = "entity"
+TYPE_SYNTHESIS = "synthesis"
+TYPE_COMPARISON = "comparison"
+TYPE_GUIDE = "guide"
+
+NOTE_TYPES = (
+    TYPE_MOC,
+    TYPE_CONCEPT,
+    TYPE_ENTITY,
+    TYPE_SYNTHESIS,
+    TYPE_COMPARISON,
+    TYPE_GUIDE,
+)
 NOTE_STATUSES = ("active", "evergreen", "draft", "completed", "deprecated", "abandoned")
 TRUST_TIERS = ("human-reviewed", "machine-confirmed", "stale-verified", "unverified")
 

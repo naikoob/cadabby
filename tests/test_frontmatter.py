@@ -9,11 +9,13 @@ import unittest
 
 from cadabby.frontmatter import (
     FrontmatterParseError,
+    FrontmatterSerializeError,
     parse_frontmatter,
     parse_scalar,
     serialize_frontmatter,
     split_comment,
 )
+from cadabby.okf import canonicalize_tags
 
 
 class TestFrontmatterParser(unittest.TestCase):
@@ -170,6 +172,106 @@ Content of the note goes here.
         reparsed_data, reparsed_body = parse_frontmatter(serialized)
         self.assertEqual(reparsed_data, original)
         self.assertEqual(reparsed_body.strip(), body.strip())
+
+
+class TestSubsetBoundarySymmetry(unittest.TestCase):
+    """The writer must refuse exactly what the parser refuses (§3.2)."""
+
+    IN_SUBSET = {
+        "nested mapping": "---\ngenerated:\n  by: agent:x\n  at: '2026-01-01T00:00:00Z'\n---\nbody\n",
+        "sequence of scalars": "---\ntags:\n  - a\n  - b\n---\nbody\n",
+        "sequence of flat mappings": "---\nverified:\n  - by: human:a\n    of: 'sha256:1'\n---\nbody\n",
+    }
+
+    OUT_OF_SUBSET = {
+        "three-level mapping": "---\na:\n  b:\n    c: v\n---\nbody\n",
+        "sequence under a mapping": "---\na:\n  b:\n    - x\n---\nbody\n",
+        "mapping inside a sequence item": "---\nv:\n  - by: a\n    meta:\n      k: z\n---\nbody\n",
+        "sequence of sequences": "---\na:\n  - - x\n---\nbody\n",
+        "flow style": "---\na: [x, y]\n---\nbody\n",
+    }
+
+    def test_parser_accepts_every_documented_shape(self):
+        for label, src in self.IN_SUBSET.items():
+            with self.subTest(label):
+                fm, _ = parse_frontmatter(src)
+                self.assertTrue(fm)
+                # And the writer can re-emit what the parser accepted.
+                self.assertEqual(parse_frontmatter(serialize_frontmatter(fm, "body\n"))[0], fm)
+
+    def test_parser_rejects_out_of_subset_shapes(self):
+        for label, src in self.OUT_OF_SUBSET.items():
+            with self.subTest(label):
+                with self.assertRaises(FrontmatterParseError):
+                    parse_frontmatter(src)
+
+    def test_writer_raises_rather_than_emitting_unreadable_frontmatter(self):
+        """Coercing an out-of-subset value would destroy it and orphan the note.
+
+        A Python repr round-trips through no parser: the file would be recorded
+        with parse_error and vanish from search while the write reported success.
+        """
+        for label, data in {
+            "mapping nested two deep": {"type": "concept", "provenance": {"import": {"tool": "zotero"}}},
+            "sequence inside a mapping": {"type": "concept", "provenance": {"authors": ["a", "b"]}},
+            "sequence of sequences": {"type": "concept", "matrix": [["x"]]},
+            "mapping inside a sequence item": {"type": "concept", "verified": [{"by": "a", "meta": {"k": "v"}}]},
+        }.items():
+            with self.subTest(label):
+                with self.assertRaises(FrontmatterSerializeError):
+                    serialize_frontmatter(data, "# Body\n")
+
+    def test_serialize_error_names_the_offending_key_path(self):
+        with self.assertRaises(FrontmatterSerializeError) as ctx:
+            serialize_frontmatter({"type": "concept", "provenance": {"import": {"tool": "zotero"}}}, "# Body\n")
+        self.assertIn("provenance.import", str(ctx.exception))
+
+        with self.assertRaises(FrontmatterSerializeError) as ctx:
+            serialize_frontmatter({"verified": [{"by": "a", "meta": {"k": "v"}}]}, "# Body\n")
+        self.assertIn("verified[].meta", str(ctx.exception))
+
+
+class TestTagGrammar(unittest.TestCase):
+    """Enforcement of the §3.1 tag grammar in the writer.
+
+    The grammar itself is covered in test_okf.py; these cover the write path.
+    """
+
+    def test_writer_lowercases_and_deduplicates_preserving_order(self):
+        serialized = serialize_frontmatter(
+            {"type": "concept", "tags": ["Storage", "SQLite", "storage", "c-library"]},
+            "# Body\n",
+        )
+        reparsed, _ = parse_frontmatter(serialized)
+        self.assertEqual(reparsed["tags"], ["storage", "sqlite", "c-library"])
+
+    def test_writer_refuses_whitespace_bearing_tag(self):
+        """Lowercasing cannot repair a space, and writing it corrupts the --tag facet."""
+        with self.assertRaises(ValueError) as ctx:
+            serialize_frontmatter({"type": "concept", "tags": ["machine learning"]}, "# Body\n")
+        self.assertIn("whitespace", str(ctx.exception))
+
+    def test_writer_does_not_mutate_caller_frontmatter(self):
+        original = {"type": "concept", "tags": ["Storage", "storage"]}
+        serialize_frontmatter(original, "# Body\n")
+        self.assertEqual(original["tags"], ["Storage", "storage"])
+
+    def test_tag_filter_is_exact_under_the_grammar(self):
+        """The space-joined `instr` predicate (§4.2) is only exact because of §3.1.
+
+        A conformant tag list cannot produce the false positive that a
+        whitespace-bearing tag would.
+        """
+        stored = " ".join(canonicalize_tags(["machine-learning", "sqlite"]))
+        self.assertEqual(stored, "machine-learning sqlite")
+
+        def matches(probe: str) -> bool:
+            return f" {probe} " in f" {stored} "
+
+        self.assertTrue(matches("machine-learning"))
+        self.assertTrue(matches("sqlite"))
+        self.assertFalse(matches("machine"))
+        self.assertFalse(matches("learning"))
 
 
 if __name__ == "__main__":

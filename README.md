@@ -121,10 +121,10 @@ my-vault/
    The agent will:
    - Call `vault_search` to check if related concepts already exist.
    - Call `vault_ground` to inspect existing notes and their 1-hop links.
-   - Call `vault_scaffold_note` to draft `wiki/concepts/Flash-Attention.md` citing `raw/attention-paper.pdf`.
-   - Add `[[wikilinks]]` to existing notes.
+   - Call `vault_scaffold_note` to draft `wiki/Flash-Attention.md` citing `raw/attention-paper.pdf`.
+   - Add `[[wikilinks]]` to existing notes and suitable Maps of Content (`[[AI-Systems-MOC]]`).
    - Call `vault_verify_note` stamping the note with `agent:claude-code`.
-   *(Catalog `index.md` and activity `log.md` are kept up to date implicitly; no manual sync needed).*
+   *(The `index.md` gap report and the `log.md` ledger are kept up to date implicitly; no manual sync needed).*
 
 ### Workflow B: Using Google Antigravity
 
@@ -146,7 +146,7 @@ my-vault/
 2. **Review and certify notes**:
    When a human inspects a note and certifies its accuracy:
    ```bash
-   cadabby verify wiki/concepts/Flash-Attention --human
+   cadabby verify wiki/Flash-Attention --human
    ```
    *This binds the attestation to the exact `sha256` of the note body and upgrades its trust tier to `human-reviewed` ($2.0\times$ search boost).*
 3. **If anyone edits the note body**:
@@ -156,7 +156,7 @@ my-vault/
 
 ## 4. Cognitive Domains & Domain Manifests
 
-Cadabby supports modular, multi-domain knowledge architectures. While `wiki/` serves as the canonical knowledge base with strictly enforced 5-type directory structures, you can partition knowledge into independent **Cognitive Domains** simply by creating top-level directories (e.g. `customers/`, `projects/`, `research/`, `team/`).
+Cadabby supports modular, multi-domain knowledge architectures. While `wiki/` serves as the canonical knowledge base with a strictly flat layout governed by Maps of Content (MOCs), you can partition knowledge into independent **Cognitive Domains** simply by creating top-level directories (e.g. `customers/`, `projects/`, `research/`, `team/`). Custom domains fully support arbitrary nested directory structures.
 
 ### Creating a Cognitive Domain with `AGENTS.md`
 
@@ -165,13 +165,11 @@ Drop an `AGENTS.md` file into the root of any top-level domain folder to configu
 ```markdown
 ---
 description: Customer accounts, CRM dossiers, and stakeholders
-searchable: true
 allowed_types:
   - account
   - stakeholder
   - interaction
 require_sources: false
-enforce_layout: false
 ---
 
 # Customers Domain Directives
@@ -186,14 +184,15 @@ enforce_layout: false
 | Field | Type | Default | Purpose |
 | :--- | :---: | :---: | :--- |
 | `description` | string | `"<Domain> domain"` | Human-readable domain description. |
-| `searchable` | bool | `true` | Whether notes in this domain are indexed and returned in `vault_search`. |
 | `allowed_types` | list[str] | `null` (unrestricted) | Allowed `type:` values in frontmatter. Violations trigger `ENUM_INVALID` in `cadabby lint`. |
 | `require_sources`| bool | `false` | When `true`, notes in this domain must specify non-empty `sources: [...]`. |
-| `enforce_layout` | bool | `false` | When `true`, notes must live in a subfolder matching their `type` (like in `wiki/`). When `false`, arbitrary directory nesting is permitted. |
 
 ### Permissive vs. Strict Domains
+- **Canonical `wiki/` Domain**: Strictly flat (`wiki/*.md`). Dynamic open typing by default (unless restricted by `wiki/AGENTS.md`). Governed by Maps of Content (`type: moc`).
 - **Permissive Domains** (no `AGENTS.md` or `allowed_types: null`): Any non-empty note type and any folder hierarchy are allowed without triggering lint errors.
-- **Strict Domains** (`allowed_types` specified): Linter enforces valid types, while allowing cross-domain wikilinks (`[[Note-Stem]]`) to resolve smoothly across all domains.
+- **Strict Domains** (`allowed_types` specified): Linter enforces valid types, while allowing cross-domain wikilinks (`[[Note-Stem]]`) to resolve smoothly across all domains. Custom domains support nested folders.
+
+> **Every discovered domain is searchable.** There is no per-domain opt-out: exclusion happens before discovery (reserved names, dot-prefixed directories, build folders), so anything that became a domain is knowledge you put in the vault deliberately. To narrow a query, pass `--domain` / `domain` at the call site rather than hiding content from every future search. See `SPECIFICATION.md` §2.2.
 
 ### Step-by-Step: Creating a New Cognitive Domain
 
@@ -204,12 +203,10 @@ enforce_layout: false
    cat << 'EOF' > customers/AGENTS.md
    ---
    description: "Customer accounts and dossiers"
-   searchable: true
    allowed_types:
      - account
      - contact
    require_sources: false
-   enforce_layout: false
    ---
    # Customer Directives
    Cross-link all accounts to primary contact notes.
@@ -272,10 +269,10 @@ Conforming to §5.1-§5.2 of the Technical Specification, Cadabby exposes exactl
 | `cadabby sync` | Scan files, update SQLite cache & rebuild `index.md` | `cadabby sync` |
 | `cadabby status` | Report note counts, trust tiers, and verification debt | `cadabby status` |
 | `cadabby search` | Epistemic BM25 search with trust boosts & domain filters | `cadabby search "attention mechanism" --domain wiki` |
-| `cadabby ground` | Retrieve note content and 1-hop neighborhood | `cadabby ground wiki/concepts/Attention` |
+| `cadabby ground` | Retrieve note content and 1-hop neighborhood | `cadabby ground wiki/Attention` |
 | `cadabby scaffold` | Scaffold a new typed note in any domain | `cadabby scaffold "Transformer" --type concept --domain wiki --desc "Attention model"` |
-| `cadabby update` | Patch frontmatter or append/replace sections | `cadabby update wiki/concepts/Transformer --replace-section "Overview:New text"` |
-| `cadabby verify` | Stamp cryptographic attestation on note | `cadabby verify wiki/concepts/Transformer --human` |
+| `cadabby update` | Patch frontmatter or append/replace sections | `cadabby update wiki/Transformer --replace-section "Overview:New text"` |
+| `cadabby verify` | Stamp cryptographic attestation on note | `cadabby verify wiki/Transformer --human` |
 | `cadabby lint` | Run the six normative epistemic linting gates across all domains | `cadabby lint` |
 | `cadabby audit` | Check Git blame provenance of human attestations | `cadabby audit --require-signed` |
 | `cadabby mcp` | Launch the JSON-RPC 2.0 stdio MCP server | `cadabby mcp` |
@@ -304,8 +301,8 @@ Status multipliers apply on top of trust tiers:
 ## 8. Development & Testing
 
 ```bash
-# Run all unit and integration tests (105 tests):
+# Run all unit and integration tests (135 tests):
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
-All 12 falsifiable acceptance criteria from §10 are validated in `tests/test_acceptance.py`.
+All 19 falsifiable acceptance criteria from §10 are validated in `tests/test_acceptance.py`.

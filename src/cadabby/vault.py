@@ -368,10 +368,8 @@ class Vault:
                 name=DIR_WIKI,
                 path=self.wiki_dir,
                 description="Canonical knowledge base",
-                searchable=True,
-                allowed_types=list(NOTE_TYPES),
+                allowed_types=None,
                 require_sources=False,
-                enforce_layout=True,
                 directives_markdown="",
             )
 
@@ -396,10 +394,8 @@ class Vault:
                         name=name,
                         path=entry,
                         description=f"{name.capitalize()} domain",
-                        searchable=True,
                         allowed_types=None,  # Open
                         require_sources=False,
-                        enforce_layout=False,
                         directives_markdown="",
                     )
         return domains
@@ -419,23 +415,17 @@ class Vault:
         allowed_types = schema_cfg.get("allowed_types", fm.get("allowed_types"))
         if isinstance(allowed_types, list):
             allowed_types_list: list[str] | None = [str(t) for t in allowed_types]
-        elif name == DIR_WIKI:
-            allowed_types_list = list(NOTE_TYPES)
         else:
             allowed_types_list = None
 
-        searchable = bool(fm.get("searchable", True))
         require_sources = bool(schema_cfg.get("require_sources", fm.get("require_sources", False)))
-        enforce_layout = bool(schema_cfg.get("enforce_layout", fm.get("enforce_layout", (name == DIR_WIKI))))
         description = str(fm.get("description", f"{name.capitalize()} domain"))
 
         return DomainDefinition(
             name=name,
             path=dir_path,
             description=description,
-            searchable=searchable,
             allowed_types=allowed_types_list,
             require_sources=require_sources,
-            enforce_layout=enforce_layout,
             directives_markdown=body.strip(),
         )

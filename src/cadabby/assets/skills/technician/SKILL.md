@@ -23,7 +23,7 @@ The **technician** is responsible for vault structural integrity, cache synchron
    - `TIMESTAMP_INVALID`: Correct date-time strings in frontmatter to standard ISO-8601 formatting.
 
    ### Gate 2: Layout Consistency
-   - `TYPE_DIR_MISMATCH`: Update frontmatter `type` via `vault_update_note` to match its folder location, or move the note to conform to layout rules (e.g. `wiki/{type}/` or domain layout when `enforce_layout: true`).
+   - `WIKI_NESTING_DISALLOWED`: Flatten nested notes inside `wiki/` by moving them directly to `wiki/{stem}.md`. The wiki domain must be completely flat; subdirectories are disallowed.
 
    ### Gate 3: Wikilink Integrity
    - `LINK_DEAD`: Use `vault_search` to find renamed stems; update link target via `vault_update_note`, scaffold the missing target note, or prune broken links.
@@ -38,3 +38,9 @@ The **technician** is responsible for vault structural integrity, cache synchron
    ### Gate 6: Epistemic & Verification Integrity
    - `VERIFICATION_STALE`: Re-review modified note content against its sources and call `vault_verify_note(cid, method="...")` to refresh hash binding and retire verification debt.
    - `VERIFICATION_UNBOUND`: Re-verify via `vault_verify_note` to compute the correct body hash and bind active session identity, or patch frontmatter to remove invalid verification blocks.
+
+3. **MOC Lifecycle & Topology Maintenance**:
+   - **Splitting Monolithic MOCs**: When an MOC exceeds ~25 outgoing links or encompasses $\ge 6$ distinct subtopics, decompose it into modular child MOCs (e.g. `Storage-MOC` $\rightarrow$ `Relational-Storage-MOC`, `Vector-Storage-MOC`). Retain the parent MOC as a high-level router linking to the child MOCs.
+   - **Merging Anemic or Redundant MOCs**: When an MOC has $\le 2$ links (anemic hub) or has $> 50\%$ link overlap with a neighboring MOC, consolidate their entries into a single cohesive MOC and retire or redirect the redundant hub.
+   - **Clearing the Unfiled Queue**: `index.md` lists every wiki note no MOC reaches by forward link at any depth. Work that list down by linking each note from the MOC it belongs to -- scaffolding a new MOC when a note introduces a cluster that none of the existing hubs covers. Note that `vault_lint` will not flag these: a note that links outward has edges, so gate 5 sees no orphan.
+

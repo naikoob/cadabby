@@ -14,6 +14,7 @@ from typing import Any
 from cadabby.cache import VaultCache
 from cadabby.constants import (
     DEFAULT_IGNORED_DIRS,
+    DIR_WIKI,
     FILE_AGENTS,
     NOTE_STATUSES,
     REQUIRED_FRONTMATTER_FIELDS,
@@ -22,10 +23,11 @@ from cadabby.domain import DomainDefinition
 from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter
 from cadabby.okf import (
     compute_body_hash,
+    is_canonical_tag,
     is_valid_actor,
     is_valid_timestamp,
+    tag_has_whitespace,
 )
-from cadabby.ops import TYPE_TO_DIR
 from cadabby.vault import Vault, cid_to_path
 
 
@@ -169,6 +171,59 @@ def _run_vault_lint_impl(vault: Vault, cache: VaultCache) -> list[LintFinding]:
                 )
             )
 
+        # Tag grammar (§3.1). Whitespace is an error because it corrupts the
+        # space-joined `--tag` facet (§4.2); a merely non-canonical tag is a
+        # warning because the canonicalizing writer repairs it (§3.2).
+        note_tags = fm.get("tags")
+        if note_tags is not None and not isinstance(note_tags, list):
+            findings.append(
+                LintFinding(
+                    code="TAG_MALFORMED",
+                    severity="error",
+                    rel_path=rel_path,
+                    line=None,
+                    message=f"'tags' must be a sequence of strings, got {type(note_tags).__name__}",
+                )
+            )
+        elif isinstance(note_tags, list):
+            for tag in note_tags:
+                if not isinstance(tag, str):
+                    findings.append(
+                        LintFinding(
+                            code="TAG_MALFORMED",
+                            severity="error",
+                            rel_path=rel_path,
+                            line=None,
+                            message=f"Invalid tag {tag!r}. Tags must be strings",
+                        )
+                    )
+                elif tag_has_whitespace(tag):
+                    findings.append(
+                        LintFinding(
+                            code="TAG_MALFORMED",
+                            severity="error",
+                            rel_path=rel_path,
+                            line=None,
+                            message=(
+                                f"Invalid tag '{tag}'. Tags must not contain whitespace, "
+                                "which breaks --tag filtering; use kebab-case"
+                            ),
+                        )
+                    )
+                elif not is_canonical_tag(tag):
+                    findings.append(
+                        LintFinding(
+                            code="TAG_MALFORMED",
+                            severity="warning",
+                            rel_path=rel_path,
+                            line=None,
+                            message=(
+                                f"Non-canonical tag '{tag}'. Canonical form is lowercase "
+                                "kebab-case, optionally '/'-nested (e.g. 'trust/human-reviewed')"
+                            ),
+                        )
+                    )
+
         # Timestamps check
         gen_block = fm.get("generated")
         if isinstance(gen_block, dict):
@@ -200,18 +255,17 @@ def _run_vault_lint_impl(vault: Vault, cache: VaultCache) -> list[LintFinding]:
                             )
                         )
 
-        # --- GATE 2: Layout Consistency ---
-        if domain_def.enforce_layout and note_type in TYPE_TO_DIR:
-            expected_parent = TYPE_TO_DIR[note_type]
+        # --- GATE 2: Layout Consistency (Flat Wiki Enforced) ---
+        if domain_name == DIR_WIKI:
             actual_parent = file_path.parent.name
-            if actual_parent != expected_parent:
+            if actual_parent != DIR_WIKI:
                 findings.append(
                     LintFinding(
-                        code="TYPE_DIR_MISMATCH",
+                        code="WIKI_NESTING_DISALLOWED",
                         severity="error",
                         rel_path=rel_path,
                         line=None,
-                        message=f"Note of type '{note_type}' is in '{domain_name}/{actual_parent}/', expected '{domain_name}/{expected_parent}/'",
+                        message=f"Note is nested in 'wiki/{actual_parent}/'. The wiki domain must be completely flat.",
                     )
                 )
 

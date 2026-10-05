@@ -61,12 +61,20 @@ class TestMcpServer(unittest.TestCase):
         data_search = json.loads(res_search["content"][0]["text"])
         self.assertGreater(len(data_search), 0)
 
-        # Ground
-        res_ground = self.server.handle_tools_call("vault_ground", {"cids": ["wiki/entities/SQLite"]})
+        # Search with hyphenated words
+        res_search_hyphen = self.server.handle_tools_call("vault_search", {"query": "SQLite-vs-DuckDB"})
+        self.assertFalse(res_search_hyphen["isError"])
+        data_search_hyphen = json.loads(res_search_hyphen["content"][0]["text"])
+        self.assertGreater(len(data_search_hyphen), 0)
+
+        # Ground with bare stem and wikilink
+        res_ground = self.server.handle_tools_call("vault_ground", {"cids": ["SQLite", "[[Epistemic-Trust-Tiers]]"]})
         self.assertFalse(res_ground["isError"])
         data_ground = json.loads(res_ground["content"][0]["text"])
-        self.assertEqual(len(data_ground), 1)
-        self.assertEqual(data_ground[0]["cid"], "wiki/entities/SQLite")
+        self.assertEqual(len(data_ground), 2)
+        grounded_cids = [g["cid"] for g in data_ground]
+        self.assertIn("wiki/SQLite", grounded_cids)
+        self.assertIn("wiki/Epistemic-Trust-Tiers", grounded_cids)
 
     def test_tools_call_scaffold_update_verify_status_lint(self):
         self.server.handle_initialize({"clientInfo": {"name": "agent-smith"}})
@@ -87,7 +95,7 @@ class TestMcpServer(unittest.TestCase):
         res_update = self.server.handle_tools_call(
             "vault_update_note",
             {
-                "cid": "wiki/concepts/Quantum-Computing",
+                "cid": "wiki/Quantum-Computing",
                 "append_section": ["Algorithms", "Shor's algorithm and Grover's algorithm."],
             },
         )
@@ -96,7 +104,7 @@ class TestMcpServer(unittest.TestCase):
         # Verify: should stamp agent-smith and bind hash
         res_verify = self.server.handle_tools_call(
             "vault_verify_note",
-            {"cid": "wiki/concepts/Quantum-Computing", "method": "automated-check"},
+            {"cid": "wiki/Quantum-Computing", "method": "automated-check"},
         )
         self.assertFalse(res_verify["isError"])
         self.assertIn("agent:agent-smith", res_verify["content"][0]["text"])

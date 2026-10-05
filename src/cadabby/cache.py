@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sqlite3
 import sys
 from dataclasses import dataclass
@@ -29,6 +30,66 @@ from cadabby.fsutil import compute_file_sha256
 from cadabby.graph import LinkTargetIndex, extract_wikilinks
 from cadabby.okf import compute_body_hash, derive_trust_tier
 from cadabby.vault import Vault, path_to_cid, path_to_layer, path_to_stem
+
+
+def sanitize_fts5_query(query: str) -> str:
+    """Sanitize and prepare a query string for SQLite FTS5 MATCH expression.
+
+    Handles:
+    - Preserves explicitly quoted phrases (e.g. "B-Tree Index").
+    - Quotes tokens with internal hyphens or special characters (e.g. B-tree -> "B-tree")
+      preventing SQLite FTS5 from treating '-' as column selectors or unary NOT operators.
+    - Preserves uppercase boolean operators (AND, OR, NOT) while stripping invalid leading, trailing, or consecutive operator sequences.
+    - Supports prefix matching (e.g. term* -> term* or "phrase"*).
+    - Cleans unclosed quotes and non-syntax characters gracefully.
+    """
+    query = query.strip()
+    if not query:
+        return ""
+
+    if query.count('"') % 2 == 1:
+        query = query + '"'
+
+    tokens: list[str] = []
+    pattern = re.compile(r"\"([^\"]*)\"|(\S+)")
+    for match in pattern.finditer(query):
+        quoted, bare = match.groups()
+        if quoted is not None:
+            clean_quoted = quoted.replace('"', '""').strip()
+            if clean_quoted and any(c.isalnum() for c in clean_quoted):
+                tokens.append(f'"{clean_quoted}"')
+        elif bare is not None:
+            if bare in ("AND", "OR", "NOT"):
+                tokens.append(bare)
+            else:
+                has_prefix = bare.endswith("*") and len(bare) > 1
+                base = bare[:-1] if has_prefix else bare
+                clean_base = base.replace('"', "")
+                if not clean_base or not any(c.isalnum() for c in clean_base):
+                    continue
+                if re.search(r"[^\w]", clean_base):
+                    quoted_token = f'"{clean_base}"'
+                    if has_prefix:
+                        quoted_token = f"{quoted_token}*"
+                    tokens.append(quoted_token)
+                else:
+                    if has_prefix:
+                        tokens.append(f"{clean_base}*")
+                    else:
+                        tokens.append(clean_base)
+
+    clean_tokens: list[str] = []
+    for t in tokens:
+        if t in ("AND", "OR", "NOT"):
+            if not clean_tokens or clean_tokens[-1] in ("AND", "OR", "NOT"):
+                continue
+            clean_tokens.append(t)
+        else:
+            clean_tokens.append(t)
+    while clean_tokens and clean_tokens[-1] in ("AND", "OR", "NOT"):
+        clean_tokens.pop()
+
+    return " ".join(clean_tokens)
 
 
 @dataclass
@@ -62,6 +123,16 @@ class SearchResult:
             "score": round(self.score, 4),
             "snippet": self.snippet,
         }
+
+
+def _fts_table(layer: str | None) -> str:
+    """Return the FTS table that indexes a given layer.
+
+    Raw sources are kept in their own index so their term statistics do not
+    enter the BM25 scoring of curated notes (see the DDL for what that costs).
+    Every read and write must agree on this mapping, so it lives in one place.
+    """
+    return "raw_fts" if layer == "raw" else "notes_fts"
 
 
 def check_fts5_capability(conn: sqlite3.Connection) -> None:
@@ -120,6 +191,7 @@ class VaultCache:
     def _rebuild_tables(self, conn: sqlite3.Connection) -> None:
         """Drop all tables and recreate clean schema."""
         conn.execute("DROP TABLE IF EXISTS notes_fts;")
+        conn.execute("DROP TABLE IF EXISTS raw_fts;")
         conn.execute("DROP TABLE IF EXISTS sources;")
         conn.execute("DROP TABLE IF EXISTS links;")
         conn.execute("DROP TABLE IF EXISTS notes;")
@@ -182,6 +254,21 @@ class VaultCache:
                 tokenize = 'porter unicode61'
             );
 
+            -- Raw sources index on a separate table, deliberately. BM25 scores a
+            -- document against its corpus, and a shared index makes raw/ part of
+            -- the corpus for curated notes: thirty transcripts repeating a term
+            -- drive its IDF to zero, so a wiki note that scored 1.29 on that term
+            -- scores 0.00 instead. The trust and status multipliers (§4.4) then
+            -- multiply ~0 and epistemic ranking stops working altogether. Keeping
+            -- the corpora apart is what makes each set of statistics describe the
+            -- documents it actually ranks.
+            CREATE VIRTUAL TABLE IF NOT EXISTS raw_fts USING fts5(
+                title, description, body, tags,
+                content = 'notes',
+                content_rowid = 'id',
+                tokenize = 'porter unicode61'
+            );
+
             CREATE TABLE IF NOT EXISTS cache_meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -236,11 +323,20 @@ class VaultCache:
             old_body = existing["body"] or ""
             old_tags = existing["tags"] or ""
 
-            # 1. Retract old terms from FTS5 index using OLD values if previously indexed
-            if existing["layer"] != "raw" and existing["parse_error"] is None:
+            # 1. Retract old terms from FTS5 index using OLD values if previously
+            # indexed. This must mirror the insert gate below exactly: retracting
+            # a row that was never inserted, or retracting it from the wrong
+            # table, corrupts an external-content index silently rather than
+            # raising. Reading the table from the stored row keeps the whole
+            # retraction sourced from old state, consistent with the old-values
+            # rule above. It cannot currently differ from _fts_table(layer) --
+            # layer is a pure function of rel_path and the row is keyed by
+            # rel_path, so a layer change arrives as a delete plus an insert.
+            if existing["parse_error"] is None:
                 try:
+                    old_fts = _fts_table(existing["layer"])
                     conn.execute(
-                        "INSERT INTO notes_fts(notes_fts, rowid, title, description, body, tags) "
+                        f"INSERT INTO {old_fts}({old_fts}, rowid, title, description, body, tags) "
                         "VALUES('delete', ?, ?, ?, ?, ?);",
                         (row_id, old_title, old_desc, old_body, old_tags),
                     )
@@ -312,10 +408,16 @@ class VaultCache:
             row_id = cur.lastrowid
             assert row_id is not None
 
-        # 3. Insert into FTS5 index only if valid cognitive domain note without parse errors
-        if layer != "raw" and parse_error is None:
+        # 3. Index everything that parsed, into the index for its corpus. Raw
+        # sources are indexed at all so that the full text of a collected source
+        # is reachable (§2.4) -- storing the body and never indexing it made
+        # `raw/` a write-only surface, which reads to an agent as "this is not in
+        # the vault". Non-text raw files carry an empty body and are indexed by
+        # title alone, which is what makes `raw/paper.pdf` findable by name.
+        if parse_error is None:
             conn.execute(
-                "INSERT INTO notes_fts(rowid, title, description, body, tags) VALUES (?, ?, ?, ?, ?);",
+                f"INSERT INTO {_fts_table(layer)}(rowid, title, description, body, tags) "
+                "VALUES (?, ?, ?, ?, ?);",
                 (row_id, title or "", description or "", body, tags_str),
             )
 
@@ -342,11 +444,12 @@ class VaultCache:
         old_body = row["body"] or ""
         old_tags = row["tags"] or ""
 
-        # Retract from FTS5 if previously indexed
-        if row["layer"] != "raw" and row["parse_error"] is None:
+        # Retract from FTS5 if previously indexed (mirrors the insert gate)
+        if row["parse_error"] is None:
             try:
+                fts = _fts_table(row["layer"])
                 conn.execute(
-                    "INSERT INTO notes_fts(notes_fts, rowid, title, description, body, tags) "
+                    f"INSERT INTO {fts}({fts}, rowid, title, description, body, tags) "
                     "VALUES('delete', ?, ?, ?, ?, ?);",
                     (row_id, old_title, old_desc, old_body, old_tags),
                 )
@@ -360,8 +463,15 @@ class VaultCache:
 
         return True
 
-    def scan(self, force: bool = False) -> tuple[int, int, int, int]:
+    def scan(self, force: bool = False, regenerate_index: bool = True) -> tuple[int, int, int, int]:
         """Perform incremental scan over vault files.
+
+        A scan that changed anything regenerates index.md before returning
+        (§4.3). This lives here rather than at each of the ten call sites
+        because "whichever entry point triggered it" is the actual requirement,
+        and a list of call sites is a list someone eventually forgets to
+        extend. regenerate_index=False exists for the index generator's own
+        scan, which would otherwise recurse.
 
         Returns:
             (inserted, updated, deleted, total)
@@ -547,9 +657,7 @@ class VaultCache:
 
         # 3. Resolve link targets if vault structure changed or new/updated links exist
         if inserted_count > 0 or updated_count > 0 or deleted_count > 0 or force:
-            cur = conn.execute("SELECT cid FROM notes WHERE layer != 'raw' AND parse_error IS NULL;")
-            all_cids = [row["cid"] for row in cur.fetchall()]
-            resolver = LinkTargetIndex(all_cids)
+            resolver = self.get_link_resolver()
 
             # If note topology changed (inserted/deleted/force), re-resolve all links.
             # If only existing notes were updated, only resolve the newly inserted unresolved links.
@@ -573,7 +681,34 @@ class VaultCache:
         cur = conn.execute("SELECT COUNT(*) FROM notes;")
         total_count = cur.fetchone()[0]
 
+        # A stale queue is worse than no queue: it sends an agent to redo work
+        # that is already done (§4.3). Binding this to the scan rather than to
+        # the write path also covers the case no write path sees -- a human
+        # dropping a file into raw/. The byte-comparison guard in
+        # sync_vault_index keeps an unchanged report from churning the diff.
+        if regenerate_index and (inserted_count or updated_count or deleted_count):
+            from cadabby.indexer import sync_vault_index
+
+            sync_vault_index(self.vault, cache=self)
+
         return inserted_count, updated_count, deleted_count, total_count
+
+    def get_link_resolver(self) -> LinkTargetIndex:
+        """Return a LinkTargetIndex over all valid non-raw note CIDs."""
+        conn = self.get_connection()
+        cur = conn.execute("SELECT cid FROM notes WHERE layer != 'raw' AND parse_error IS NULL;")
+        all_cids = [row["cid"] for row in cur.fetchall()]
+        if not all_cids:
+            cur = conn.execute("SELECT COUNT(*) FROM notes;")
+            if cur.fetchone()[0] == 0:
+                self.scan()
+                cur = conn.execute("SELECT cid FROM notes WHERE layer != 'raw' AND parse_error IS NULL;")
+                all_cids = [row["cid"] for row in cur.fetchall()]
+        return LinkTargetIndex(all_cids)
+
+    def resolve_target(self, target: str) -> str | None:
+        """Resolve a target stem, relative path, or CID against the cache."""
+        return self.get_link_resolver().resolve(target)
 
     def search(
         self,
@@ -586,6 +721,10 @@ class VaultCache:
         limit: int = 20,
     ) -> list[SearchResult]:
         """Perform BM25 search across cognitive domain notes with epistemic rank boosting conforming to §4.4."""
+        clean_query = sanitize_fts5_query(query)
+        if not clean_query:
+            return []
+
         # Ensure cache is synced
         self.scan()
         conn = self.get_connection()
@@ -615,17 +754,21 @@ class VaultCache:
             # An empty CASE body is a syntax error; a neutral multiplier is not
             return f"CASE {column} {cases} ELSE 1.0 END" if cases else "1.0"
 
+        # Searching the raw layer reads a different index (see _fts_table). The
+        # table name is chosen here, never interpolated from caller input.
+        fts = _fts_table(domain)
+
         score_expr = f"""
-            (-bm25(notes_fts, {FTS_COLUMN_WEIGHTS[0]}, {FTS_COLUMN_WEIGHTS[1]}, {FTS_COLUMN_WEIGHTS[2]}, {FTS_COLUMN_WEIGHTS[3]}))
+            (-bm25({fts}, {FTS_COLUMN_WEIGHTS[0]}, {FTS_COLUMN_WEIGHTS[1]}, {FTS_COLUMN_WEIGHTS[2]}, {FTS_COLUMN_WEIGHTS[3]}))
             * ({multiplier_expr("n.trust_tier", trust_cfg)})
             * ({multiplier_expr("n.status", status_cfg)})
         """
 
         where_clauses = [
-            "notes_fts MATCH :query",
+            f"{fts} MATCH :query",
             "n.parse_error IS NULL",
         ]
-        params: dict[str, Any] = {"query": query, "limit": limit}
+        params: dict[str, Any] = {"query": clean_query, "limit": limit}
 
         if domain:
             where_clauses.append("n.layer = :domain")
@@ -643,8 +786,11 @@ class VaultCache:
             where_clauses.append("n.trust_tier = :trust")
             params["trust"] = trust
         if tag:
+            # Exact, whole-tag containment against the space-joined column. This is
+            # unambiguous only because tags may not contain whitespace (§3.1).
+            # Stored tags are canonically lowercase, so fold the probe to match.
             where_clauses.append("(instr(' ' || n.tags || ' ', ' ' || :tag || ' ') > 0)")
-            params["tag"] = tag
+            params["tag"] = tag.lower()
 
         sql = f"""
             SELECT n.cid,
@@ -654,9 +800,9 @@ class VaultCache:
                    n.status,
                    n.trust_tier,
                    {score_expr} AS score,
-                   snippet(notes_fts, 2, '<b>', '</b>', '...', 15) AS snippet
-            FROM notes_fts
-            JOIN notes n ON n.id = notes_fts.rowid
+                   snippet({fts}, 2, '<b>', '</b>', '...', 15) AS snippet
+            FROM {fts}
+            JOIN notes n ON n.id = {fts}.rowid
             WHERE {" AND ".join(where_clauses)}
             ORDER BY score DESC
             LIMIT :limit;
@@ -742,10 +888,16 @@ class VaultCache:
         }
 
     def check_fts_integrity(self) -> bool:
-        """Run FTS5 internal integrity check."""
+        """Run FTS5 internal integrity check over both indexes.
+
+        Both, because a mismatched retraction corrupts one index while leaving
+        the other clean, and checking only the curated one would report health
+        while raw search silently returns wrong rows.
+        """
         conn = self.get_connection()
         try:
-            conn.execute("INSERT INTO notes_fts(notes_fts) VALUES('integrity-check');")
+            for table in ("notes_fts", "raw_fts"):
+                conn.execute(f"INSERT INTO {table}({table}) VALUES('integrity-check');")
             return True
         except sqlite3.OperationalError:
             return False

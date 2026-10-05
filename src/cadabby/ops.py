@@ -17,17 +17,10 @@ from cadabby.cache import VaultCache
 from cadabby.constants import NOTE_TYPES
 from cadabby.domain import Note, VerificationResult, split_markdown_sections
 from cadabby.frontmatter import serialize_frontmatter
+from cadabby.graph import LinkTargetIndex
 from cadabby.okf import is_valid_actor
 from cadabby.ports import IndexCachePort, LedgerPort, NoteStoragePort
 from cadabby.vault import Vault, cid_to_path, path_to_cid, path_to_layer
-
-TYPE_TO_DIR = {
-    "entity": "entities",
-    "concept": "concepts",
-    "synthesis": "syntheses",
-    "comparison": "comparisons",
-    "guide": "guides",
-}
 
 
 def sanitize_filename(title: str) -> str:
@@ -65,6 +58,8 @@ class ScaffoldNoteUseCase:
         if not type_ or not isinstance(type_, str) or not type_.strip():
             raise ValueError("Note type must be a non-empty string")
 
+        target_domain = domain or "wiki"
+
         if path:
             raw_path = str(path).replace("\\", "/")
             if raw_path.startswith("/") or Path(path).is_absolute():
@@ -73,23 +68,17 @@ class ScaffoldNoteUseCase:
             parts = [p for p in clean_path.split("/") if p]
             if any(p == ".." for p in parts):
                 raise ValueError(f"Path traversal detected in '{path}': must not contain '..'")
+            if len(parts) == 1:
+                clean_path = f"{target_domain}/{clean_path}"
+            elif parts[0] != target_domain and domain != "wiki":
+                clean_path = f"{domain}/{clean_path}"
             rel_path = clean_path if clean_path.endswith(".md") else f"{clean_path}.md"
             cid = path_to_cid(rel_path)
             target_domain = path_to_layer(rel_path)
         else:
-            target_domain = domain or "wiki"
             stem = sanitize_filename(title)
-            if target_domain == "wiki":
-                if type_ not in TYPE_TO_DIR:
-                    raise ValueError(
-                        f"Invalid note type '{type_}'. In domain 'wiki', must be one of {list(TYPE_TO_DIR.keys())}"
-                    )
-                sub_dir = TYPE_TO_DIR[type_]
-                rel_path = f"wiki/{sub_dir}/{stem}.md"
-                cid = f"wiki/{sub_dir}/{stem}"
-            else:
-                rel_path = f"{target_domain}/{stem}.md"
-                cid = f"{target_domain}/{stem}"
+            rel_path = f"{target_domain}/{stem}.md"
+            cid = f"{target_domain}/{stem}"
 
         # If vault is available, check allowed_types for the domain
         if self.vault is not None:
@@ -238,11 +227,33 @@ class GroundNotesUseCase:
 
         domains = self.vault.discover_domains() if self.vault is not None else {}
 
-        for raw_cid in cids:
-            cid = path_to_cid(raw_cid)
+        resolver: LinkTargetIndex | None = None
+        if self.cache is not None and hasattr(self.cache, "get_link_resolver"):
+            resolver = self.cache.get_link_resolver()
+        elif conn is not None:
+            cur = conn.execute("SELECT cid FROM notes WHERE layer != 'raw' AND parse_error IS NULL;")
+            known = [r["cid"] for r in cur.fetchall()]
+            resolver = LinkTargetIndex(known)
+        elif self.storage is not None and hasattr(self.storage, "list_note_cids"):
+            resolver = LinkTargetIndex(self.storage.list_note_cids())
+
+        for raw_target in cids:
+            clean = raw_target.strip()
+            if clean.startswith("[[") and clean.endswith("]]"):
+                clean = clean[2:-2].strip()
+            clean = clean.split("|")[0].split("#")[0].strip()
+
+            cid = path_to_cid(clean)
             note = self.storage.get_note(cid)
+            if note is None and resolver is not None:
+                resolved = resolver.resolve(clean)
+                if resolved:
+                    note = self.storage.get_note(resolved)
+
             if note is None:
                 continue
+
+            cid = note.cid
 
             domain_name = path_to_layer(note.rel_path)
             domain_def = domains.get(domain_name)

@@ -1,5 +1,5 @@
 {
-  "schema": 2,
+  "schema": 3,
   "vault_name": "vault",
   "raw_text_extensions": [".md", ".markdown", ".txt", ".rst", ".csv"],
   "integrity": "mtime_size",

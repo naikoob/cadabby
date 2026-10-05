@@ -12,37 +12,34 @@ This vault implements Andrej Karpathy's 3-layer LLM Wiki architecture:
   Raw papers, web clips, transcripts, and primary artifacts curated by the human user.
   **Directive**: Agents may read and cite raw sources, but MUST NEVER edit, rename, or delete files in `raw/`.
 * **`wiki/` (Layer 2 — Compounded Synthesis)**:
-  Compiled knowledge base maintained primarily by AI agents. Organized strictly into 5 directories matching note `type`:
-  - `wiki/entities/`: People, organizations, libraries, models, tools.
-  - `wiki/concepts/`: Core mechanisms, algorithms, architectural patterns.
-  - `wiki/syntheses/`: Overviews and cross-domain topic syntheses.
-  - `wiki/comparisons/`: Structured trade-off analyses.
-  - `wiki/guides/`: Procedural how-tos and runbooks.
+  Compiled knowledge base maintained primarily by AI agents. Notes live directly in `wiki/*.md` without subdirectories. Associative navigation and topic clustering are organized via Maps of Content (MOCs) and wikilinks.
+  - **First-Class MOCs (`type: moc`)**: Topical hub notes that cluster, structure, and navigate domains of knowledge. Listed as the vault's entry points in the generated `index.md`, which also measures MOC coverage against them.
+  - **MOC Anchoring on Ingestion**: Whenever a note is scaffolded or synthesized, agents MUST search for a suitable existing MOC (`vault_search(query, type_="moc")`) and link the note into that MOC. If no suitable MOC exists and the note introduces a new topic cluster, agents should scaffold or suggest a new MOC (e.g. `wiki/{Topic}-MOC.md`).
+  - **MOC Splitting Heuristic**: When an MOC grows beyond ~25 links or spans $\ge 6$ distinct subtopics, decompose it into focused child MOCs (e.g. `Storage-MOC` $\rightarrow$ `Relational-Storage-MOC`, `Vector-Storage-MOC`), linking the child MOCs back to the parent MOC.
+  - **MOC Merging Heuristic**: When an MOC has $\le 2$ links (anemic hub) or shares $> 50\%$ link overlap with a neighboring MOC, consolidate them into a single unified MOC to avoid graph fragmentation.
 * **Cognitive Domains (Custom Top-Level Directories)**:
-  Any non-reserved top-level directory at the vault root functions as an independent Cognitive Domain (e.g. `customers/`, `projects/`, `research/`).
+  Any non-reserved top-level directory at the vault root functions as an independent Cognitive Domain (e.g. `customers/`, `projects/`, `research/`). Custom domains support flexible nested subdirectories.
   - **Reserved Directories**: The following directories are reserved by the engine and MUST NOT be used as cognitive domains: `raw/`, `log/`, `.cadabby/`, `.obsidian/`, `.git/`, `.agents/`, `.claude/`, plus build/environment folders (`.venv/`, `node_modules/`, `target/`, etc.).
   - **Domain Manifest (`{domain}/AGENTS.md`)**: A domain defines its governance rules and AI operational constraints via a local `AGENTS.md` file:
     ```yaml
     ---
     description: "Human-readable description of domain purpose"
-    searchable: true
     allowed_types:
       - custom_type_a
       - custom_type_b
     require_sources: false
-    enforce_layout: false
     ---
     # Domain Directives
     Localized instructions for agents operating on notes in this domain.
     ```
   - **Permissive vs. Strict Domains**:
     - *Permissive* (no `AGENTS.md` or `allowed_types: null`): Accepts any non-empty string for `type:` and allows flexible nested folders.
-    - *Strict* (`allowed_types` list provided): Linter gate 1 strictly validates note types. If `enforce_layout: true`, notes must live in subdirectories matching their `type`.
+    - *Strict* (`allowed_types` list provided): Linter gate 1 strictly validates note types against the whitelist. Custom domains allow flexible nested folders.
   - **Context Injection**: Calling `vault_ground` on a note in any domain automatically injects that domain's directives into the agent context. Agents can also query `vault://domains` and `domain://{domain}/directives` via MCP resources.
 * **Prose & Style Guidelines (`STYLE.md`)**:
   Consult and adhere to `STYLE.md` for objective voice, capitalized human-readable stems, and strict OKF frontmatter requirements across all cognitive domains.
 * **`index.md` & `log.md` (System Layer)**:
-  - `index.md`: Auto-generated catalog linking all notes and tracking source status. Never hand-edited.
+  - `index.md`: Auto-generated **gap report**, not a catalog. Lists MOC entry points, wiki notes no MOC reaches, unprocessed `raw/` sources, and notes whose verification went stale. A section with nothing to report is omitted, so an empty report means no outstanding work. Never hand-edited. Treat every row as a task: shrinking this file is the objective.
   - `log.md`: Append-only chronological audit ledger.
 
 ---

@@ -1,6 +1,6 @@
 """Command Line Interface (CLI) for Cadabby.
 
-Conforms strictly to Cadabby Technical Specification §6.1.
+Conforms strictly to Cadabby Technical Specification §5.3.
 """
 
 from __future__ import annotations
@@ -18,9 +18,9 @@ from cadabby.constants import DIR_RAW, DIR_WIKI, NOTE_TYPES
 from cadabby.fsutil import atomic_write
 from cadabby.graph import get_note_graph, resolve_link_target
 from cadabby.indexer import append_vault_log, rotate_vault_log, sync_vault_index
+from cadabby.installer import get_assets_dir
 from cadabby.lint import run_vault_lint
 from cadabby.ops import (
-    TYPE_TO_DIR,
     ground_notes,
     scaffold_note,
     update_note,
@@ -42,21 +42,6 @@ def resolve_cli_vault(args: argparse.Namespace) -> Vault:
     return Vault.open()
 
 
-def get_assets_dir() -> Path:
-    """Return the packaged scaffolding assets directory.
-
-    Assets ship inside the package rather than at the repository root, so they
-    resolve identically from a wheel, an editable install, and a plain checkout.
-    Resolving them relative to the repository (or the cwd) only ever worked for
-    a source checkout, which left `cadabby init` broken for installed users.
-    """
-    assets_dir = Path(__file__).resolve().parent / "assets"
-    if not assets_dir.is_dir():
-        raise RuntimeError(
-            f"Cadabby assets directory not found at {assets_dir}. "
-            "The installation looks incomplete; reinstall the cadabby package."
-        )
-    return assets_dir
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -71,8 +56,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     # Create directories
     (target_dir / DIR_RAW).mkdir(parents=True, exist_ok=True)
-    for sub in TYPE_TO_DIR.values():
-        (target_dir / DIR_WIKI / sub).mkdir(parents=True, exist_ok=True)
+    (target_dir / DIR_WIKI).mkdir(parents=True, exist_ok=True)
     (target_dir / ".claude" / "commands").mkdir(parents=True, exist_ok=True)
     (target_dir / ".agents" / "skills" / "librarian").mkdir(parents=True, exist_ok=True)
     (target_dir / ".agents" / "skills" / "technician").mkdir(parents=True, exist_ok=True)
@@ -166,6 +150,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     if args.obsidian:
         obsidian_dir = target_dir / ".obsidian"
         obsidian_dir.mkdir(parents=True, exist_ok=True)
+        (target_dir / DIR_RAW / "attachments").mkdir(parents=True, exist_ok=True)
         obs_src = vault_tpl / "obsidian" / "app.json"
         copy_template_file(obs_src, obsidian_dir / "app.json")
 
@@ -174,7 +159,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
-    """Run incremental cache scan and catalog sync."""
+    """Run incremental cache scan and regenerate the index.md gap report."""
     vault = resolve_cli_vault(args)
     rebuild = getattr(args, "rebuild", False)
     if rebuild:
@@ -534,8 +519,22 @@ def cmd_install(args: argparse.Namespace) -> int:
     vault_arg = getattr(args, "vault", None)
 
     if vault_arg is not None:
+        # An explicit --vault binds, including under --global: "available
+        # everywhere, always this vault" is a real request from a single-vault
+        # user, and typing the vault is how they accept the tradeoff (a bound
+        # plugin must be a copy, because mcp_config.json lives inside it and a
+        # symlink would have nowhere to write it).
         vault_path = Vault.at(vault_arg).root
-    elif not is_global and dest_path is None:
+    elif is_global:
+        # Bare --global is deliberately unbound, whatever directory it is run
+        # from. Discovering the cwd vault here would bake one absolute path
+        # into a config every workspace on the machine reads, so opening a
+        # second vault would silently operate on the first -- the opposite of
+        # the "multi-project universal access" --global exists to provide
+        # (§7.6). Unbound, the server resolves the vault per launch via
+        # CADABBY_VAULT or the working directory.
+        vault_path = None
+    elif dest_path is None:
         try:
             vault_path = Vault.open().root
         except FileNotFoundError:
@@ -543,12 +542,11 @@ def cmd_install(args: argparse.Namespace) -> int:
                 "No Cadabby vault found in current working directory. "
                 "Run inside a vault, pass --vault <path>, or pass --global for user-level installation."
             )
-    else:
-        if not args.uninstall:
-            try:
-                vault_path = Vault.open().root
-            except FileNotFoundError:
-                vault_path = None
+    elif not args.uninstall:
+        try:
+            vault_path = Vault.open().root
+        except FileNotFoundError:
+            vault_path = None
 
     return run_install(
         antigravity=args.antigravity,
@@ -603,7 +601,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.set_defaults(func=cmd_init)
 
     # sync
-    p_sync = subparsers.add_parser("sync", parents=[vault_parent], help="Sync ephemeral cache and index catalog")
+    p_sync = subparsers.add_parser("sync", parents=[vault_parent], help="Sync ephemeral cache and regenerate the index.md gap report")
     p_sync.add_argument("--force", action="store_true", help="Force full rescan")
     p_sync.add_argument("--rebuild", action="store_true", help="Discard cache.db before rescan (§5.3)")
     p_sync.set_defaults(func=cmd_sync)
@@ -611,7 +609,10 @@ def build_parser() -> argparse.ArgumentParser:
     # search
     p_search = subparsers.add_parser("search", parents=[vault_parent], help="Search vault notes")
     p_search.add_argument("query", help="Search query")
-    p_search.add_argument("--domain", help="Filter by cognitive domain (e.g. wiki, customers, projects)")
+    p_search.add_argument(
+        "--domain",
+        help="Filter by cognitive domain (e.g. wiki, customers, projects); 'raw' searches unprocessed sources",
+    )
     p_search.add_argument("--type", help="Filter by note type")
     p_search.add_argument("--status", help="Filter by note status")
     p_search.add_argument("--trust", help="Filter by trust tier")
@@ -622,7 +623,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ground
     p_ground = subparsers.add_parser("ground", parents=[vault_parent], help="Retrieve full content and 1-hop graph")
-    p_ground.add_argument("cids", nargs="+", help="One or more note CIDs")
+    p_ground.add_argument("cids", nargs="+", help="One or more note CIDs, note stems, or wikilinks")
     p_ground.add_argument("--budget-tokens", "--budget", dest="budget_tokens", type=int, default=None, help="Token budget")
     p_ground.add_argument("--json", action="store_true", help="Output as JSON")
     p_ground.set_defaults(func=cmd_ground)
@@ -694,7 +695,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--global",
         dest="is_global",
         action="store_true",
-        help="Install into user-global harness configurations instead of active vault workspace",
+        help=(
+            "Install into user-global harness configurations instead of the active vault "
+            "workspace. Unbound by default: the server resolves the vault per launch. "
+            "Add --vault to bind the global install to one vault instead."
+        ),
     )
     p_install.add_argument("--uninstall", action="store_true", help="Remove Cadabby harness configurations")
     p_install.add_argument("--dry-run", action="store_true", help="Print changes without modifying files")

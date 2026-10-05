@@ -1,6 +1,6 @@
-"""Index catalog generation, log appending, and ledger rotation.
+"""index.md gap report generation, log appending, and ledger rotation.
 
-Conforms to Cadabby Technical Specification §2.1, §6.1, §8.
+Conforms to Cadabby Technical Specification §2.5, §4.3, §8.
 """
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from cadabby.constants import NOTE_TYPES
+from cadabby.constants import TYPE_MOC
 from cadabby.fsutil import advisory_lock, append_ledger, atomic_write
 from cadabby.vault import Vault
 
@@ -60,74 +60,160 @@ def rotate_vault_log(vault: Vault) -> Path | None:
     return target_rotated
 
 
-def _build_index_lines_from_conn(vault: Vault, conn: Any) -> str:
-    lines = [
-        f"# {vault.config.get('vault_name', 'Wiki')} Catalog",
-        "",
-        "> Auto-generated catalog linking compiled wiki knowledge and raw ground truth sources.",
-        "",
-    ]
+def _cell(value: Any, fallback: str = "") -> str:
+    """Escape a value for a markdown table cell."""
+    return (value or fallback).replace("|", "\\|")
 
-    # 1. Wiki notes grouped by type
-    type_plural_map = {
-        "entity": "Entities",
-        "concept": "Concepts",
-        "synthesis": "Syntheses",
-        "comparison": "Comparisons",
-        "guide": "Guides",
-    }
 
-    for n_type in NOTE_TYPES:
-        heading = type_plural_map.get(n_type, n_type.capitalize())
-        cur = conn.execute(
-            """
-            SELECT cid, stem, title, description, trust_tier, status
-            FROM notes
-            WHERE layer = 'wiki' AND type = ? AND parse_error IS NULL
-            ORDER BY stem ASC;
-            """,
-            (n_type,),
-        )
-        rows = cur.fetchall()
-        if rows:
-            lines.append(f"## {heading}")
-            lines.append("")
-            lines.append("| Note | Description | Trust | Status |")
-            lines.append("| :--- | :--- | :--- | :--- |")
-            for r in rows:
-                desc = (r["description"] or "").replace("|", "\\|")
-                tier = r["trust_tier"] or "unverified"
-                status = r["status"] or "active"
-                lines.append(f"| [[{r['stem']}]] | {desc} | `{tier}` | `{status}` |")
-            lines.append("")
-
-    # 2. Raw sources tracking
-    cur = conn.execute(
+def _entry_points(conn: Any) -> list[str]:
+    """Section 1: every MOC, linked. The human's starting page (§2.5)."""
+    rows = conn.execute(
         """
-        SELECT r.rel_path, r.stem,
+        SELECT stem, description FROM notes
+        WHERE layer = 'wiki' AND type = ? AND parse_error IS NULL
+        ORDER BY stem ASC;
+        """,
+        (TYPE_MOC,),
+    ).fetchall()
+    if not rows:
+        return []
+    lines = ["## Entry Points", "", "| Map of Content | Description |", "| :--- | :--- |"]
+    lines += [f"| [[{r['stem']}]] | {_cell(r['description'])} |" for r in rows]
+    return lines + [""]
+
+
+def _unfiled(conn: Any) -> list[str]:
+    """Section 2: wiki notes no MOC reaches by forward link at any depth (§2.5).
+
+    The one failure mode flat layout introduces, and the one `lint` cannot
+    catch: a note that links outward has edges, so gate 5 sees no orphan.
+
+    Reachability is transitive and may travel through any layer -- a link is a
+    link, and a wiki note pulled in via a domain note is still filed. Only wiki
+    notes are *reported*, because MOCs are a `wiki/` construct; domains carry
+    their own topology in folders (§2.5). `deprecated` notes are excluded: the
+    section is a worklist, and filing a retired note is not work. Without that
+    exclusion the report has a floor it can never reach zero from, which would
+    defeat the point of shrinking it.
+    """
+    rows = conn.execute(
+        """
+        WITH RECURSIVE filed(cid) AS (
+            SELECT cid FROM notes
+            WHERE layer = 'wiki' AND type = ? AND parse_error IS NULL
+          UNION
+            SELECT l.target_cid FROM links l
+            JOIN filed f ON l.source_cid = f.cid
+            WHERE l.target_cid IS NOT NULL
+        )
+        SELECT stem, description FROM notes
+        WHERE layer = 'wiki'
+          AND parse_error IS NULL
+          AND COALESCE(status, 'active') != 'deprecated'
+          AND cid NOT IN (SELECT cid FROM filed)
+        ORDER BY stem ASC;
+        """,
+        (TYPE_MOC,),
+    ).fetchall()
+    if not rows:
+        return []
+    lines = [
+        "## Unfiled Notes",
+        "",
+        "> Reachable from no Map of Content. Link each from the MOC it belongs to.",
+        "",
+        "| Note | Description |",
+        "| :--- | :--- |",
+    ]
+    lines += [f"| [[{r['stem']}]] | {_cell(r['description'])} |" for r in rows]
+    return lines + [""]
+
+
+def _raw_queue(conn: Any) -> list[str]:
+    """Section 3: the ingestion queue. Vault-wide -- any domain may cite raw/."""
+    rows = conn.execute(
+        """
+        SELECT r.rel_path,
                (SELECT COUNT(*) FROM sources s WHERE s.raw_path = r.rel_path) AS citation_count
         FROM notes r
         WHERE r.layer = 'raw'
         ORDER BY r.rel_path ASC;
         """
+    ).fetchall()
+    pending = [r for r in rows if not r["citation_count"]]
+    if not pending:
+        return []
+    lines = [
+        "## Raw Sources",
+        "",
+        "> Unprocessed: no note cites them yet. Processed sources are omitted.",
+        "",
+        "| Source File |",
+        "| :--- |",
+    ]
+    lines += [f"| `{r['rel_path']}` |" for r in pending]
+    return lines + [""]
+
+
+def _verification_debt(conn: Any) -> list[str]:
+    """Section 4: notes whose verification entries have all gone stale (§3.4).
+
+    Vault-wide: any note in any domain can carry verification entries.
+    """
+    rows = conn.execute(
+        """
+        SELECT cid, stem, trust_tier FROM notes
+        WHERE trust_tier = 'stale-verified' AND parse_error IS NULL
+        ORDER BY cid ASC;
+        """
+    ).fetchall()
+    if not rows:
+        return []
+    lines = [
+        "## Verification Debt",
+        "",
+        "> Body changed since the last attestation. Re-verify or retire.",
+        "",
+        "| Note |",
+        "| :--- |",
+    ]
+    lines += [f"| `{r['cid']}` |" for r in rows]
+    return lines + [""]
+
+
+def _build_index_lines_from_conn(vault: Vault, conn: Any) -> str:
+    """Render the vault-wide gap report (§2.5).
+
+    Deliberately not a catalog. A table of every wiki note duplicates what MOCs
+    curate, what a file explorer shows for a flat folder, and what search ranks
+    better -- while churning the Git diff on every note added. Each section
+    below is omitted when empty, so a fully filed, fully ingested, fully
+    verified vault produces a header and nothing else. Shrinking this file is
+    the objective: every row is work someone still has to do.
+    """
+    lines = [
+        f"# {vault.config.get('vault_name', 'Wiki')} Index",
+        "",
+        "> Auto-generated gap report (§2.5). Not a catalog, and never hand-edited:",
+        "> edits are overwritten on the next scan that finds changes.",
+        "",
+    ]
+
+    sections = (
+        _entry_points(conn)
+        + _unfiled(conn)
+        + _raw_queue(conn)
+        + _verification_debt(conn)
     )
-    raw_rows = cur.fetchall()
-    if raw_rows:
-        lines.append("## Raw Sources")
-        lines.append("")
-        lines.append("| Source File | Status | Citations |")
-        lines.append("| :--- | :--- | :--- |")
-        for r in raw_rows:
-            citations = r["citation_count"]
-            status_badge = "Processed" if citations > 0 else "**Unprocessed**"
-            lines.append(f"| `{r['rel_path']}` | {status_badge} | {citations} |")
-        lines.append("")
+    if not sections:
+        lines.append("Nothing outstanding: every note is filed, every source processed, every attestation current.")
+    lines += sections
 
     return "\n".join(lines).strip() + "\n"
 
 
 def generate_index_markdown(vault: Vault, cache: Any | None = None) -> str:
-    """Generate deterministic catalog markdown for index.md.
+    """Render the gap report for index.md (§2.5).
 
     Deterministic sort order guarantees zero Git diff churn on idempotent runs.
     """
@@ -137,7 +223,7 @@ def generate_index_markdown(vault: Vault, cache: Any | None = None) -> str:
     from cadabby.cache import VaultCache
 
     with VaultCache(vault) as new_cache:
-        new_cache.scan()
+        new_cache.scan(regenerate_index=False)
         return _build_index_lines_from_conn(vault, new_cache.get_connection())
 
 

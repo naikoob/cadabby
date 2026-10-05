@@ -43,15 +43,129 @@ def make_mcp_server_entry(vault_path: Path | str | None = None) -> dict[str, Any
     return {"command": command, "args": args}
 
 
+def get_assets_dir() -> Path:
+    """Return the packaged scaffolding assets directory.
+
+    Assets ship inside the package rather than at the repository root, so they
+    resolve identically from a wheel, an editable install, and a plain checkout.
+    Resolving them relative to the repository (or the cwd) only ever worked for
+    a source checkout, which left `cadabby init` broken for installed users.
+    """
+    assets_dir = Path(__file__).resolve().parent / "assets"
+    if not assets_dir.is_dir():
+        raise RuntimeError(
+            f"Cadabby assets directory not found at {assets_dir}. "
+            "The installation looks incomplete; reinstall the cadabby package."
+        )
+    return assets_dir
+
+
 def get_repo_plugin_dir() -> Path:
     """Return path to the bundled Antigravity plugin directory."""
-    plugin_dir = Path(__file__).resolve().parent / "assets" / "plugins" / "cadabby"
+    plugin_dir = get_assets_dir() / "plugins" / "cadabby"
     if not plugin_dir.is_dir():
         raise RuntimeError(
             f"Cadabby plugin directory not found at {plugin_dir}. "
             "The installation looks incomplete; reinstall the cadabby package."
         )
     return plugin_dir
+
+
+# Vault files the engine owns and may rewrite at any time, as (asset subdir,
+# vault-relative destination). The thin-shim rule (§7.4) is what makes that
+# safe: a shim names behavior rather than carrying it, so regenerating one
+# cannot destroy a user edit. Everything absent from this list -- .cadabby.json,
+# AGENTS.md, CLAUDE.md, GEMINI.md, STYLE.md, index.md -- is user-owned, written
+# once by `init` and never by `install`. Collapsing the two categories under a
+# single --force switch is what makes `init --force` a reset rather than a
+# refresh, which is precisely why `install` exists as a separate verb.
+ENGINE_OWNED_SHIMS: tuple[tuple[str, str], ...] = (
+    ("commands", ".claude/commands"),
+    ("skills", ".agents/skills"),
+)
+
+
+def _sync_tree(src_root: Path, dest_root: Path, dry_run: bool = False, skip: frozenset[str] = frozenset()) -> list[str]:
+    """Copy src_root onto dest_root, writing only files whose bytes differ.
+
+    Returns the vault-relative paths actually changed, so an unchanged install
+    can report itself as a no-op (§7.6 idempotency) rather than claiming work.
+    """
+    changed: list[str] = []
+    for src in sorted(src_root.rglob("*")):
+        if not src.is_file():
+            continue
+        rel = src.relative_to(src_root).as_posix()
+        if rel in skip:
+            continue
+        dst = dest_root / rel
+        data = src.read_bytes()
+        if dst.exists() and dst.read_bytes() == data:
+            continue
+        changed.append(rel)
+        if not dry_run:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write(dst, data.decode("utf-8"))
+    return changed
+
+
+def refresh_vault_shims(vault_path: Path | str, dry_run: bool = False) -> tuple[bool, str]:
+    """Bring a vault's engine-owned shims up to the running version (§7.4).
+
+    Without this there is no non-destructive way to pick up a fixed slash
+    command or persona runbook: `init` declines to touch files that exist, and
+    `init --force` overwrites the user-owned documents alongside them.
+    """
+    vault = Path(vault_path).resolve()
+    assets = get_assets_dir()
+
+    changed: list[str] = []
+    for subdir, rel_dest in ENGINE_OWNED_SHIMS:
+        src_root = assets / subdir
+        if src_root.is_dir():
+            changed += [f"{rel_dest}/{rel}" for rel in _sync_tree(src_root, vault / rel_dest, dry_run)]
+
+    if not changed:
+        return True, f"Vault shims already up-to-date in {vault} (unchanged)."
+    prefix = "[dry-run] Would refresh" if dry_run else "Refreshed"
+    return True, f"{prefix} {len(changed)} vault shim(s) in {vault}: {', '.join(changed)}"
+
+
+def _is_cadabby_entry(entry: Any) -> bool:
+    """Return True if an mcpServers entry looks like one Cadabby itself wrote.
+
+    Either form counts: a console script named cadabby, or `-m cadabby`.
+    """
+    if not isinstance(entry, dict):
+        return False
+    args = [str(a) for a in entry.get("args") or []]
+    return Path(str(entry.get("command", ""))).name.startswith("cadabby") or "cadabby" in args
+
+
+def _entry_vault(entry: Any) -> str | None:
+    """Return the vault an mcpServers entry is bound to, or None if unbound."""
+    if not isinstance(entry, dict):
+        return None
+    args = [str(a) for a in entry.get("args") or []]
+    if "--vault" in args:
+        index = args.index("--vault")
+        if index + 1 < len(args):
+            return args[index + 1]
+    return None
+
+
+def _is_stale_self(existing: Any, desired: dict[str, Any]) -> bool:
+    """Return True if `existing` is Cadabby's own entry for the same vault.
+
+    This is the case `install` exists to repair: the recorded interpreter path
+    is absolute (§7.2), so rebuilding a venv or upgrading Python leaves an entry
+    that names a binary which no longer exists, and the MCP server simply fails
+    to start. Refreshing it is not a conflict -- Cadabby wrote it, it points at
+    the same vault, and its only defect is naming a dead interpreter. An entry
+    bound to a *different* vault, or one Cadabby did not write, is a real
+    conflict and still requires --force.
+    """
+    return _is_cadabby_entry(existing) and _entry_vault(existing) == _entry_vault(desired)
 
 
 def default_antigravity_path(vault_path: Path | str | None = None, is_global: bool = False) -> Path:
@@ -78,6 +192,32 @@ def default_claude_path(vault_path: Path | str | None = None, is_global: bool = 
     return Path(vault_path).resolve() / ".mcp.json"
 
 
+def _wrong_kind(dest: Path, want: str) -> str | None:
+    """Reject a destination whose kind cannot hold what we are about to write.
+
+    The two harnesses take structurally different destinations -- Antigravity a
+    plugin directory, Claude a JSON config file -- so a path that is correct for
+    one is a crash for the other. Checking before any write turns a raw errno
+    from deep inside a copytree or a read_text into a message that names the
+    mistake, and keeps --dry-run from previewing an install that cannot happen.
+
+    Deliberately not overridable by --force: the flag means "overwrite the
+    Cadabby thing you found", not "delete whatever unrelated file or directory
+    happens to sit at this path".
+    """
+    if want == "dir" and dest.exists() and not dest.is_dir():
+        return (
+            f"Conflict: {dest} is a file, but the Antigravity plugin must be a "
+            f"directory. Point --path at a directory."
+        )
+    if want == "file" and dest.is_dir():
+        return (
+            f"Conflict: {dest} is a directory, but the Claude MCP configuration "
+            f"must be a JSON file. Point --path at a file."
+        )
+    return None
+
+
 def install_antigravity(
     dest_path: Path | None = None,
     vault_path: Path | str | None = None,
@@ -92,6 +232,8 @@ def install_antigravity(
     process working directory.
     """
     dest = (dest_path or default_antigravity_path(vault_path, is_global)).absolute()
+    if (problem := _wrong_kind(dest, "dir")) is not None:
+        return False, problem
     repo_plugin = get_repo_plugin_dir().resolve()
     desired_entry = make_mcp_server_entry(vault_path)
     desired_mcp_cfg = {"mcpServers": {"cadabby": desired_entry}}
@@ -155,16 +297,24 @@ def install_antigravity(
             except Exception:
                 cur_cfg = {}
             existing_entry = cur_cfg.get("mcpServers", {}).get("cadabby")
-            if existing_entry == desired_entry:
-                return True, f"Antigravity plugin already installed at {dest} (unchanged)."
-            if existing_entry is not None and not force:
+            entry_stale = existing_entry != desired_entry
+            if entry_stale and existing_entry is not None and not _is_stale_self(existing_entry, desired_entry) and not force:
                 return False, f"Conflict: Antigravity plugin at {dest} is configured for another vault. Use --force to overwrite."
 
-            if dry_run:
-                return True, f"[dry-run] Would update {mcp_file} with vault: {resolved_vault}"
+            # Re-sync the plugin's own files, not just its MCP entry. They are
+            # engine-owned shims (§7.4), and without this a vault installed once
+            # keeps its original skill and agent manifests forever -- the exact
+            # staleness this command is supposed to cure.
+            changed = _sync_tree(repo_plugin, dest, dry_run, skip=frozenset({"mcp_config.json"}))
 
-            cur_cfg.setdefault("mcpServers", {})["cadabby"] = desired_entry
-            atomic_write(mcp_file, json.dumps(cur_cfg, indent=2) + "\n")
+            if not changed and not entry_stale:
+                return True, f"Antigravity plugin already installed at {dest} (unchanged)."
+            if dry_run:
+                return True, f"[dry-run] Would update {dest} (vault: {resolved_vault})"
+
+            if entry_stale:
+                cur_cfg.setdefault("mcpServers", {})["cadabby"] = desired_entry
+                atomic_write(mcp_file, json.dumps(cur_cfg, indent=2) + "\n")
             return True, f"Configured Antigravity plugin at {dest} (vault: {resolved_vault})"
         else:
             if not force:
@@ -194,6 +344,8 @@ def uninstall_antigravity(
 ) -> tuple[bool, str]:
     """Uninstall Antigravity plugin."""
     dest = (dest_path or default_antigravity_path(vault_path, is_global)).absolute()
+    if (problem := _wrong_kind(dest, "dir")) is not None:
+        return False, problem
     if not dest.exists() and not dest.is_symlink():
         return True, f"Antigravity plugin not found at {dest} (nothing to uninstall)."
 
@@ -217,6 +369,8 @@ def install_claude(
 ) -> tuple[bool, str]:
     """Non-destructively register Cadabby MCP server in Claude configuration."""
     dest = (dest_path or default_claude_path(vault_path, is_global)).resolve()
+    if (problem := _wrong_kind(dest, "file")) is not None:
+        return False, problem
     existing_content = ""
     cfg_data: dict[str, Any] = {}
 
@@ -235,7 +389,8 @@ def install_claude(
     if existing_entry == desired_entry:
         return True, f"Claude MCP server already registered in {dest} (unchanged)."
 
-    if existing_entry is not None and not force:
+    rebinding = _is_stale_self(existing_entry, desired_entry)
+    if existing_entry is not None and not rebinding and not force:
         return False, f"Conflict: mcpServers.cadabby already defined in {dest}. Use --force to overwrite."
 
     mcp_servers["cadabby"] = desired_entry
@@ -250,7 +405,8 @@ def install_claude(
     dest.parent.mkdir(parents=True, exist_ok=True)
     atomic_write(dest, new_content)
     vault_msg = f" (vault: {Path(vault_path).resolve()})" if vault_path else ""
-    return True, f"Registered Cadabby MCP server in {dest}{vault_msg}"
+    verb = "Re-bound stale Cadabby MCP entry in" if rebinding else "Registered Cadabby MCP server in"
+    return True, f"{verb} {dest}{vault_msg}"
 
 
 def uninstall_claude(
@@ -261,6 +417,8 @@ def uninstall_claude(
 ) -> tuple[bool, str]:
     """Uninstall Cadabby MCP entry from Claude configuration, preserving other keys."""
     dest = (dest_path or default_claude_path(vault_path, is_global)).resolve()
+    if (problem := _wrong_kind(dest, "file")) is not None:
+        return False, problem
     if not dest.exists():
         return True, f"Claude configuration not found at {dest} (nothing to uninstall)."
 
@@ -306,6 +464,20 @@ def run_install(
         print("Please specify a target harness: --antigravity, --claude, or --all", file=sys.stderr)
         return 1
 
+    # One --path cannot serve both harnesses: Antigravity wants a plugin
+    # directory and Claude wants a JSON config file, so no single value is
+    # correct for both. Refusing here rather than per-target matters because
+    # the targets are applied in sequence -- Antigravity would create its
+    # directory, Claude would then fail on it, and there is no rollback.
+    if dest_path is not None and target_ag and target_claude:
+        print(
+            "--path takes a single destination, but this installs to two targets of "
+            "different kinds (an Antigravity plugin directory and a Claude JSON config "
+            "file). Run the command once per harness.",
+            file=sys.stderr,
+        )
+        return 1
+
     success = True
     messages: list[str] = []
 
@@ -344,6 +516,15 @@ def run_install(
                 force=force,
                 dry_run=dry_run,
             )
+        success = success and ok
+        messages.append(msg)
+
+    # Refresh the vault-local shims that belong to no single harness. Skipped
+    # for --global (which configures the user environment, not a vault) and for
+    # --uninstall (which removes what install added to harness config, not the
+    # vault's own scaffolding -- that is what deleting the vault is for).
+    if success and not uninstall and not is_global and vault_path is not None:
+        ok, msg = refresh_vault_shims(vault_path, dry_run=dry_run)
         success = success and ok
         messages.append(msg)
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from datetime import datetime
 from typing import Any
 
 from cadabby.constants import (
@@ -17,6 +18,13 @@ from cadabby.constants import (
 
 RE_ACTOR = re.compile(ACTOR_PATTERN)
 RE_TIMESTAMP = re.compile(RFC3339_TIMESTAMP_PATTERN)
+
+# Canonical tag grammar (§3.1): lowercase kebab-case segments joined by '/'.
+# Segments are unicode letters/digits so non-English tags conform. Whitespace is
+# excluded by construction: the cache stores tags space-joined (§4.2), so a tag
+# containing a space makes the `--tag` facet match notes that do not carry it.
+_TAG_SEGMENT = r"[^\W_]+(?:-[^\W_]+)*"
+RE_TAG = re.compile(rf"^{_TAG_SEGMENT}(?:/{_TAG_SEGMENT})*$")
 
 
 def compute_body_hash(body: str) -> str:
@@ -60,11 +68,59 @@ def is_actor_machine(actor: str) -> bool:
     return actor.startswith(("agent:", "process:"))
 
 
-def is_valid_timestamp(ts: Any) -> bool:
-    """Return True if timestamp matches RFC 3339 UTC format."""
-    if not isinstance(ts, str):
+def tag_has_whitespace(tag: Any) -> bool:
+    """Return True if the tag contains whitespace, which breaks `--tag` filtering."""
+    return isinstance(tag, str) and any(ch.isspace() for ch in tag)
+
+
+def is_canonical_tag(tag: Any) -> bool:
+    """Return True if the tag is in canonical lowercase kebab-case form (§3.1)."""
+    if not isinstance(tag, str):
         return False
-    return bool(RE_TIMESTAMP.match(ts))
+    return tag == tag.lower() and bool(RE_TAG.match(tag))
+
+
+def canonicalize_tags(tags: Any) -> list[str]:
+    """Lowercase and de-duplicate tags, preserving first-seen order (§3.2).
+
+    Raises:
+        ValueError: if a tag contains whitespace. Lowercasing cannot repair that,
+            and writing it would corrupt the `--tag` facet (§4.2).
+    """
+    if not isinstance(tags, list):
+        return []
+
+    canonical: list[str] = []
+    seen: set[str] = set()
+    for tag in tags:
+        if not isinstance(tag, str):
+            raise ValueError(f"Invalid tag {tag!r}. Tags must be strings")
+        if tag_has_whitespace(tag):
+            raise ValueError(
+                f"Invalid tag '{tag}'. Tags must not contain whitespace; "
+                "use kebab-case (e.g. 'machine-learning')"
+            )
+        normalized = tag.lower()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            canonical.append(normalized)
+    return canonical
+
+
+def is_valid_timestamp(ts: Any) -> bool:
+    """Return True if ts is a real RFC 3339 UTC instant.
+
+    Shape and calendar are both checked. The pattern alone admits
+    '2026-13-45T99:99:99Z', which has the right digits and is not a date; lint
+    promises RFC 3339 conformance (§3.1), so the parse has to agree.
+    """
+    if not isinstance(ts, str) or not RE_TIMESTAMP.match(ts):
+        return False
+    try:
+        datetime.fromisoformat(ts)
+    except ValueError:
+        return False
+    return True
 
 
 def derive_trust_tier(verified_list: list[Any] | None, current_body_hash: str) -> str:
@@ -74,8 +130,11 @@ def derive_trust_tier(verified_list: list[Any] | None, current_body_hash: str) -
     Tiers:
     - 'human-reviewed': At least one valid entry with by: human:*
     - 'machine-confirmed': No valid human entry, but at least one valid entry with by: agent:* or process:*
-    - 'stale-verified': verified is non-empty, but no entry is valid
-    - 'unverified': verified is absent, empty, or carries no valid structure
+    - 'stale-verified': at least one attestation record exists, but none is valid —
+      including records broken enough to never have bound (no 'of:', bad actor).
+      Preserving them as debt is the point; silently ignoring them would read as
+      'never verified' and hide the breakage.
+    - 'unverified': verified is absent, empty, or contains no attestation records
     """
     if not verified_list or not isinstance(verified_list, list):
         return "unverified"

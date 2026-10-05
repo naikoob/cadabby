@@ -27,7 +27,7 @@ class TestDomainModel(unittest.TestCase):
             "verified": [],
         }
         body = "# Quantum Entanglement\n\nSpooky action at a distance.\n"
-        note = Note(cid="wiki/concepts/Quantum-Entanglement", rel_path="wiki/concepts/Quantum-Entanglement.md", frontmatter=fm, body=body)
+        note = Note(cid="wiki/Quantum-Entanglement", rel_path="wiki/Quantum-Entanglement.md", frontmatter=fm, body=body)
 
         self.assertEqual(note.title, "Quantum Entanglement")
         self.assertEqual(note.type, "concept")
@@ -55,7 +55,7 @@ class TestDomainModel(unittest.TestCase):
 
     def test_section_replace_and_append(self):
         body = "# Title\n\nIntro\n\n## Section A\n\nOld A content\n\n## Section B\n\nB content\n"
-        note = Note(cid="wiki/concepts/Demo", rel_path="wiki/concepts/Demo.md", frontmatter={"type": "concept"}, body=body)
+        note = Note(cid="wiki/Demo", rel_path="wiki/Demo.md", frontmatter={"type": "concept"}, body=body)
 
         note.replace_section("Section A", "New A content")
         self.assertIn("## Section A\n\nNew A content", note.body)
@@ -75,7 +75,7 @@ class TestDomainModel(unittest.TestCase):
             "## Real Section\n\n"
             "Old real content\n"
         )
-        note = Note(cid="wiki/concepts/Code", rel_path="wiki/concepts/Code.md", frontmatter={"type": "concept"}, body=body)
+        note = Note(cid="wiki/Code", rel_path="wiki/Code.md", frontmatter={"type": "concept"}, body=body)
 
         # Replacing real section should leave the code block intact
         note.replace_section("Real Section", "New real content")
@@ -96,7 +96,7 @@ class TestDomainModel(unittest.TestCase):
         self.assertEqual(sections[2][0], "Section 2")
 
     def test_frontmatter_patching(self):
-        note = Note(cid="wiki/concepts/Demo", rel_path="wiki/concepts/Demo.md", frontmatter={"status": "draft", "remove_me": 123}, body="body")
+        note = Note(cid="wiki/Demo", rel_path="wiki/Demo.md", frontmatter={"status": "draft", "remove_me": 123}, body="body")
         note.patch_frontmatter({"status": "active", "remove_me": None, "new_field": "hello"})
         self.assertEqual(note.status, "active")
         self.assertNotIn("remove_me", note.frontmatter)
@@ -125,8 +125,8 @@ class TestInMemoryHexagonalUseCases(unittest.TestCase):
             body="# Fast Attention\n\nTiling and SRAM optimization.\n",
             actor="agent:scaffold-bot",
         )
-        self.assertEqual(note.cid, "wiki/concepts/Fast-Attention")
-        self.assertTrue(self.storage.note_exists("wiki/concepts/Fast-Attention"))
+        self.assertEqual(note.cid, "wiki/Fast-Attention")
+        self.assertTrue(self.storage.note_exists("wiki/Fast-Attention"))
         self.assertEqual(len(self.ledger.entries), 1)
 
         # Scaffold duplicate raises FileExistsError
@@ -145,14 +145,14 @@ class TestInMemoryHexagonalUseCases(unittest.TestCase):
         # Wrong hash raises VaultConflictError
         with self.assertRaises(VaultConflictError):
             update_uc.execute(
-                cid_or_path="wiki/concepts/Fast-Attention",
+                cid_or_path="wiki/Fast-Attention",
                 frontmatter_patch={"status": "evergreen"},
                 expected_hash="sha256:0000000000000000000000000000000000000000000000000000000000000000",
             )
 
         # Correct hash succeeds
         updated_note = update_uc.execute(
-            cid_or_path="wiki/concepts/Fast-Attention",
+            cid_or_path="wiki/Fast-Attention",
             frontmatter_patch={"status": "evergreen"},
             expected_hash=f"sha256:{initial_hash}",
             actor="agent:update-bot",
@@ -164,14 +164,14 @@ class TestInMemoryHexagonalUseCases(unittest.TestCase):
         # Human over non-human authorized raises PermissionError
         with self.assertRaises(PermissionError):
             verify_uc.execute(
-                cid_or_path="wiki/concepts/Fast-Attention",
+                cid_or_path="wiki/Fast-Attention",
                 actor="human:alice",
                 is_human_authorized=False,
             )
 
         # Agent attestation succeeds
         v_res = verify_uc.execute(
-            cid_or_path="wiki/concepts/Fast-Attention",
+            cid_or_path="wiki/Fast-Attention",
             actor="agent:audit-bot",
             method="formal-proof",
         )
@@ -180,7 +180,7 @@ class TestInMemoryHexagonalUseCases(unittest.TestCase):
         self.assertEqual(len(self.ledger.entries), 3)
 
         # Check persisted note in memory has updated verified frontmatter
-        persisted = self.storage.get_note("wiki/concepts/Fast-Attention")
+        persisted = self.storage.get_note("wiki/Fast-Attention")
         self.assertIsNotNone(persisted)
         self.assertEqual(persisted.trust_tier, "machine-confirmed")
 
@@ -198,11 +198,11 @@ class TestInMemoryHexagonalUseCases(unittest.TestCase):
         )
 
         ground_uc = GroundNotesUseCase(self.storage, cache=None)
-        grounded = ground_uc.execute(["wiki/concepts/Transformer-Architecture"])
+        grounded = ground_uc.execute(["wiki/Transformer-Architecture"])
 
         self.assertEqual(len(grounded), 1)
         res = grounded[0]
-        self.assertEqual(res["cid"], "wiki/concepts/Transformer-Architecture")
+        self.assertEqual(res["cid"], "wiki/Transformer-Architecture")
         self.assertEqual(res["title"], "Transformer Architecture")
         self.assertEqual(res["type"], "concept")
         self.assertEqual(res["trust_tier"], "unverified")
@@ -210,7 +210,7 @@ class TestInMemoryHexagonalUseCases(unittest.TestCase):
         self.assertIn("Self-attention mechanisms", res["content"])
 
         # Test budget truncation in memory
-        grounded_budget = ground_uc.execute(["wiki/concepts/Transformer-Architecture"], budget_tokens=20)
+        grounded_budget = ground_uc.execute(["wiki/Transformer-Architecture"], budget_tokens=20)
         self.assertEqual(len(grounded_budget), 1)
         self.assertTrue(grounded_budget[0]["truncated"])
         self.assertIn("[truncated:", grounded_budget[0]["content"])

@@ -1,6 +1,6 @@
 """Model Context Protocol (MCP 2024-11-05) JSON-RPC 2.0 stdio server.
 
-Conforms strictly to Cadabby Technical Specification §5, §6.2.
+Conforms strictly to Cadabby Technical Specification §5.1, §5.2.
 """
 
 from __future__ import annotations
@@ -25,7 +25,14 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Search query terms"},
-                "domain": {"type": "string", "description": "Filter by cognitive domain (e.g. 'wiki', 'customers', 'projects')"},
+                "domain": {
+                    "type": "string",
+                    "description": (
+                        "Filter by cognitive domain (e.g. 'wiki', 'customers', 'projects'). "
+                        "Use 'raw' to search the full text of unprocessed sources in raw/, "
+                        "which are excluded from unfiltered results."
+                    ),
+                },
                 "type": {"type": "string", "description": "Filter by note type"},
                 "status": {"type": "string", "description": "Filter by note status"},
                 "trust": {"type": "string", "description": "Filter by trust tier (human-reviewed, machine-confirmed, etc.)"},
@@ -37,14 +44,14 @@ TOOLS = [
     },
     {
         "name": "vault_ground",
-        "description": "Retrieve full note markdown content and 1-hop link/backlink/source graph for specified CIDs.",
+        "description": "Retrieve full note markdown content and 1-hop link/backlink/source graph for specified CIDs, note stems, or wikilinks.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "cids": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "List of note CIDs to retrieve",
+                    "description": "List of note CIDs, bare stems (e.g. 'Raft-Consensus'), relative paths, or wikilinks to retrieve",
                 },
                 "budget_tokens": {
                     "type": "integer",
@@ -87,7 +94,14 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "cid": {"type": "string", "description": "Note CID or relative path"},
-                "patch_frontmatter": {"type": "object", "description": "Dictionary of frontmatter fields to patch"},
+                "patch_frontmatter": {
+                    "type": "object",
+                    "description": (
+                        "Dictionary of frontmatter fields to patch. Values may nest at most "
+                        "one level (a mapping of scalars, or a list of scalars/flat mappings); "
+                        "deeper structures are rejected."
+                    ),
+                },
                 "append_section": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -339,10 +353,8 @@ class McpServer:
                 name: {
                     "name": d.name,
                     "description": d.description,
-                    "searchable": d.searchable,
                     "allowed_types": d.allowed_types,
                     "require_sources": d.require_sources,
-                    "enforce_layout": d.enforce_layout,
                     "has_directives": bool(d.directives_markdown),
                 }
                 for name, d in domains.items()

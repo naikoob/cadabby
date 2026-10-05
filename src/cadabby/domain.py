@@ -219,9 +219,7 @@ class DomainDefinition:
     name: str
     path: Path
     description: str = ""
-    searchable: bool = True
     allowed_types: list[str] | None = None  # None = open/permissive
     require_sources: bool = False
-    enforce_layout: bool = False
     directives_markdown: str = ""
 

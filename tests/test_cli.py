@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+import os
 import shutil
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from cadabby.cli import (
@@ -50,7 +54,7 @@ class TestCli(unittest.TestCase):
         self.assertTrue((vault_path / "index.md").exists())
         self.assertTrue((vault_path / "log.md").exists())
         self.assertTrue((vault_path / "raw").is_dir())
-        self.assertTrue((vault_path / "wiki" / "concepts").is_dir())
+        self.assertTrue((vault_path / "wiki").is_dir())
         self.assertTrue((vault_path / ".agents" / "skills" / "librarian" / "SKILL.md").exists())
         self.assertTrue((vault_path / ".agents" / "skills" / "technician" / "SKILL.md").exists())
         self.assertTrue((vault_path / ".agents" / "plugins" / "cadabby" / "plugin.json").exists())
@@ -77,6 +81,9 @@ class TestCli(unittest.TestCase):
 
         self.assertTrue((vault_path / ".claude" / "commands" / "ingest.md").exists())
         self.assertTrue((vault_path / ".obsidian" / "app.json").exists())
+        obs_cfg = json.loads((vault_path / ".obsidian" / "app.json").read_text("utf-8"))
+        self.assertEqual(obs_cfg.get("attachmentFolderPath"), "raw/attachments")
+        self.assertTrue((vault_path / "raw" / "attachments").is_dir())
 
     def test_init_without_force_does_not_rewrite_existing_mcp_configs(self):
         # The generated harness configs are subject to --force like every other
@@ -150,12 +157,12 @@ class TestCli(unittest.TestCase):
             actor="agent:cli-test",
         )
         self.assertEqual(cmd_scaffold(args_scaffold), 0)
-        self.assertTrue((vault_root / "wiki" / "concepts" / "Graph-Neural-Networks.md").exists())
+        self.assertTrue((vault_root / "wiki" / "Graph-Neural-Networks.md").exists())
 
         # 6. Verify
         args_verify = DummyArgs(
             vault=str(vault_root),
-            cid="wiki/concepts/Graph-Neural-Networks",
+            cid="wiki/Graph-Neural-Networks",
             method="automated-check",
             human=False,
             agent="agent:cli-test",
@@ -219,7 +226,7 @@ class TestCli(unittest.TestCase):
 
         args_verify = DummyArgs(
             vault=str(vault_root),
-            cid="wiki/concepts/Test",
+            cid="wiki/Test",
             human=True,
             agent="test-agent",
             method=None,
@@ -372,6 +379,374 @@ class TestCli(unittest.TestCase):
         parser = build_parser()
         args = parser.parse_args(["init", "/tmp/my-vault"])
         self.assertEqual(args.target_path, Path("/tmp/my-vault"))
+
+
+class TestInstallIsTheRefreshVerb(unittest.TestCase):
+    """§7.4/§7.6. `install` repairs what `init` scaffolded and will not revisit.
+
+    Two things go stale in a working vault: the absolute interpreter path baked
+    into the MCP config, and the engine-owned shims copied at scaffold time.
+    `init` declines to touch either, and `init --force` repairs them only by
+    resetting the user's documents as well. These pin the narrow path.
+    """
+
+    USER_OWNED = ("AGENTS.md", "CLAUDE.md", "GEMINI.md", "STYLE.md", "index.md")
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp_dir.name)
+        self.vault = self.dir / "vault"
+        cmd_init(DummyArgs(vault=str(self.vault), name="vault", obsidian=False))
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def _install(self, **overrides):
+        args = {
+            "vault": str(self.vault), "path": None, "is_global": False,
+            "antigravity": False, "claude": False, "all": True,
+            "uninstall": False, "dry_run": False, "force": False,
+        }
+        args.update(overrides)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = cmd_install(DummyArgs(**args))
+        return code, out.getvalue()
+
+    def _mcp(self):
+        return json.loads((self.vault / ".mcp.json").read_text("utf-8"))
+
+    def _mark_user_files(self):
+        for name in self.USER_OWNED:
+            path = self.vault / name
+            path.write_text(path.read_text("utf-8") + "\nZZUSERZZ\n")
+        cfg = self.vault / ".cadabby.json"
+        data = json.loads(cfg.read_text("utf-8"))
+        data["domains"] = {"recipes": {"description": "ZZUSERZZ"}}
+        cfg.write_text(json.dumps(data, indent=2))
+
+    def _assert_user_files_intact(self):
+        for name in self.USER_OWNED:
+            self.assertIn("ZZUSERZZ", (self.vault / name).read_text("utf-8"), f"{name} was overwritten")
+        data = json.loads((self.vault / ".cadabby.json").read_text("utf-8"))
+        self.assertEqual(data.get("domains", {}).get("recipes", {}).get("description"), "ZZUSERZZ")
+
+    def test_install_on_a_fresh_vault_is_a_no_op(self):
+        """`init` already registered both harnesses, so there is nothing to do."""
+        code, out = self._install()
+        self.assertEqual(code, 0)
+        self.assertIn("unchanged", out)
+
+    def test_rebinds_its_own_entry_after_the_interpreter_moves(self):
+        """The case install exists for: a venv rebuild leaves a dead command path."""
+        data = self._mcp()
+        data["mcpServers"]["cadabby"]["command"] = "/gone/venv/bin/python3"
+        data["mcpServers"]["other"] = {"command": "keep-me"}
+        (self.vault / ".mcp.json").write_text(json.dumps(data, indent=2))
+
+        code, out = self._install()  # deliberately no force=True
+        self.assertEqual(code, 0, out)
+        after = self._mcp()
+        self.assertNotEqual(after["mcpServers"]["cadabby"]["command"], "/gone/venv/bin/python3")
+        self.assertEqual(after["mcpServers"]["other"], {"command": "keep-me"}, "merge must preserve foreign keys")
+
+    def test_an_entry_for_another_vault_is_still_a_conflict(self):
+        data = self._mcp()
+        data["mcpServers"]["cadabby"]["args"] = ["-m", "cadabby", "mcp", "--vault", "/somewhere/else"]
+        (self.vault / ".mcp.json").write_text(json.dumps(data, indent=2))
+
+        code, _ = self._install()
+        self.assertEqual(code, 1)
+        self.assertEqual(self._mcp()["mcpServers"]["cadabby"]["args"][-1], "/somewhere/else")
+
+    def test_a_foreign_server_under_our_key_is_still_a_conflict(self):
+        """Someone else's server registered as `cadabby` is not ours to rebind."""
+        data = self._mcp()
+        data["mcpServers"]["cadabby"] = {"command": "node", "args": ["their-server.js"]}
+        (self.vault / ".mcp.json").write_text(json.dumps(data, indent=2))
+
+        code, _ = self._install()
+        self.assertEqual(code, 1)
+        self.assertEqual(self._mcp()["mcpServers"]["cadabby"]["command"], "node")
+
+    def test_refreshes_every_engine_owned_shim_and_no_user_document(self):
+        """The whole point of the engine-owned/user-owned split (§7.4)."""
+        shims = (
+            ".claude/commands/ingest.md",
+            ".agents/skills/librarian/SKILL.md",
+            ".agents/skills/technician/SKILL.md",
+            ".agents/plugins/cadabby/skills/cadabby-wiki/SKILL.md",
+            ".agents/plugins/cadabby/agents/librarian/agent.md",
+        )
+        for rel in shims:
+            (self.vault / rel).write_text("STALE SHIM FROM AN OLD VERSION\n")
+        self._mark_user_files()
+
+        code, _ = self._install()
+        self.assertEqual(code, 0)
+        for rel in shims:
+            self.assertNotIn("STALE SHIM", (self.vault / rel).read_text("utf-8"), f"{rel} was not refreshed")
+        self._assert_user_files_intact()
+
+    def test_dry_run_reports_the_refresh_without_performing_it(self):
+        stale = self.vault / ".claude" / "commands" / "ingest.md"
+        stale.write_text("STALE SHIM\n")
+
+        code, out = self._install(dry_run=True)
+        self.assertEqual(code, 0)
+        self.assertIn("dry-run", out)
+        self.assertEqual(stale.read_text("utf-8"), "STALE SHIM\n")
+
+    def test_global_install_writes_no_vault_files(self):
+        """--global configures the user environment; the vault is not its business."""
+        self._mark_user_files()
+        stale = self.vault / ".claude" / "commands" / "ingest.md"
+        stale.write_text("STALE SHIM\n")
+
+        # Claude only: --path takes a single destination, so pairing it with
+        # --all would hand the same path to both harnesses.
+        self._install(is_global=True, all=False, claude=True, path=str(self.dir / "global.json"), force=True)
+        self.assertEqual(stale.read_text("utf-8"), "STALE SHIM\n")
+        self._assert_user_files_intact()
+
+    def test_init_force_is_a_reset_not_a_refresh(self):
+        """Pins why `install` had to exist, and why §7.4 must not recommend this.
+
+        Notes and the ledger survive; every user-owned document does not.
+        """
+        self._mark_user_files()
+        (self.vault / "wiki" / "Mine.md").write_text("---\ntitle: Mine\n---\n\nZZUSERZZ\n")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            cmd_init(DummyArgs(vault=str(self.vault), name="vault", obsidian=False, force=True))
+
+        self.assertIn("ZZUSERZZ", (self.vault / "wiki" / "Mine.md").read_text("utf-8"), "notes must survive")
+        for name in self.USER_OWNED:
+            self.assertNotIn(
+                "ZZUSERZZ",
+                (self.vault / name).read_text("utf-8"),
+                f"{name} unexpectedly survived --force; if this is now intended, §7.4 needs rewriting",
+            )
+
+
+class TestInstallPathIsSingleTarget(unittest.TestCase):
+    """§7.6. `--path` names one destination, and destinations have a kind.
+
+    Antigravity installs a plugin *directory*; Claude writes a JSON *file*. One
+    `--path` therefore cannot serve both, and a `--path` of the wrong kind
+    cannot serve either. Before these guards, `--all --path X` created the
+    plugin directory and then died reading it as JSON, leaving a half-installed
+    vault behind -- and `--dry-run` reported that both steps would succeed.
+    """
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp_dir.name)
+        self.vault = self.dir / "vault"
+        cmd_init(DummyArgs(vault=str(self.vault), name="vault", obsidian=False))
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def _install(self, **overrides):
+        """Capture both streams: the multi-target refusal is a stderr diagnostic."""
+        args = {
+            "vault": str(self.vault), "path": None, "is_global": False,
+            "antigravity": False, "claude": False, "all": False,
+            "uninstall": False, "dry_run": False, "force": False,
+        }
+        args.update(overrides)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cmd_install(DummyArgs(**args))
+        return code, out.getvalue() + err.getvalue()
+
+    def test_path_with_all_is_refused_before_anything_is_written(self):
+        dest = self.dir / "dest"
+        code, output = self._install(all=True, path=str(dest))
+        self.assertEqual(code, 1)
+        self.assertIn("single destination", output)
+        self.assertFalse(dest.exists(), "refusal must precede the Antigravity write, not follow it")
+
+    def test_path_with_both_targets_named_explicitly_is_also_refused(self):
+        """--all is sugar for this; the guard keys on the targets, not the flag."""
+        dest = self.dir / "dest"
+        code, _ = self._install(antigravity=True, claude=True, path=str(dest))
+        self.assertEqual(code, 1)
+        self.assertFalse(dest.exists())
+
+    def test_path_with_all_is_refused_under_dry_run(self):
+        """The preview exists to catch exactly this before the user commits."""
+        code, output = self._install(all=True, path=str(self.dir / "dest"), dry_run=True)
+        self.assertEqual(code, 1)
+        self.assertNotIn("Would", output, "dry-run must not report success for an impossible install")
+
+    def test_path_with_all_is_refused_for_uninstall_too(self):
+        code, _ = self._install(all=True, path=str(self.dir / "dest"), uninstall=True)
+        self.assertEqual(code, 1)
+
+    def test_claude_rejects_a_directory_destination(self):
+        adir = self.dir / "adir"
+        adir.mkdir()
+        code, output = self._install(claude=True, path=str(adir))
+        self.assertEqual(code, 1)
+        self.assertIn("must be a JSON file", output)
+        self.assertEqual(list(adir.iterdir()), [], "nothing may be written into it")
+
+    def test_antigravity_rejects_a_file_destination(self):
+        afile = self.dir / "afile.json"
+        afile.write_text("{}\n")
+        code, output = self._install(antigravity=True, path=str(afile))
+        self.assertEqual(code, 1)
+        self.assertIn("must be a directory", output)
+
+    def test_wrong_kind_is_reported_by_dry_run(self):
+        adir = self.dir / "adir"
+        adir.mkdir()
+        code, output = self._install(claude=True, path=str(adir), dry_run=True)
+        self.assertEqual(code, 1)
+        self.assertNotIn("Would", output)
+
+    def test_force_does_not_destroy_an_unrelated_destination(self):
+        """--force overwrites Cadabby's own output, not arbitrary user data."""
+        afile = self.dir / "afile.json"
+        afile.write_text("{}\n")
+        code, _ = self._install(antigravity=True, path=str(afile), force=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(afile.read_text("utf-8"), "{}\n")
+
+    def test_uninstall_rejects_a_wrong_kind_destination(self):
+        """rmtree on a file and read_text on a directory both raise raw errnos."""
+        adir = self.dir / "adir"
+        adir.mkdir()
+        code, _ = self._install(claude=True, path=str(adir), uninstall=True)
+        self.assertEqual(code, 1)
+        self.assertTrue(adir.is_dir(), "a failed uninstall must not remove it")
+
+    def test_single_target_path_still_installs(self):
+        """The guards must not cost the feature they protect."""
+        plug, cfg = self.dir / "plug", self.dir / "cfg.json"
+        self.assertEqual(self._install(antigravity=True, path=str(plug))[0], 0)
+        self.assertEqual(self._install(claude=True, path=str(cfg))[0], 0)
+        self.assertTrue((plug / "mcp_config.json").is_file())
+        self.assertIn("cadabby", json.loads(cfg.read_text("utf-8"))["mcpServers"])
+
+    def test_all_without_path_is_unaffected(self):
+        code, _ = self._install(all=True)
+        self.assertEqual(code, 0)
+        self.assertTrue((self.vault / ".mcp.json").is_file())
+        self.assertTrue((self.vault / ".agents" / "plugins" / "cadabby").is_dir())
+
+
+class TestGlobalInstallBindsOnlyWhenAsked(unittest.TestCase):
+    """§7.4/§7.6. A global install binds to a vault only if one is named.
+
+    Bare `--global` used to adopt whatever vault the cwd happened to sit in,
+    writing that one absolute path into a config every workspace on the machine
+    reads -- so a second vault's agent silently served the first. It also lost
+    the symlink, because a bound plugin must be a copy, quietly voiding §7.4's
+    one exception to the frozen-copy rule.
+    """
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp_dir.name)
+        self.home = self.dir / "home"
+        self.home.mkdir()
+        self.vault_a = self.dir / "vaultA"
+        self.vault_b = self.dir / "vaultB"
+        for v in (self.vault_a, self.vault_b):
+            cmd_init(DummyArgs(vault=str(v), name=v.name, obsidian=False))
+        self._home_patch = unittest.mock.patch.object(Path, "home", staticmethod(lambda: self.home))
+        self._home_patch.start()
+        self.addCleanup(self._home_patch.stop)
+        self._cwd = os.getcwd()
+        self.addCleanup(os.chdir, self._cwd)
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def _install(self, cwd, **overrides):
+        args = {
+            "vault": None, "path": None, "is_global": True,
+            "antigravity": False, "claude": False, "all": True,
+            "uninstall": False, "dry_run": False, "force": False,
+        }
+        args.update(overrides)
+        os.chdir(cwd)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cmd_install(DummyArgs(**args))
+        os.chdir(self._cwd)
+        return code, out.getvalue() + err.getvalue()
+
+    def _global_plugin(self):
+        return self.home / ".gemini" / "antigravity" / "plugins" / "cadabby"
+
+    def _global_claude_args(self):
+        cfg = json.loads((self.home / ".claude.json").read_text("utf-8"))
+        return cfg["mcpServers"]["cadabby"]["args"]
+
+    def test_bare_global_inside_a_vault_does_not_bind_to_it(self):
+        """The regression: cwd must not become a machine-wide binding."""
+        self.assertEqual(self._install(self.vault_a)[0], 0)
+        self.assertNotIn("--vault", self._global_claude_args())
+        self.assertNotIn(
+            str(self.vault_a),
+            json.dumps(self._global_claude_args()),
+            "no vault path may leak into a config every workspace reads",
+        )
+
+    def test_bare_global_inside_a_vault_still_symlinks_the_plugin(self):
+        """§7.4's sole escape from the frozen-copy rule must survive."""
+        self._install(self.vault_a)
+        self.assertTrue(self._global_plugin().is_symlink())
+
+    def test_bare_global_plugin_config_names_no_vault(self):
+        self._install(self.vault_a)
+        plugin = self._global_plugin().resolve()
+        cfg = json.loads((plugin / "mcp_config.json").read_text("utf-8"))
+        self.assertNotIn("--vault", cfg["mcpServers"]["cadabby"]["args"])
+
+    def test_bare_global_is_identical_from_either_vault(self):
+        """Where you stand stops being an input."""
+        self._install(self.vault_a)
+        first = self._global_claude_args()
+        code, _ = self._install(self.vault_b)
+        self.assertEqual(code, 0, "a second vault must not provoke a --force conflict")
+        self.assertEqual(self._global_claude_args(), first)
+
+    def test_bare_global_outside_any_vault_is_unchanged(self):
+        self.assertEqual(self._install(self.dir)[0], 0)
+        self.assertNotIn("--vault", self._global_claude_args())
+        self.assertTrue(self._global_plugin().is_symlink())
+
+    def test_explicit_vault_still_binds_a_global_install(self):
+        """--vault is how a single-vault user opts in, from anywhere."""
+        code, _ = self._install(self.dir, vault=str(self.vault_a))
+        self.assertEqual(code, 0)
+        args = self._global_claude_args()
+        self.assertIn("--vault", args)
+        self.assertIn(str(self.vault_a.resolve()), args)
+
+    def test_binding_a_global_install_costs_the_symlink(self):
+        """Not a policy choice: mcp_config.json lives inside the plugin dir."""
+        self._install(self.dir, vault=str(self.vault_a))
+        plugin = self._global_plugin()
+        self.assertFalse(plugin.is_symlink())
+        cfg = json.loads((plugin / "mcp_config.json").read_text("utf-8"))
+        self.assertIn(str(self.vault_a.resolve()), cfg["mcpServers"]["cadabby"]["args"])
+
+    def test_global_install_still_writes_no_vault_files(self):
+        before = sorted(p.name for p in self.vault_a.iterdir())
+        self._install(self.vault_a)
+        self.assertEqual(sorted(p.name for p in self.vault_a.iterdir()), before)
+
+    def test_workspace_install_is_unaffected(self):
+        """Non-global installs still discover and bind the cwd vault."""
+        code, _ = self._install(self.vault_a, is_global=False)
+        self.assertEqual(code, 0)
+        cfg = json.loads((self.vault_a / ".mcp.json").read_text("utf-8"))
+        self.assertIn(str(self.vault_a.resolve()), cfg["mcpServers"]["cadabby"]["args"])
 
 
 if __name__ == "__main__":

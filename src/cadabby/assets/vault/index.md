@@ -1,13 +1,6 @@
-# Vault Catalog
+# Vault Index
 
-> Auto-generated catalog linking compiled wiki knowledge and raw ground truth sources.
+> Auto-generated gap report (§2.5). Not a catalog, and never hand-edited:
+> edits are overwritten on the next scan that finds changes.
 
-## Concepts
-
-| Note | Description | Trust | Status |
-| :--- | :--- | :--- | :--- |
-
-## Raw Sources
-
-| Source File | Status | Citations |
-| :--- | :--- | :--- |
+Nothing outstanding: every note is filed, every source processed, every attestation current.
