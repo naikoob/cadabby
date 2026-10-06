@@ -130,6 +130,7 @@ cadabby/
 │
 └── tests/                      # Complete test suite (pure unittest, zero test dependencies)
     ├── helpers.py              # Shared test fixtures, mock helpers, and demo-vault copy
+    ├── run_parallel.py         # Zero-dependency parallel test runner (process pool)
     ├── test_fsutil.py          # Atomic durability (tempfile + fsync), locks, O_APPEND ledger
     ├── test_vault.py           # Vault root resolution (§2.7), config deep merge, path/CID mapping
     ├── test_frontmatter.py     # Subset parse/write boundary, round-trip fidelity (§3.2)
@@ -148,6 +149,7 @@ cadabby/
     ├── test_mcp.py             # MCP handshake, tool execution, human:* refusal
     ├── test_cli.py             # Command surface, flags, JSON output, install refresh
     ├── test_installer.py       # init scaffolding, idempotency, merge, uninstall, dry-run
+    ├── test_run_parallel.py    # Parallel test runner target discovery, worker dispatch, and CLI
     └── test_acceptance.py      # §10 Acceptance criteria and TestAcceptanceTraceability
 ```
 
@@ -161,7 +163,14 @@ Always run commands from the repository root (`/home/bookian/Workspaces/cadabby`
 Cadabby uses Python's standard `unittest` framework. No third-party test runners are required:
 
 ```bash
-# Run the entire test suite (canonical, ~250 tests in < 1 second)
+# Fast parallel test execution across all CPU cores (zero dependencies, ~5.5s)
+python3 tests/run_parallel.py
+
+# Parallel test execution with verbose target reporting or filter
+python3 tests/run_parallel.py -v
+python3 tests/run_parallel.py test_cache
+
+# Canonical sequential test suite runner
 PYTHONPATH=src python3 -m unittest discover tests
 
 # Run a specific test module
