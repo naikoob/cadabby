@@ -68,20 +68,21 @@ def split_markdown_sections(body: str) -> list[tuple[str, str]]:
 
 def replace_markdown_section(body: str, heading: str, new_content: str) -> str:
     """Replace an existing ## heading section or append if not present, code-fence safe."""
+    clean_heading = heading.lstrip("#").strip()
     sections = split_markdown_sections(body)
     found = False
-    new_section_text = f"## {heading}\n\n{new_content.strip()}\n\n"
+    new_section_text = f"## {clean_heading}\n\n{new_content.strip()}\n\n"
 
     new_sections = []
     for h, content in sections:
-        if h == heading and not found:
+        if h == clean_heading and not found:
             new_sections.append(new_section_text)
             found = True
         else:
             new_sections.append(content)
 
     if not found:
-        return body.rstrip() + f"\n\n## {heading}\n\n{new_content.strip()}\n"
+        return body.rstrip() + f"\n\n## {clean_heading}\n\n{new_content.strip()}\n"
 
     return "".join(new_sections)
 
@@ -155,7 +156,8 @@ class Note:
 
     def append_section(self, heading: str, content: str) -> None:
         """Append a section under ## heading to the end of the body."""
-        self.body = self.body.rstrip() + f"\n\n## {heading}\n\n{content.strip()}\n"
+        clean_heading = heading.lstrip("#").strip()
+        self.body = self.body.rstrip() + f"\n\n## {clean_heading}\n\n{content.strip()}\n"
 
     def add_attestation(
         self,

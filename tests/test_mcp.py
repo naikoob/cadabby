@@ -91,6 +91,19 @@ class TestMcpServer(unittest.TestCase):
         )
         self.assertFalse(res_scaffold["isError"])
 
+        # Immediate search must find the newly scaffolded note without external sync
+        res_immediate_search = self.server.handle_tools_call("vault_search", {"query": "Superposition"})
+        self.assertFalse(res_immediate_search["isError"])
+        search_hits = json.loads(res_immediate_search["content"][0]["text"])
+        self.assertTrue(any(h["cid"] == "wiki/Quantum-Computing" for h in search_hits))
+
+        # Immediate ground must retrieve the newly scaffolded note
+        res_immediate_ground = self.server.handle_tools_call("vault_ground", {"cids": ["wiki/Quantum-Computing"]})
+        self.assertFalse(res_immediate_ground["isError"])
+        ground_hits = json.loads(res_immediate_ground["content"][0]["text"])
+        self.assertEqual(len(ground_hits), 1)
+        self.assertEqual(ground_hits[0]["cid"], "wiki/Quantum-Computing")
+
         # Update note
         res_update = self.server.handle_tools_call(
             "vault_update_note",

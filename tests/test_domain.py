@@ -61,9 +61,18 @@ class TestDomainModel(unittest.TestCase):
         self.assertIn("## Section A\n\nNew A content", note.body)
         self.assertNotIn("Old A content", note.body)
 
-        # Append new section
+        # Replacing with explicit "## " prefix should work identically and not duplicate hashes
+        note.replace_section("## Section A", "Updated A content")
+        self.assertIn("## Section A\n\nUpdated A content", note.body)
+        self.assertNotIn("## ## Section A", note.body)
+
+        # Append new section with or without "## "
         note.append_section("Section C", "C content")
         self.assertTrue(note.body.endswith("## Section C\n\nC content\n"))
+
+        note.append_section("## Section D", "D content")
+        self.assertTrue(note.body.endswith("## Section D\n\nD content\n"))
+        self.assertNotIn("## ## Section D", note.body)
 
     def test_section_replace_with_code_fence(self):
         body = (

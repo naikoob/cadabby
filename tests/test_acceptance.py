@@ -334,6 +334,36 @@ class TestAcceptanceCriteria(unittest.TestCase):
             self.assertEqual(findings[0].code, "PROVENANCE_MISMATCH")
             self.assertIn("untrusted-agent@bot.net", findings[0].message)
 
+    def test_audit_ignores_body_mentions_of_human_attestations(self):
+        """Audit only checks frontmatter attestations, ignoring markdown body text and code blocks."""
+        demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
+        vault_dir = self.root / "demo-vault-audit-body"
+        shutil.copytree(demo_src, vault_dir, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
+        vault = Vault(vault_dir)
+
+        # Append fake human attestation to note body
+        note_file = vault_dir / "wiki" / "SQLite.md"
+        content = note_file.read_text("utf-8")
+        note_file.write_text(content + "\n\nExample code:\n```yaml\n- by: human:fake_attacker\n```\n- by: human:fake_attacker\n", "utf-8")
+
+        with patch("subprocess.run") as mock_run:
+            def fake_run(cmd, **kwargs):
+                ret = MagicMock()
+                if "rev-parse" in cmd:
+                    ret.returncode = 0
+                    ret.stdout = "true\n"
+                elif "blame" in cmd:
+                    self.assertNotIn("SQLite.md", " ".join(cmd))
+                    ret.returncode = 0
+                    ret.stdout = "a1b2c3d4 1 1 1\nauthor Owner\nauthor-mail <owner@example.com>\n\t- by: human:owner\n"
+                return ret
+
+            mock_run.side_effect = fake_run
+            findings, notice = run_vault_audit(vault)
+            self.assertIsNone(notice)
+            for f in findings:
+                self.assertNotIn("fake_attacker", f.actor)
+
     def test_ac12_full_autonomous_agent_workflow(self):
         """No current §10 criterion. Pins §7.1's portability claim: .mcp.json alone is a working surface."""
         demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"

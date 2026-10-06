@@ -254,7 +254,7 @@ def install_antigravity(
                     cur_cfg = json.loads(mcp_file.read_text("utf-8"))
                     if cur_cfg.get("mcpServers", {}).get("cadabby") == desired_entry:
                         return True, f"Antigravity plugin already installed at {dest} (unchanged)."
-                except Exception:
+                except (json.JSONDecodeError, OSError):
                     pass
             if not force:
                 return False, f"Conflict: Directory already exists at {dest}. Use --force to overwrite."

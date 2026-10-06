@@ -9,6 +9,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 
+from cadabby.frontmatter import split_frontmatter
 from cadabby.vault import Vault
 
 
@@ -51,16 +52,24 @@ def run_vault_audit(vault: Vault, require_signed: bool = False) -> tuple[list[Au
 
     all_note_files = [p for p, _, _ in vault.iter_domain_notes()]
 
-    re_human_by = re.compile(r"^\s*-\s*by:\s*(human:[A-Za-z0-9._\-/]+)\s*")
+    re_human_by = re.compile(r"^\s*-\s*by:\s*[\"']?(human:[A-Za-z0-9._\-/]+)[\"']?\s*")
 
     for file_path in all_note_files:
         rel_path = vault.rel_path(file_path)
         try:
-            lines = file_path.read_text("utf-8").splitlines()
+            content = file_path.read_text("utf-8")
         except OSError:
             continue
 
-        for line_no, line in enumerate(lines, start=1):
+        try:
+            raw_fm, _, _ = split_frontmatter(content)
+        except Exception:
+            continue
+
+        if not raw_fm:
+            continue
+
+        for line_no, line in enumerate(raw_fm.splitlines(), start=2):
             match = re_human_by.match(line)
             if not match:
                 continue

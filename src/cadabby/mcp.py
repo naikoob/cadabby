@@ -272,6 +272,7 @@ class McpServer:
                 return _tool_ok([r.to_dict() for r in res])
 
             elif name == "vault_ground":
+                self.cache.scan()
                 grounded = ground_notes(
                     self.vault,
                     args["cids"],
@@ -294,6 +295,7 @@ class McpServer:
                     path=args.get("path"),
                     template=args.get("template"),
                 )
+                self.cache.scan()
                 rel = self.vault.rel_path(path)
                 return _tool_ok(f"Scaffolded note: {rel} (CID: {path_to_cid(rel)})")
 
@@ -317,6 +319,7 @@ class McpServer:
                     expected_hash=args.get("expected_hash"),
                     actor=self.client_id,
                 )
+                self.cache.scan()
                 rel = self.vault.rel_path(path)
                 return _tool_ok(f"Updated note: {rel}")
 
@@ -337,6 +340,7 @@ class McpServer:
                     method=args.get("method", "automated-check"),
                     is_human_authorized=False,
                 )
+                self.cache.scan()
                 return _tool_ok(
                     f"Attested {res['cid']} by {res['actor']} "
                     f"with content-binding {res['of'][:16]}... "
