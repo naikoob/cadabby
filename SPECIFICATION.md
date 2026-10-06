@@ -949,6 +949,7 @@ cadabby/
 │
 └── tests/
     ├── helpers.py              # Shared test fixtures, mock helpers, and demo-vault copy
+    ├── run_parallel.py         # Zero-dependency parallel test runner (process pool)
     ├── test_fsutil.py          # Atomic durability (tempfile + fsync), locks, O_APPEND ledger
     ├── test_vault.py           # Vault root resolution (2.7), config deep merge, path/CID mapping
     ├── test_frontmatter.py     # Subset parse/write boundary, round-trip fidelity (3.2)
@@ -967,6 +968,7 @@ cadabby/
     ├── test_mcp.py             # Handshake, tool execution, human:* refusal
     ├── test_cli.py             # Command surface, flags, JSON output
     ├── test_installer.py       # init scaffolding, idempotency, merge, uninstall, dry-run
+    ├── test_run_parallel.py    # Parallel test runner target discovery, worker dispatch, and CLI
     └── test_acceptance.py      # The §10 criteria and TestAcceptanceTraceability
 ```
 
