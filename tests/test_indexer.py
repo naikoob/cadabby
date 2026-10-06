@@ -15,7 +15,7 @@ import unittest.mock
 from pathlib import Path
 
 from cadabby.cache import VaultCache
-from cadabby.indexer import generate_index_markdown, sync_vault_index
+from cadabby.indexer import generate_index_markdown, rotate_vault_log, sync_vault_index
 from cadabby.lint import run_vault_lint
 from cadabby.vault import Vault
 
@@ -234,6 +234,34 @@ class TestRegenerationRidesTheScan(IndexerFixture):
             cache.scan(regenerate_index=False)
             self.assertTrue(sync_vault_index(self.vault, cache=cache))
             self.assertFalse(sync_vault_index(self.vault, cache=cache))
+
+
+class TestLogRotation(IndexerFixture):
+    def test_rotate_vault_log_duplicate_headers(self):
+        # Configure small rotation threshold
+        self.vault.config["log_rotate_bytes"] = 10
+
+        # Create active log
+        self.vault.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.vault.log_path.write_text("# Activity Ledger (2026)\n\nEntry 1 with extra padding\n", "utf-8")
+
+        # First rotation creates 2026.md
+        rot1 = rotate_vault_log(self.vault)
+        self.assertIsNotNone(rot1)
+        assert rot1 is not None
+        self.assertTrue(rot1.exists())
+        self.assertEqual(rot1.read_text("utf-8").count("# Activity Ledger (2026)"), 1)
+
+        # Append more entries to active log and rotate again into existing 2026.md
+        self.vault.log_path.write_text("# Activity Ledger (2026)\n\nEntry 2 with extra padding\n", "utf-8")
+        rot2 = rotate_vault_log(self.vault)
+        self.assertEqual(rot1, rot2)
+
+        # Rotated file should still only have exactly one top-level title header
+        content = rot2.read_text("utf-8")
+        self.assertEqual(content.count("# Activity Ledger (2026)"), 1)
+        self.assertIn("Entry 1", content)
+        self.assertIn("Entry 2", content)
 
 
 if __name__ == "__main__":

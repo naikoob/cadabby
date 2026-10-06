@@ -7,11 +7,12 @@ Defines the contracts between the domain/application core and external infrastru
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from cadabby.domain import Note
 
 
+@runtime_checkable
 class NoteStoragePort(Protocol):
     """Secondary port for persisting and retrieving notes and raw sources."""
 
@@ -40,6 +41,7 @@ class NoteStoragePort(Protocol):
         ...
 
 
+@runtime_checkable
 class IndexCachePort(Protocol):
     """Secondary port for searching, caching, and epistemic health reporting."""
 
@@ -73,6 +75,7 @@ class IndexCachePort(Protocol):
         ...
 
 
+@runtime_checkable
 class LedgerPort(Protocol):
     """Secondary port for recording immutable activity entries."""
 

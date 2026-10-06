@@ -26,10 +26,7 @@ from cadabby.ops import ScaffoldNoteUseCase, scaffold_note
 from cadabby.vault import Vault, obsidian_template_dir
 
 
-class DummyArgs:
-    def __init__(self, **kwargs):
-        for k, v in kwargs.items():
-            setattr(self, k, v)
+from tests.helpers import DummyArgs
 
 # Exactly what Obsidian's core Templates plugin produces: the title placeholder
 # parses as a flow mapping, the empty tag list as a flow sequence.

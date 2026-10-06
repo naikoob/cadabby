@@ -129,17 +129,22 @@ cadabby/
 │   └── demo-vault/             # Golden fixture vault used by tests and examples
 │
 └── tests/                      # Complete test suite (pure unittest, zero test dependencies)
-    ├── test_primitives.py      # fsutil atomicity/locking, vault config, ranking
-    ├── test_frontmatter.py     # Subset parse/write boundary, round-trip fidelity
-    ├── test_okf.py             # Body hashing, actor/timestamp validation, tier derivation
+    ├── helpers.py              # Shared test fixtures, mock helpers, and demo-vault copy
+    ├── test_fsutil.py          # Atomic durability (tempfile + fsync), locks, O_APPEND ledger
+    ├── test_vault.py           # Vault root resolution (§2.7), config deep merge, path/CID mapping
+    ├── test_frontmatter.py     # Subset parse/write boundary, round-trip fidelity (§3.2)
+    ├── test_okf.py             # Body hashing, actor/timestamp validation, tier derivation (§3.1-§3.4)
     ├── test_cache.py           # Scan, deletion reconciliation, FTS5 ranking & integrity
-    ├── test_graph.py           # Wikilink resolution, anchors, aliases, dead links
-    ├── test_indexer.py         # index.md gap report, MOC reachability, regeneration
+    ├── test_graph.py           # Wikilink resolution, anchors, aliases, dead links, target index
+    ├── test_indexer.py         # index.md gap report, MOC reachability, log rotation
     ├── test_lint.py            # Six gates, taxonomy closure, warning vs error severities
+    ├── test_errors.py          # Code taxonomy, retryability, MCP payload, exit codes (§5.4)
     ├── test_ops.py             # Scaffolding, attribution, conflict detection, atomicity
-    ├── test_domain.py          # Note entity and use cases driven through memory adapters
+    ├── test_audit.py           # Git blame provenance audit for human:* attestations (§3.5)
+    ├── test_adapters.py        # Driven secondary storage adapters (DiskNoteStorage, FileLedger) (§9.1)
+    ├── test_domain_model.py    # Note entity and use cases driven through memory adapters
     ├── test_domains.py         # Multi-domain discovery, cache, linting, ops, MCP resources
-    ├── test_templates.py       # Template folder exclusion, scaffold from template, starters
+    ├── test_templates.py       # Template folder exclusion, scaffold from template, starters (§7.5)
     ├── test_mcp.py             # MCP handshake, tool execution, human:* refusal
     ├── test_cli.py             # Command surface, flags, JSON output, install refresh
     ├── test_installer.py       # init scaffolding, idempotency, merge, uninstall, dry-run

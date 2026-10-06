@@ -16,7 +16,8 @@ from cadabby.domain import DomainDefinition
 from cadabby.lint import run_vault_lint
 from cadabby.mcp import McpServer
 from cadabby.ops import ground_notes, scaffold_note, verify_note
-from cadabby.vault import Vault, cid_to_path, path_to_cid, path_to_layer
+from cadabby.vault import cid_to_path, path_to_cid, path_to_layer
+from tests.helpers import create_test_vault
 
 
 class TestDomainFoundations(unittest.TestCase):
@@ -64,11 +65,7 @@ class TestDomainDiscovery(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.vault_dir = Path(self.tmp.name) / "vault"
-        self.vault_dir.mkdir(parents=True, exist_ok=True)
-        (self.vault_dir / "wiki").mkdir()
-        (self.vault_dir / "raw").mkdir()
-        (self.vault_dir / "log").mkdir()
-        self.vault = Vault(self.vault_dir)
+        self.vault = create_test_vault(self.vault_dir, subdirs=("wiki", "raw", "log"))
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -205,14 +202,10 @@ class TestMultiDomainCacheAndGraph(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.vault_dir = Path(self.tmp.name) / "vault"
-        self.vault_dir.mkdir(parents=True, exist_ok=True)
-        (self.vault_dir / ".cadabby").mkdir()
-        (self.vault_dir / "wiki" / "concepts").mkdir(parents=True)
-        (self.vault_dir / "customers" / "acme").mkdir(parents=True)
-        (self.vault_dir / "projects" / "apollo").mkdir(parents=True)
-        (self.vault_dir / "raw").mkdir(parents=True)
-        (self.vault_dir / "log").mkdir(parents=True)
-        self.vault = Vault(self.vault_dir)
+        self.vault = create_test_vault(
+            self.vault_dir,
+            subdirs=("wiki/concepts", "customers/acme", "projects/apollo", "raw", "log"),
+        )
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -386,14 +379,10 @@ class TestMultiDomainLinter(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.vault_dir = Path(self.tmp.name) / "vault"
-        self.vault_dir.mkdir(parents=True, exist_ok=True)
-        (self.vault_dir / ".cadabby").mkdir()
-        (self.vault_dir / "wiki" / "concepts").mkdir(parents=True)
-        (self.vault_dir / "customers" / "acme").mkdir(parents=True)
-        (self.vault_dir / "projects" / "apollo").mkdir(parents=True)
-        (self.vault_dir / "raw").mkdir(parents=True)
-        (self.vault_dir / "log").mkdir(parents=True)
-        self.vault = Vault(self.vault_dir)
+        self.vault = create_test_vault(
+            self.vault_dir,
+            subdirs=("wiki/concepts", "customers/acme", "projects/apollo", "raw", "log"),
+        )
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -591,13 +580,10 @@ class TestMultiDomainOpsAndMcp(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.vault_dir = Path(self.tmp.name) / "vault"
-        self.vault_dir.mkdir(parents=True, exist_ok=True)
-        (self.vault_dir / "wiki" / "concepts").mkdir(parents=True)
-        (self.vault_dir / "wiki" / "entities").mkdir(parents=True)
-        (self.vault_dir / "customers" / "acme").mkdir(parents=True)
-        (self.vault_dir / "raw").mkdir()
-        (self.vault_dir / "log").mkdir()
-        self.vault = Vault(self.vault_dir)
+        self.vault = create_test_vault(
+            self.vault_dir,
+            subdirs=("wiki/concepts", "wiki/entities", "customers/acme", "raw", "log"),
+        )
 
         # Setup customers/AGENTS.md
         (self.vault_dir / "customers" / "AGENTS.md").write_text(
@@ -740,14 +726,10 @@ class TestMultiDomainEndToEnd(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.vault_dir = Path(self.tmp.name) / "vault"
-        self.vault_dir.mkdir(parents=True, exist_ok=True)
-        (self.vault_dir / "wiki" / "concepts").mkdir(parents=True)
-        (self.vault_dir / "wiki" / "entities").mkdir(parents=True)
-        (self.vault_dir / "customers" / "acme").mkdir(parents=True)
-        (self.vault_dir / "projects" / "apollo").mkdir(parents=True)
-        (self.vault_dir / "raw").mkdir()
-        (self.vault_dir / "log").mkdir()
-        self.vault = Vault(self.vault_dir)
+        self.vault = create_test_vault(
+            self.vault_dir,
+            subdirs=("wiki/concepts", "wiki/entities", "customers/acme", "projects/apollo", "raw", "log"),
+        )
 
         # Domain manifests
         (self.vault_dir / "customers" / "AGENTS.md").write_text(

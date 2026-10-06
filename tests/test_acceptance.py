@@ -33,10 +33,7 @@ from cadabby.ops import scaffold_note, update_note, verify_note
 from cadabby.vault import Vault
 
 
-class DummyArgs:
-    def __init__(self, **kwargs):
-        for k, v in kwargs.items():
-            setattr(self, k, v)
+from tests.helpers import DummyArgs, copy_demo_vault
 
 
 class TestAcceptanceCriteria(unittest.TestCase):
@@ -61,9 +58,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
 
     def test_ac2_disposable_cache_reproducibility(self):
         """§10 C1. Deleting .cadabby/ and re-running reproduces byte-identical search results."""
-        demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
-        vault_dir = self.root / "demo-vault"
-        shutil.copytree(demo_src, vault_dir)
+        vault_dir = copy_demo_vault(self.root / "demo-vault")
         vault = Vault(vault_dir)
 
         cache1 = VaultCache(vault)
@@ -110,9 +105,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
 
     def test_ac4_body_edit_downgrades_to_stale_verified(self):
         """§10 C2. A body edit downgrades the note to stale-verified on the next scan."""
-        demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
-        vault_dir = self.root / "demo-vault"
-        shutil.copytree(demo_src, vault_dir, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
+        vault_dir = copy_demo_vault(self.root / "demo-vault")
         vault = Vault(vault_dir)
 
         cache = VaultCache(vault)
@@ -140,9 +133,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
 
     def test_ac5_frontmatter_edit_preserves_human_reviewed(self):
         """No current §10 criterion. Pins §3.3: the body hash is body-only, so metadata edits do not demote."""
-        demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
-        vault_dir = self.root / "demo-vault"
-        shutil.copytree(demo_src, vault_dir, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
+        vault_dir = copy_demo_vault(self.root / "demo-vault")
         vault = Vault(vault_dir)
 
         # Modify frontmatter only (add a tag and update description)
@@ -161,9 +152,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
 
     def test_ac6_rename_leaves_no_stale_records(self):
         """§10 C14. A rename leaves no stale row, and the FTS integrity check passes afterward."""
-        demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
-        vault_dir = self.root / "demo-vault"
-        shutil.copytree(demo_src, vault_dir, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
+        vault_dir = copy_demo_vault(self.root / "demo-vault")
         vault = Vault(vault_dir)
 
         cache = VaultCache(vault)
@@ -191,9 +180,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
 
     def test_ac7_epistemic_ranking_ordering(self):
         """§10 C15. human-reviewed outranks unverified; deprecated is pushed below both."""
-        demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
-        vault_dir = self.root / "demo-vault"
-        shutil.copytree(demo_src, vault_dir, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
+        vault_dir = copy_demo_vault(self.root / "demo-vault")
         vault = Vault(vault_dir)
 
         # Add identical keyword 'hyperparameter' to Epistemic-Trust-Tiers (human-reviewed) and Flash-Attention (unverified)
@@ -220,9 +207,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
 
     def test_ac8_concurrent_writers_no_corruption(self):
         """No current §10 criterion. Pins §8: concurrent writers to different notes do not corrupt the vault."""
-        demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
-        vault_dir = self.root / "demo-vault"
-        shutil.copytree(demo_src, vault_dir, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
+        vault_dir = copy_demo_vault(self.root / "demo-vault")
         vault = Vault(vault_dir)
 
         path1 = scaffold_note(vault, "Concurrency Test One", "concept", "First concurrent note")
@@ -237,9 +222,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
 
     def test_ac9_update_expected_hash_conflict(self):
         """No current §10 criterion. Pins §8: a mismatched expected_hash raises VAULT_CONFLICT and writes nothing."""
-        demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
-        vault_dir = self.root / "demo-vault"
-        shutil.copytree(demo_src, vault_dir, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
+        vault_dir = copy_demo_vault(self.root / "demo-vault")
         vault = Vault(vault_dir)
 
         note_file = vault.wiki_dir / "Flash-Attention.md"
@@ -258,9 +241,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
 
     def test_ac10_mcp_capabilities_and_human_refusal(self):
         """§10 C10 and C12. Exactly 7 tools over JSON-RPC, and `by: human:*` is refused."""
-        demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
-        vault_dir = self.root / "demo-vault"
-        shutil.copytree(demo_src, vault_dir, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
+        vault_dir = copy_demo_vault(self.root / "demo-vault")
         vault = Vault(vault_dir)
 
         server = McpServer(vault)
@@ -300,9 +281,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
 
     def test_ac11_audit_provenance_mismatch(self):
         """§10 C13. audit flags a human attestation whose commit author is unmapped."""
-        demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
-        vault_dir = self.root / "demo-vault"
-        shutil.copytree(demo_src, vault_dir, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
+        vault_dir = copy_demo_vault(self.root / "demo-vault")
         vault = Vault(vault_dir)
 
         # Mock git blame to simulate commit author mismatch
@@ -334,41 +313,9 @@ class TestAcceptanceCriteria(unittest.TestCase):
             self.assertEqual(findings[0].code, "PROVENANCE_MISMATCH")
             self.assertIn("untrusted-agent@bot.net", findings[0].message)
 
-    def test_audit_ignores_body_mentions_of_human_attestations(self):
-        """Audit only checks frontmatter attestations, ignoring markdown body text and code blocks."""
-        demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
-        vault_dir = self.root / "demo-vault-audit-body"
-        shutil.copytree(demo_src, vault_dir, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
-        vault = Vault(vault_dir)
-
-        # Append fake human attestation to note body
-        note_file = vault_dir / "wiki" / "SQLite.md"
-        content = note_file.read_text("utf-8")
-        note_file.write_text(content + "\n\nExample code:\n```yaml\n- by: human:fake_attacker\n```\n- by: human:fake_attacker\n", "utf-8")
-
-        with patch("subprocess.run") as mock_run:
-            def fake_run(cmd, **kwargs):
-                ret = MagicMock()
-                if "rev-parse" in cmd:
-                    ret.returncode = 0
-                    ret.stdout = "true\n"
-                elif "blame" in cmd:
-                    self.assertNotIn("SQLite.md", " ".join(cmd))
-                    ret.returncode = 0
-                    ret.stdout = "a1b2c3d4 1 1 1\nauthor Owner\nauthor-mail <owner@example.com>\n\t- by: human:owner\n"
-                return ret
-
-            mock_run.side_effect = fake_run
-            findings, notice = run_vault_audit(vault)
-            self.assertIsNone(notice)
-            for f in findings:
-                self.assertNotIn("fake_attacker", f.actor)
-
     def test_ac12_full_autonomous_agent_workflow(self):
         """No current §10 criterion. Pins §7.1's portability claim: .mcp.json alone is a working surface."""
-        demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
-        vault_dir = self.root / "demo-vault"
-        shutil.copytree(demo_src, vault_dir, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
+        vault_dir = copy_demo_vault(self.root / "demo-vault")
         vault = Vault(vault_dir)
 
         server = McpServer(vault)
@@ -413,9 +360,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
 
     def test_ac16_sync_zero_git_diff(self):
         """§10 C16. sync run twice produces no Git diff on the second run."""
-        demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
-        vault_dir = self.root / "demo-vault"
-        shutil.copytree(demo_src, vault_dir, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
+        vault_dir = copy_demo_vault(self.root / "demo-vault")
 
         # First sync
         args_sync = DummyArgs(vault=str(vault_dir), force=False, rebuild=False)

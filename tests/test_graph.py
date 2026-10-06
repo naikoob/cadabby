@@ -7,7 +7,13 @@ import unittest
 from pathlib import Path
 
 from cadabby.cache import VaultCache
-from cadabby.graph import get_note_graph
+from cadabby.graph import (
+    LinkTargetIndex,
+    extract_wikilinks,
+    get_note_graph,
+    resolve_link_target,
+    strip_code_spans,
+)
 from cadabby.vault import Vault
 
 
@@ -90,6 +96,119 @@ class TestGraphAnalytics(unittest.TestCase):
         bib = {bc["cid"]: bc["count"] for bc in graph_a["bibliographic_coupling"]}
         self.assertIn("wiki/concepts/NoteD", bib)
         self.assertEqual(bib["wiki/concepts/NoteD"], 2)
+
+
+class TestExtractWikilinks(unittest.TestCase):
+    def test_bare_wikilink(self):
+        text = "This note references [[Machine-Learning]] directly."
+        links = extract_wikilinks(text)
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0].target_raw, "Machine-Learning")
+        self.assertEqual(links[0].target_stem, "Machine-Learning")
+        self.assertIsNone(links[0].anchor)
+        self.assertIsNone(links[0].alias)
+        self.assertEqual(links[0].occurrences, 1)
+
+    def test_wikilink_with_anchor(self):
+        text = "Jump to [[Storage-Architecture#B-Tree-Indexes]]."
+        links = extract_wikilinks(text)
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0].target_raw, "Storage-Architecture#B-Tree-Indexes")
+        self.assertEqual(links[0].target_stem, "Storage-Architecture")
+        self.assertEqual(links[0].anchor, "B-Tree-Indexes")
+        self.assertIsNone(links[0].alias)
+
+    def test_wikilink_with_alias(self):
+        text = "Check out [[Epistemic-Trust-Tiers|Trust Model]]."
+        links = extract_wikilinks(text)
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0].target_raw, "Epistemic-Trust-Tiers")
+        self.assertEqual(links[0].target_stem, "Epistemic-Trust-Tiers")
+        self.assertIsNone(links[0].anchor)
+        self.assertEqual(links[0].alias, "Trust Model")
+
+    def test_wikilink_with_anchor_and_alias(self):
+        text = "Detailed in [[Storage-Architecture#LSM-Trees|Log-Structured Merge Trees]]."
+        links = extract_wikilinks(text)
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0].target_raw, "Storage-Architecture#LSM-Trees")
+        self.assertEqual(links[0].target_stem, "Storage-Architecture")
+        self.assertEqual(links[0].anchor, "LSM-Trees")
+        self.assertEqual(links[0].alias, "Log-Structured Merge Trees")
+
+    def test_multiple_occurrences_increment_count(self):
+        text = (
+            "First mention of [[SQLite]].\n"
+            "Some intermediate discussion.\n"
+            "Second mention of [[SQLite]] again.\n"
+            "Third mention of [[SQLite]]."
+        )
+        links = extract_wikilinks(text)
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0].target_raw, "SQLite")
+        self.assertEqual(links[0].occurrences, 3)
+
+    def test_code_spans_and_fences_ignored(self):
+        text = (
+            "Real link to [[Real-Note]].\n\n"
+            "Inline code: `[[NotALink]]` should be ignored.\n\n"
+            "Fenced code block:\n"
+            "```markdown\n"
+            "[[FencedNote]] is not a real link.\n"
+            "```\n\n"
+            "Another real link to [[Another-Note]]."
+        )
+        links = extract_wikilinks(text)
+        stems = [l.target_stem for l in links]
+        self.assertEqual(stems, ["Real-Note", "Another-Note"])
+
+    def test_strip_code_spans_utility(self):
+        raw = "Text `code block` more text ```fenced``` end."
+        clean = strip_code_spans(raw)
+        self.assertNotIn("`", clean)
+        self.assertIn("Text", clean)
+        self.assertIn("more text", clean)
+        self.assertIn("end.", clean)
+
+    def test_subpath_wikilinks(self):
+        text = "Links to [[customers/acme/README]] and [[projects/apollo/rfc-001#Design]]."
+        links = extract_wikilinks(text)
+        self.assertEqual(len(links), 2)
+        self.assertEqual(links[0].target_stem, "customers/acme/README")
+        self.assertEqual(links[1].target_stem, "projects/apollo/rfc-001")
+        self.assertEqual(links[1].anchor, "Design")
+
+
+class TestLinkTargetIndex(unittest.TestCase):
+    def test_link_target_index(self):
+        cids = [
+            "wiki/concepts/Epistemic-Trust-Tiers",
+            "wiki/entities/SQLite",
+            "wiki/guides/Getting-Started",
+            "raw/vaswani2017.pdf",
+        ]
+        resolver = LinkTargetIndex(cids)
+
+        # 1. Exact match
+        self.assertEqual(resolver.resolve("wiki/concepts/Epistemic-Trust-Tiers"), "wiki/concepts/Epistemic-Trust-Tiers")
+        self.assertEqual(resolver.resolve("raw/vaswani2017.pdf"), "raw/vaswani2017.pdf")
+
+        # 2. Match without "wiki/" prefix
+        self.assertEqual(resolver.resolve("concepts/Epistemic-Trust-Tiers"), "wiki/concepts/Epistemic-Trust-Tiers")
+        self.assertEqual(resolver.resolve("entities/SQLite"), "wiki/entities/SQLite")
+
+        # 3. Path suffix match
+        self.assertEqual(resolver.resolve("guides/Getting-Started"), "wiki/guides/Getting-Started")
+
+        # 4. Note stem match
+        self.assertEqual(resolver.resolve("Epistemic-Trust-Tiers"), "wiki/concepts/Epistemic-Trust-Tiers")
+        self.assertEqual(resolver.resolve("SQLite"), "wiki/entities/SQLite")
+
+        # 5. Non-existent target returns None
+        self.assertIsNone(resolver.resolve("NonExistentNote"))
+
+        # Verify resolve_link_target backward-compatible wrapper
+        self.assertEqual(resolve_link_target("SQLite", cids), "wiki/entities/SQLite")
 
 
 if __name__ == "__main__":

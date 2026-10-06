@@ -3,21 +3,19 @@
 from __future__ import annotations
 
 import re
-import shutil
 import tempfile
 import unittest
 from pathlib import Path
 
 from cadabby.lint import run_vault_lint
 from cadabby.vault import Vault
+from tests.helpers import copy_demo_vault
 
 
 class TestLint(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
-        self.vault_root = Path(self.tmp_dir.name) / "demo-vault"
-        demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
-        shutil.copytree(demo_src, self.vault_root, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
+        self.vault_root = copy_demo_vault(Path(self.tmp_dir.name) / "demo-vault")
         self.vault = Vault(self.vault_root)
 
     def tearDown(self):
@@ -254,9 +252,7 @@ class TestLintTaxonomyIsClosed(unittest.TestCase):
 
     def setUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
-        self.vault_root = Path(self.tmp_dir.name) / "demo-vault"
-        demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
-        shutil.copytree(demo_src, self.vault_root, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
+        self.vault_root = copy_demo_vault(Path(self.tmp_dir.name) / "demo-vault")
         self.vault = Vault(self.vault_root)
         self._seed_one_of_everything()
 
