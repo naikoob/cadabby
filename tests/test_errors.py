@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,6 +31,7 @@ from cadabby.errors import (
 from cadabby.frontmatter import FrontmatterParseError, FrontmatterSerializeError
 from cadabby.mcp import TOOLS, McpServer
 from cadabby.vault import Vault
+from tests.helpers import copy_demo_vault
 
 
 class TestClassification(unittest.TestCase):
@@ -150,9 +150,7 @@ class TestMCPErrorPayload(unittest.TestCase):
 
     def setUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
-        self.vault_root = Path(self.tmp_dir.name) / "demo-vault"
-        demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
-        shutil.copytree(demo_src, self.vault_root, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
+        self.vault_root = copy_demo_vault(Path(self.tmp_dir.name) / "demo-vault")
         self.server = McpServer(Vault(self.vault_root))
 
     def tearDown(self):

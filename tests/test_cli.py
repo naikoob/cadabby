@@ -6,7 +6,6 @@ import contextlib
 import io
 import json
 import os
-import shutil
 import tempfile
 import unittest
 import unittest.mock
@@ -27,10 +26,7 @@ from cadabby.cli import (
 from cadabby.installer import mcp_launch_argv
 
 
-class DummyArgs:
-    def __init__(self, **kwargs):
-        for k, v in kwargs.items():
-            setattr(self, k, v)
+from tests.helpers import DummyArgs, copy_demo_vault
 
 
 class TestCli(unittest.TestCase):
@@ -113,9 +109,7 @@ class TestCli(unittest.TestCase):
             self.assertEqual(data["mcpServers"]["cadabby"]["args"], expected)
 
     def test_cli_lifecycle_on_demo_vault(self):
-        demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
-        vault_root = self.dir / "demo-vault"
-        shutil.copytree(demo_src, vault_root, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
+        vault_root = copy_demo_vault(self.dir / "demo-vault")
 
         # 1. Sync
         args_sync = DummyArgs(vault=str(vault_root), force=False)

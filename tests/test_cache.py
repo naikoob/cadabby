@@ -13,15 +13,14 @@ from pathlib import Path
 from cadabby.cache import VaultCache, sanitize_fts5_query
 from cadabby.indexer import generate_index_markdown
 from cadabby.vault import Vault
+from tests.helpers import copy_demo_vault
 
 
 class TestVaultCache(unittest.TestCase):
     def setUp(self):
         # Create a temporary working copy of examples/demo-vault
         self.tmp_dir = tempfile.TemporaryDirectory()
-        self.vault_root = Path(self.tmp_dir.name) / "demo-vault"
-        demo_src = Path(__file__).resolve().parent.parent / "examples" / "demo-vault"
-        shutil.copytree(demo_src, self.vault_root, ignore=shutil.ignore_patterns(".cadabby", "*.pyc"))
+        self.vault_root = copy_demo_vault(Path(self.tmp_dir.name) / "demo-vault")
         self.vault = Vault(self.vault_root)
         self.cache = VaultCache(self.vault)
 
@@ -445,6 +444,103 @@ class TestRawSourceSearch(unittest.TestCase):
 
         self.assertEqual(self.cache.search("alpaca", domain="raw"), [])
         self.assertTrue(self.cache.check_fts_integrity())
+
+
+class TestVaultCacheRanking(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.vault_dir = Path(self.tmp.name) / "vault"
+        self.vault_dir.mkdir(parents=True, exist_ok=True)
+        self.vault = Vault(self.vault_dir)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_cache_scan_zero_change_skips_link_resolution(self):
+        note_a = self.vault.wiki_dir / "concepts" / "Note-A.md"
+        note_a.parent.mkdir(parents=True, exist_ok=True)
+        note_a.write_text(
+            "---\ntype: concept\ntitle: Note A\ndescription: Test\nstatus: active\n---\n# Note A\nLinks to [[Note-B]].\n",
+            "utf-8",
+        )
+
+        note_b = self.vault.wiki_dir / "concepts" / "Note-B.md"
+        note_b.write_text(
+            "---\ntype: concept\ntitle: Note B\ndescription: Test\nstatus: active\n---\n# Note B\nTarget.\n",
+            "utf-8",
+        )
+
+        with VaultCache(self.vault) as cache:
+            # First scan: populates DB and resolves links
+            ins, _, _, total = cache.scan()
+            self.assertEqual(ins, 2)
+            self.assertEqual(total, 2)
+            conn = cache.get_connection()
+            row = conn.execute("SELECT target_cid FROM links WHERE target_raw = 'Note-B';").fetchone()
+            self.assertEqual(row["target_cid"], "wiki/concepts/Note-B")
+
+            # Second scan: no changes on disk
+            ins2, upd2, deleted2, total2 = cache.scan()
+            self.assertEqual(ins2, 0)
+            self.assertEqual(upd2, 0)
+            self.assertEqual(deleted2, 0)
+            self.assertEqual(total2, 2)
+
+    def test_vault_cache_search_default_ranking_multipliers(self):
+        # Even with empty config, search applies default ranking multipliers without error
+        note = self.vault.wiki_dir / "concepts" / "SearchTest.md"
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text(
+            "---\ntype: concept\ntitle: Search Test\ndescription: Testing ranking\nstatus: active\n---\n# Search Test\nQuery target.\n",
+            "utf-8",
+        )
+        with VaultCache(self.vault) as cache:
+            results = cache.search("Query")
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].title, "Search Test")
+            self.assertGreater(results[0].score, 0.0)
+
+    def test_vault_cache_search_sanitized_ranking_cases(self):
+        # Even with custom malicious single quotes or non-numeric values in ranking config, search works
+        note = self.vault.wiki_dir / "concepts" / "SanitizeTest.md"
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text(
+            "---\ntype: concept\ntitle: Sanitize Test\ndescription: Testing ranking\nstatus: active\n---\n# Sanitize Test\nQuery target.\n",
+            "utf-8",
+        )
+        self.vault.config["ranking"] = {
+            "trust": {"malicious' OR 1=1 --": 2.0, "bad_num": "not_a_float"},
+            "status": {"active'; DROP TABLE notes; --": 1.5},
+        }
+        with VaultCache(self.vault) as cache:
+            cache.scan()
+            results = cache.search("Query")
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].title, "Sanitize Test")
+
+    def test_vault_cache_search_malformed_ranking_config(self):
+        # Non-finite, empty, null, and non-mapping ranking config must neither
+        # produce invalid SQL nor raise; search falls back to neutral multipliers.
+        note = self.vault.wiki_dir / "concepts" / "NonFiniteTest.md"
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text(
+            "---\ntype: concept\ntitle: Non Finite Test\ndescription: Testing ranking\nstatus: active\n---\n# Non Finite Test\nQuery target.\n",
+            "utf-8",
+        )
+        for ranking in (
+            {"trust": {"human-reviewed": 1e999}, "status": {"active": float("nan")}},
+            {"trust": {}, "status": {}},
+            {"trust": None, "status": None},
+            None,
+            "not-a-mapping",
+        ):
+            with self.subTest(ranking=ranking):
+                self.vault.config["ranking"] = ranking
+                with VaultCache(self.vault) as cache:
+                    cache.scan()
+                    results = cache.search("Query")
+                    self.assertEqual(len(results), 1)
+                    self.assertEqual(results[0].title, "Non Finite Test")
 
 
 if __name__ == "__main__":

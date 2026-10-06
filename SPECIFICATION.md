@@ -948,22 +948,26 @@ cadabby/
 │   └── demo-vault/             # Golden fixture: used by tests and the README
 │
 └── tests/
-    ├── test_primitives.py      # fsutil atomicity/locking, vault config, ranking config
+    ├── helpers.py              # Shared test fixtures, mock helpers, and demo-vault copy
+    ├── test_fsutil.py          # Atomic durability (tempfile + fsync), locks, O_APPEND ledger
+    ├── test_vault.py           # Vault root resolution (2.7), config deep merge, path/CID mapping
     ├── test_frontmatter.py     # Subset parse/write boundary, round-trip fidelity (3.2)
     ├── test_okf.py             # Body hashing, actor/timestamp validation, tier derivation (3.1, 3.3-3.4)
     ├── test_cache.py           # Scan, deletion reconciliation, FTS5 ranking sign & integrity
-    ├── test_graph.py           # Alias/anchor/path wikilink resolution, dead links
-    ├── test_indexer.py         # index.md gap report, MOC reachability, regeneration
+    ├── test_graph.py           # Alias/anchor/path wikilink resolution, dead links, target index
+    ├── test_indexer.py         # index.md gap report, MOC reachability, log rotation
     ├── test_lint.py            # Each gate's codes and severities
     ├── test_errors.py          # Code taxonomy, retryability, MCP payload, exit codes (5.4)
     ├── test_ops.py             # Scaffolding, attribution, conflict detection, atomicity
-    ├── test_domain.py          # Note entity and use cases driven through in-memory adapters
+    ├── test_audit.py           # Git blame provenance audit for human:* attestations (3.5)
+    ├── test_adapters.py        # Driven secondary storage adapters (DiskNoteStorage, FileLedger) (9.1)
+    ├── test_domain_model.py    # Note entity and use cases driven through in-memory adapters
     ├── test_domains.py         # Multi-domain discovery, cache, linting, ops, MCP resources
     ├── test_templates.py       # Template folder exclusion, scaffold from template, starters (7.5)
     ├── test_mcp.py             # Handshake, tool execution, human:* refusal
     ├── test_cli.py             # Command surface, flags, JSON output
     ├── test_installer.py       # init scaffolding, idempotency, merge, uninstall, dry-run
-    └── test_acceptance.py      # The §10 criteria, including the Git provenance audit (3.5)
+    └── test_acceptance.py      # The §10 criteria and TestAcceptanceTraceability
 ```
 
 **Assets live inside the package, not beside it.** `src/cadabby/assets/` is the single on-disk home for the vault template, the canonical persona runbooks, the command shims, and the assembled Antigravity plugin (§7.1); `cadabby init` copies from it and the plugin resolves out of it, so neither keeps a second copy. Its position *inside* `src/cadabby/` is a packaging requirement rather than a filing preference: anything outside the package directory is absent from the built wheel, which would leave `init` and the plugin working from a source checkout and broken from `pip install`. The same reasoning places the plugin under `assets/plugins/` instead of at the repository root (§7.2).
