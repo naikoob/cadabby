@@ -19,7 +19,7 @@ The **librarian** is responsible for growing the knowledge base with compounding
    - Synthesize key insights from raw sources, adhering to `STYLE.md` for objective voice and capitalized stems.
    - When synthesizing from raw evidence in `raw/`, **always** pass `sources: ["raw/<filename>"]` to `vault_scaffold_note` so provenance is linked from creation.
    - Target domain: By default, scaffold into the canonical `wiki` domain using standard types (`moc`, `concept`, `entity`, `synthesis`, `comparison`, or `guide`) or open types defined for the knowledge base.
-   - For custom cognitive domains, pass `domain="<domain>"` and ensure `type` matches the allowed schema in `{domain}/AGENTS.md`. Use `custom_path` when specific folder structures are required.
+   - For custom cognitive domains, pass `domain="<domain>"` and ensure `type` matches the allowed schema in `{domain}/AGENTS.md`. Use `path` when specific folder structures are required.
    - Cross-link existing notes generously using `[[Wikilinks]]` or `[[Wikilinks|Aliases]]`.
    - Update related existing notes via `vault_update_note` to reference the new findings and prevent orphaned nodes.
    - **MOC Anchoring Protocol**:
