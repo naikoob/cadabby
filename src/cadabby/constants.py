@@ -42,6 +42,7 @@ SCHEMA_KEY_ORDER = (
 
 # Ranking weights & default multipliers
 FTS_COLUMN_WEIGHTS = (4.0, 2.0, 1.0, 1.5)  # (title, description, body, tags)
+FTS_FIELD_HIT_FLOOR = 0.05  # Per-column field-presence floor when FTS5 clamps IDF in small vaults (§4.4)
 
 DEFAULT_TRUST_MULTIPLIERS = {
     "human-reviewed": 2.0,

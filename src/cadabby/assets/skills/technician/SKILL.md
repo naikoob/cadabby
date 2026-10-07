@@ -17,7 +17,7 @@ The **technician** is responsible for vault structural integrity, cache synchron
 
    ### Gate 1: Schema Integrity
    - `FRONTMATTER_UNPARSEABLE`: Repair YAML formatting delimiters or syntax errors.
-   - `FIELD_MISSING`: Use `vault_update_note(patch_frontmatter={...})` to supply missing required OKF fields (`type`, `title`, `description`, `status`).
+   - `FIELD_MISSING`: Use `vault_update_note(patch_frontmatter={...})` to supply missing required OKF fields (`type`, `title`, `description`, `status`). Derive a missing `description` strictly from the note's existing body text; if the body is empty or a template stub, report the finding to the user rather than inventing a speculative description.
    - `ENUM_INVALID`: Correct invalid `type` or `status` values via `vault_update_note` to adhere to canonical types or the domain's `{domain}/AGENTS.md` `allowed_types`.
    - `ACTOR_MALFORMED`: Correct malformed verification `by:` stamps to valid `agent:<id>` format or clear invalid verification blocks.
    - `TIMESTAMP_INVALID`: Correct date-time strings in frontmatter to standard ISO-8601 formatting.
@@ -26,16 +26,17 @@ The **technician** is responsible for vault structural integrity, cache synchron
    - `WIKI_NESTING_DISALLOWED`: Flatten nested notes inside `wiki/` by moving them directly to `wiki/{stem}.md`, then anchor each one into the MOC it belongs to so the structure the folder was carrying survives editorially. The wiki domain must be completely flat; subdirectories are disallowed. If the nesting was deliberate and the user needs it, propose a top-level cognitive domain instead of repeatedly flattening their work.
 
    ### Gate 3: Wikilink Integrity
-   - `LINK_DEAD`: Use `vault_search` to find renamed stems and repoint the link via `vault_update_note`; scaffold the missing target only under the limits below; otherwise prune the link.
+   - `LINK_DEAD`: Use `vault_search` to find renamed stems and repoint the link with a `vault_update_note` `replace_text` edit (one call for every fix in the same note); scaffold the missing target only under the limits below; otherwise prune the link.
      - *Raw sources are never link targets*: if the dead link points into `raw/`, do not scaffold anything. Replace it with a Markdown link relative to the citing note (`[Label](../raw/file.md)`), or delete it when frontmatter `sources:` already records the provenance.
      - *Never scaffold a note into existence to settle a claim*: a note whose only reason to exist is the link that broke is not a repair, it is a fabrication. Before scaffolding, confirm the subject is already attested somewhere — in `raw/`, in another note, or by the user. This bites hardest where a link asserts a product capability, architectural guarantee, SLA, roadmap item, or legal provision: check `raw/` first, and if the evidence is absent or contradicts the claim, remove the assertion and tell the team the note promised something the vault cannot support. Silencing the linter is never worth minting the claim.
-   - `ANCHOR_MISSING`: Check headings in the target note; update the `[[Target#Heading]]` anchor or add the missing section to the target note.
+   - `ANCHOR_MISSING`: Inspect existing headings in the target note and update `[[Target#Heading]]` to an existing heading or strip the `#Heading` fragment to `[[Target]]`. Never add a fabricated section to the target note to satisfy a broken anchor (which invents prose and demotes verified notes).
 
    ### Gate 4: Source Grounding
    - `SOURCE_MISSING`: Ensure referenced source file exists in `raw/`; update the frontmatter `sources` list via `vault_update_note(patch_frontmatter={"sources": [...]})` if files were moved.
+  - `RAW_LINK_BROKEN`: An in-body Markdown citation does not resolve to a `raw/` file, almost always from a wrong `../` count. Apply the path the finding suggests with a `replace_text` edit. With no suggestion, remove the link if `sources:` already records the provenance, or ask the user. Never create, rename, or move files in `raw/` to make a link resolve.
 
    ### Gate 5: Graph Connectivity
-   - `NOTE_ORPHAN`: Query related notes with `vault_search` and add incoming `[[Wikilinks]]` using `vault_update_note` so every note is reachable from the graph.
+   - `NOTE_ORPHAN`: Query related notes with `vault_search` and add incoming `[[Wikilinks]]` using `vault_update_note` so every note is reachable from the graph. Check the host note's `trust_tier` first: never edit the body of a `human-reviewed` note without user confirmation (prefer linking from an MOC or non-`human-reviewed` note, or ask the user).
 
    ### Gate 6: Epistemic & Verification Integrity
    - `VERIFICATION_STALE`: Read the note's `verified:` list before acting, because who attested last decides what the repair is.

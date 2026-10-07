@@ -80,6 +80,40 @@ class TestAcceptanceCriteria(unittest.TestCase):
             self.assertEqual(r1.cid, r2.cid)
             self.assertAlmostEqual(r1.score, r2.score, places=4)
 
+    def test_c1_multi_domain_tiebreak_reproducibility(self):
+        """§10 C1. Equal-scoring notes across multiple domains tie-break deterministically by cid ASC."""
+        vault_dir = self.root / "multi-domain-tiebreak"
+        for dom in ("wiki", "customers", "projects"):
+            (vault_dir / dom).mkdir(parents=True, exist_ok=True)
+        (vault_dir / ".cadabby.json").write_text('{"vault_name": "Tiebreak Vault"}\n', "utf-8")
+
+        note_template = (
+            "---\n"
+            "type: concept\n"
+            "title: Shared Tie Title\n"
+            "description: Identical description for tiebreak\n"
+            "status: active\n"
+            "---\n"
+            "# Shared Tie Title\n\n"
+            "Identical body text containing quasar token.\n"
+        )
+        # Write in reverse alphabetical domain order to ensure rowid order != cid ASC order
+        (vault_dir / "wiki" / "TieNote.md").write_text(note_template, "utf-8")
+        (vault_dir / "projects" / "TieNote.md").write_text(note_template, "utf-8")
+        (vault_dir / "customers" / "TieNote.md").write_text(note_template, "utf-8")
+
+        vault = Vault(vault_dir)
+        with VaultCache(vault) as cache1:
+            hits1 = [r.cid for r in cache1.search("quasar")]
+
+        self.assertEqual(hits1, ["customers/TieNote", "projects/TieNote", "wiki/TieNote"])
+
+        shutil.rmtree(vault.dot_cadabby_dir)
+        with VaultCache(vault) as cache2:
+            hits2 = [r.cid for r in cache2.search("quasar")]
+
+        self.assertEqual(hits1, hits2)
+
     def test_ac3_restricted_yaml_grammar(self):
         """§10 C3 (parser half). Accepts §3.2 constructs; rejects tabs, unquoted colons, multiline scalars."""
         # Rejects tab
@@ -661,6 +695,42 @@ class TestHarnessShimsStayThin(unittest.TestCase):
                     "A shim this long is carrying behavior that belongs in .agents/skills/ (§7.4)",
                 )
                 self.assertRegex(body, r"\.agents/skills/|AGENTS\.md", "A shim must delegate to vault content")
+
+    def test_epistemic_anti_hallucination_guardrails_in_shipped_assets(self):
+        """§6.1, §6.2, §7.1. Shipped agent instructions enforce anti-hallucination invariants."""
+        agents_md = (self.ASSETS / "vault" / "AGENTS.md").read_text("utf-8")
+        style_md = (self.ASSETS / "vault" / "STYLE.md").read_text("utf-8")
+        librarian = (self.ASSETS / "skills" / "librarian" / "SKILL.md").read_text("utf-8")
+        technician = (self.ASSETS / "skills" / "technician" / "SKILL.md").read_text("utf-8")
+
+        # 1. Technician must never instruct adding fabricated sections to fix ANCHOR_MISSING
+        self.assertNotIn("add the missing section to the target note", technician)
+        self.assertIn("Never add a fabricated section to the target note", technician)
+        # 2. Technician must derive FIELD_MISSING descriptions strictly from existing body text
+        self.assertIn("Derive a missing `description` strictly from the note's existing body text", technician)
+        # 3. Vault constitution and librarian runbook enforce closed-world grounding,
+        #    mandatory pre-verification audit, no transitive trust laundering, and
+        #    protection of human-reviewed note bodies.
+        self.assertIn("Closed-World Source Grounding", agents_md)
+        self.assertIn("No rubber-stamp self-verification", agents_md)
+        self.assertIn("No transitive trust laundering", agents_md)
+        self.assertIn("Protect `human-reviewed` notes before body edits", agents_md)
+        self.assertIn("Epistemic attribution in Q&A", agents_md)
+        self.assertIn("Epistemic Honesty Over Completeness", style_md)
+        self.assertIn("Mandatory pre-verification audit", librarian)
+        self.assertIn("When to leave notes `unverified`", librarian)
+        self.assertIn("Protect `human-reviewed` notes", librarian)
+        # 4. CE pair-work simulation findings: raw-link depth, no pty-forged
+        #    human sign-off, tool-only body edits, and an honest offline mode.
+        plugin_skill = (self.ASSETS / "plugins" / "cadabby" / "skills" / "cadabby-wiki" / "SKILL.md").read_text("utf-8")
+        self.assertIn("one `../` per folder between the note and the vault root", agents_md)
+        self.assertIn("Never run `cadabby verify --human` yourself", agents_md)
+        self.assertIn("It is the only way a note body changes", agents_md)
+        self.assertIn("When the MCP server is unavailable", agents_md)
+        self.assertIn("`RAW_LINK_BROKEN`", technician)
+        self.assertIn("Never create, rename, or move files in `raw/`", technician)
+        self.assertIn("one call's `edits` list", librarian)
+        self.assertIn("No Server, No Trust Claims", plugin_skill)
 
 
 class TestSpecReadingMap(unittest.TestCase):

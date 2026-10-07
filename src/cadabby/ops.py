@@ -127,6 +127,33 @@ class ScaffoldNoteUseCase:
         return note
 
 
+EDIT_OPS: dict[str, tuple[str, ...]] = {
+    "replace_text": ("old", "new"),
+    "replace_section": ("heading", "body"),
+    "append_section": ("heading", "body"),
+}
+
+
+def _validate_edits(edits: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Check every edit's shape before any is applied, so a bad one writes nothing."""
+    if not isinstance(edits, list):
+        raise ValueError("edits must be a list of {op, ...} objects")
+    clean: list[dict[str, str]] = []
+    for i, edit in enumerate(edits):
+        if not isinstance(edit, dict):
+            raise ValueError(f"edits[{i}] must be an object")
+        op = edit.get("op")
+        if op not in EDIT_OPS:
+            raise ValueError(f"edits[{i}].op must be one of {sorted(EDIT_OPS)}, got {op!r}")
+        required = EDIT_OPS[op]
+        # `body`/`new` may legitimately be empty strings; only absence is an error.
+        missing = [k for k in required if not isinstance(edit.get(k), str)]
+        if missing:
+            raise ValueError(f"edits[{i}] ({op}) requires string field(s): {', '.join(missing)}")
+        clean.append({"op": op, **{k: edit[k] for k in required}})
+    return clean
+
+
 class UpdateNoteUseCase:
     """Driving use case for updating note frontmatter or sections non-destructively (§8.1)."""
 
@@ -142,7 +169,19 @@ class UpdateNoteUseCase:
         replace_section: tuple[str, str] | None = None,
         expected_hash: str | None = None,
         actor: str = "agent:unknown",
+        edits: list[dict[str, Any]] | None = None,
     ) -> Note:
+        # Legacy single-operation parameters keep their historical order
+        # (replace, then append) and run before any `edits`.
+        ops: list[dict[str, Any]] = []
+        if replace_section:
+            ops.append({"op": "replace_section", "heading": replace_section[0], "body": replace_section[1]})
+        if append_section:
+            ops.append({"op": "append_section", "heading": append_section[0], "body": append_section[1]})
+        if edits is not None:
+            ops.extend(edits)
+        validated = _validate_edits(ops)
+
         note = self.storage.get_note(cid_or_path)
         if note is None:
             rel = cid_to_path(cid_or_path)
@@ -151,16 +190,20 @@ class UpdateNoteUseCase:
         if frontmatter_patch:
             note.patch_frontmatter(frontmatter_patch)
 
-        if replace_section:
-            heading, new_section_content = replace_section
-            note.replace_section(heading, new_section_content)
+        # Every edit is applied in memory first; a failure raises before
+        # save_note, so the file is either fully updated or untouched.
+        for edit in validated:
+            if edit["op"] == "replace_text":
+                note.replace_text(edit["old"], edit["new"])
+            elif edit["op"] == "replace_section":
+                note.replace_section(edit["heading"], edit["body"])
+            else:
+                note.append_section(edit["heading"], edit["body"])
 
-        if append_section:
-            heading, section_content = append_section
-            note.append_section(heading, section_content)
-
-        self.storage.save_note(note, expected_hash=expected_hash)
-        self.ledger.append(f"Updated {note.rel_path}", actor=actor)
+        effective_expected = expected_hash if expected_hash is not None else note.source_hash
+        self.storage.save_note(note, expected_hash=effective_expected)
+        suffix = f" ({len(validated)} edits)" if len(validated) > 1 else ""
+        self.ledger.append(f"Updated {note.rel_path}{suffix}", actor=actor)
         return note
 
 
@@ -195,7 +238,7 @@ class VerifyNoteUseCase:
         attestation, new_tier, already_verified = note.add_attestation(actor=actor, method=method, at_iso=at_iso)
 
         if not already_verified:
-            self.storage.save_note(note)
+            self.storage.save_note(note, expected_hash=note.source_hash)
             self.ledger.append(f"Verified {note.rel_path} ({actor}) -> {new_tier}", actor=actor)
 
         return VerificationResult(
@@ -400,8 +443,9 @@ def update_note(
     actor: str = "agent:unknown",
     storage: NoteStoragePort | None = None,
     ledger: LedgerPort | None = None,
+    edits: list[dict[str, Any]] | None = None,
 ) -> Path:
-    """Non-destructively update note frontmatter or content sections."""
+    """Non-destructively update note frontmatter, sections, or exact body text."""
     active_storage, active_ledger = _resolve_adapters(vault, storage, ledger)
     uc = UpdateNoteUseCase(active_storage, active_ledger)
     note = uc.execute(
@@ -411,6 +455,7 @@ def update_note(
         replace_section=replace_section,
         expected_hash=expected_hash,
         actor=actor,
+        edits=edits,
     )
     return vault.abs_path(note.rel_path)
 
@@ -452,9 +497,9 @@ def ground_notes(
     """Retrieve full content and 1-hop graph neighborhood for the specified CIDs."""
     active_storage, _ = _resolve_adapters(vault, storage)
     if cache is None:
-        active_cache = VaultCache(vault)
-        active_cache.scan()
-    else:
-        active_cache = cache
-    uc = GroundNotesUseCase(vault_or_storage=active_storage, cache=active_cache, vault=vault)
+        with VaultCache(vault) as active_cache:
+            active_cache.scan()
+            uc = GroundNotesUseCase(vault_or_storage=active_storage, cache=active_cache, vault=vault)
+            return uc.execute(cids=cids, budget_tokens=budget_tokens)
+    uc = GroundNotesUseCase(vault_or_storage=active_storage, cache=cache, vault=vault)
     return uc.execute(cids=cids, budget_tokens=budget_tokens)

@@ -5,19 +5,26 @@ Conforms strictly to Cadabby Technical Specification §6.3.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import unquote
 
 from cadabby.cache import VaultCache
 from cadabby.constants import (
+    DIR_RAW,
     DIR_WIKI,
     NOTE_STATUSES,
     REQUIRED_FRONTMATTER_FIELDS,
 )
 from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter
+from cadabby.graph import strip_code_spans
 from cadabby.okf import (
     compute_body_hash,
+    derive_trust_tier,
+    is_actor_human,
     is_canonical_tag,
     is_valid_actor,
     is_valid_timestamp,
@@ -59,6 +66,59 @@ def run_vault_lint(vault: Vault, cache: VaultCache | None = None) -> list[LintFi
         return _run_vault_lint_impl(vault, cache)
     with VaultCache(vault) as local_cache:
         return _run_vault_lint_impl(vault, local_cache)
+
+
+# Inline Markdown link, not an image embed: [label](target "optional title").
+RE_MD_LINK = re.compile(r"(?<!!)\[[^\]\n]*\]\(\s*<?([^)\s>]+)>?(?:\s+\"[^\"\n]*\")?\s*\)")
+RE_URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:")
+
+
+def _raw_link_findings(vault: Vault, notes_by_cid: dict[str, dict[str, Any]]) -> list[LintFinding]:
+    """Gate 4: relative Markdown links into raw/ must resolve to a raw/ file (§6.3).
+
+    AGENTS.md tells agents to cite raw evidence in-body with a Markdown link
+    relative to the citing note. Those links never reach gate 3, which only
+    sees wikilinks, so a link with one `../` too many passed lint while the
+    citation a reader clicks was dead. Only links whose path names a `raw`
+    segment are checked: other relative links are outside provenance.
+    """
+    raw_root = vault.abs_path(DIR_RAW).resolve()
+    findings: list[LintFinding] = []
+    for row in notes_by_cid.values():
+        rel_path = row["rel_path"]
+        body = strip_code_spans(row.get("body") or "")
+        note_dir = vault.abs_path(rel_path).parent
+        seen: set[str] = set()
+        for match in RE_MD_LINK.finditer(body):
+            target = match.group(1)
+            if target in seen or target.startswith(("/", "#")) or RE_URL_SCHEME.match(target):
+                continue
+            seen.add(target)
+            path_part = unquote(target.split("#", 1)[0])
+            parts = PurePosixPath(path_part).parts
+            if DIR_RAW not in parts:
+                continue
+            resolved = (note_dir / path_part).resolve()
+            if resolved.is_file() and resolved.is_relative_to(raw_root):
+                continue
+            # Suggest the path that would work: everything after the last `raw`
+            # segment, re-rooted at raw/ and made relative to the note's folder.
+            tail = parts[len(parts) - 1 - parts[::-1].index(DIR_RAW) + 1 :]
+            candidate = raw_root.joinpath(*tail) if tail else None
+            hint = ""
+            if candidate is not None and candidate.is_file():
+                suggestion = Path(os.path.relpath(candidate, note_dir)).as_posix()
+                hint = f"; did you mean '{suggestion}'?"
+            findings.append(
+                LintFinding(
+                    code="RAW_LINK_BROKEN",
+                    severity="error",
+                    rel_path=rel_path,
+                    line=None,
+                    message=f"Markdown link '{target}' does not resolve to a file in raw/{hint}",
+                )
+            )
+    return findings
 
 
 def _run_vault_lint_impl(vault: Vault, cache: VaultCache) -> list[LintFinding]:
@@ -267,6 +327,8 @@ def _run_vault_lint_impl(vault: Vault, cache: VaultCache) -> list[LintFinding]:
         # --- GATE 6: Verification Integrity ---
         current_body_hash = compute_body_hash(body)
         if isinstance(verified_entries, list):
+            tier = derive_trust_tier(verified_entries, current_body_hash)
+            warned_stale_tiers: set[str] = set()
             for v_entry in verified_entries:
                 if not isinstance(v_entry, dict):
                     continue
@@ -295,15 +357,22 @@ def _run_vault_lint_impl(vault: Vault, cache: VaultCache) -> list[LintFinding]:
                         )
                     )
                 elif of_hash != current_body_hash:
-                    findings.append(
-                        LintFinding(
-                            code="VERIFICATION_STALE",
-                            severity="warning",
-                            rel_path=rel_path,
-                            line=None,
-                            message=f"Verification entry by '{actor}' is stale (hash drifted from {of_hash[:16]}...)",
-                        )
+                    actor_is_human = isinstance(actor, str) and is_actor_human(actor)
+                    superseded = tier == "human-reviewed" or (
+                        tier == "machine-confirmed" and not actor_is_human
                     )
+                    stale_bucket = "human" if actor_is_human else "machine"
+                    if not superseded and stale_bucket not in warned_stale_tiers:
+                        warned_stale_tiers.add(stale_bucket)
+                        findings.append(
+                            LintFinding(
+                                code="VERIFICATION_STALE",
+                                severity="warning",
+                                rel_path=rel_path,
+                                line=None,
+                                message=f"Verification entry by '{actor}' is stale (hash drifted from {of_hash[:16]}...)",
+                            )
+                        )
 
     # --- GATE 3: Link Consistency ---
     cur = conn.execute(
@@ -333,13 +402,16 @@ def _run_vault_lint_impl(vault: Vault, cache: VaultCache) -> list[LintFinding]:
             # Check anchor against headings in target note
             target_note = notes_by_cid.get(target_cid)
             if target_note:
-                target_body = target_note["body"] or ""
+                target_body = strip_code_spans(target_note["body"] or "")
                 # Search for # Anchor or ## Anchor etc.
-                anchor_slug = anchor.lower().replace("-", " ")
+                anchor_norm = re.sub(r"[\s-]+", " ", anchor.strip().lower())
                 headings = re.findall(r"^#{1,6}\s+(.+)$", target_body, flags=re.MULTILINE)
-                normalized_headings = [h.strip().lower() for h in headings]
+                normalized_headings = [re.sub(r"[\s-]+", " ", h.strip().lower()) for h in headings]
 
-                if not any(anchor.lower() == h or anchor_slug == h for h in normalized_headings):
+                if not any(
+                    anchor.strip().lower() == h.strip().lower() or anchor_norm == hn
+                    for h, hn in zip(headings, normalized_headings)
+                ):
                     findings.append(
                         LintFinding(
                             code="ANCHOR_MISSING",
@@ -370,12 +442,15 @@ def _run_vault_lint_impl(vault: Vault, cache: VaultCache) -> list[LintFinding]:
             )
         )
 
+    findings.extend(_raw_link_findings(vault, notes_by_cid))
+
     # --- GATE 5: Graph Connectivity ---
     cur = conn.execute(
         """
         SELECT n.rel_path
         FROM notes n
         WHERE n.layer = 'wiki'
+          AND n.parse_error IS NULL
           AND NOT EXISTS (SELECT 1 FROM links l1 WHERE l1.source_cid = n.cid)
           AND NOT EXISTS (SELECT 1 FROM links l2 WHERE l2.target_cid = n.cid)
         ORDER BY n.rel_path;

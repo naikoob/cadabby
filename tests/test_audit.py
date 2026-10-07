@@ -235,6 +235,37 @@ class TestAudit(unittest.TestCase):
             findings, notice = run_vault_audit(self.vault)
             self.assertEqual(findings, [])
 
+    def test_provenance_mismatch_when_by_is_not_first_key(self):
+        self._write_note(
+            "Note-Reordered",
+            frontmatter_extra=(
+                "verified:\n"
+                "  - at: '2026-10-01T00:00:00Z'\n"
+                "    by: human:alice # inline comment\n"
+                "    of: sha256:abc"
+            ),
+        )
+
+        mock_blame = (
+            "commit789 1 1 1\n"
+            "author Mallory\n"
+            "author-mail <mallory@evil.com>\n"
+            "\t    by: human:alice # inline comment\n"
+        )
+
+        with (
+            patch("cadabby.audit.is_git_repository", return_value=True),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(returncode=0, stdout=mock_blame)
+            findings, notice = run_vault_audit(self.vault)
+            self.assertIsNone(notice)
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(findings[0].code, "PROVENANCE_MISMATCH")
+            self.assertEqual(findings[0].actor, "human:alice")
+            self.assertEqual(findings[0].line, 8)
+
 
 if __name__ == "__main__":
     unittest.main()
+

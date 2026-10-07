@@ -230,6 +230,33 @@ class TestSubsetBoundarySymmetry(unittest.TestCase):
             serialize_frontmatter({"verified": [{"by": "a", "meta": {"k": "v"}}]}, "# Body\n")
         self.assertIn("verified[].meta", str(ctx.exception))
 
+    def test_quoted_sequence_scalars_with_colons_round_trip(self):
+        original = {
+            "type": "concept",
+            "sources": ["https://example.com/a:b", "note: with colon"],
+        }
+        serialized = serialize_frontmatter(original, "# Body\n")
+        reparsed, _ = parse_frontmatter(serialized)
+        self.assertEqual(reparsed, original)
+
+    def test_mixed_scalar_and_mapping_sequence_rejected_both_ways(self):
+        with self.assertRaises(FrontmatterParseError):
+            parse_frontmatter("---\nitems:\n  - scalar_first\n  - key: val\n---\n")
+        with self.assertRaises(FrontmatterParseError):
+            parse_frontmatter("---\nitems:\n  - key: val\n  - scalar_second\n---\n")
+        with self.assertRaises(FrontmatterSerializeError):
+            serialize_frontmatter({"items": ["scalar_first", {"key": "val"}]}, "# Body\n")
+
+    def test_writer_rejects_invalid_key_names(self):
+        for bad_data in (
+            {"bad key": "val"},
+            {"generated": {"bad.key": "val"}},
+            {"verified": [{"bad:key": "val"}]},
+        ):
+            with self.assertRaises(FrontmatterSerializeError):
+                serialize_frontmatter(bad_data, "# Body\n")
+
+
 
 class TestTagGrammar(unittest.TestCase):
     """Enforcement of the §3.1 tag grammar in the writer.

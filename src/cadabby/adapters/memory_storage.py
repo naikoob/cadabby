@@ -33,7 +33,11 @@ class InMemoryNoteStorage(NoteStoragePort):
     def get_note(self, cid_or_path: str) -> Note | None:
         cid = self._normalize_cid(cid_or_path)
         note = self._notes.get(cid)
-        return copy.deepcopy(note) if note is not None else None
+        if note is None:
+            return None
+        copied = copy.deepcopy(note)
+        copied.source_hash = hashlib.sha256(copied.serialize().encode("utf-8")).hexdigest()
+        return copied
 
     def save_note(self, note: Note, expected_hash: str | None = None) -> None:
         cid = self._normalize_cid(note.cid)
@@ -54,6 +58,7 @@ class InMemoryNoteStorage(NoteStoragePort):
         stored.cid = cid
         if not stored.rel_path:
             stored.rel_path = cid_to_path(cid)
+        stored.source_hash = hashlib.sha256(stored.serialize().encode("utf-8")).hexdigest()
         self._notes[cid] = stored
 
     def note_exists(self, cid_or_path: str) -> bool:

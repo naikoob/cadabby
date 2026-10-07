@@ -6,6 +6,7 @@ Free from filesystem I/O, SQLite dependencies, and network protocols.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -95,6 +96,7 @@ class Note:
     rel_path: str
     frontmatter: dict[str, Any] = field(default_factory=dict)
     body: str = ""
+    source_hash: str | None = field(default=None, repr=False, compare=False)
 
     @property
     def title(self) -> str:
@@ -159,6 +161,24 @@ class Note:
         clean_heading = heading.lstrip("#").strip()
         self.body = self.body.rstrip() + f"\n\n## {clean_heading}\n\n{content.strip()}\n"
 
+    def replace_text(self, old: str, new: str) -> None:
+        """Replace one exact, unique occurrence of `old` in the body (§5.1).
+
+        Reaches anywhere in the body, including the H1 and preamble above the
+        first `##` heading that section operations cannot address. Frontmatter
+        is never reachable: it is a separate field, and `verified`/`generated`
+        are engine-owned. Zero or multiple matches raise rather than guess.
+        """
+        if not old:
+            raise ValueError("replace_text: 'old' must be a non-empty string")
+        count = self.body.count(old)
+        if count != 1:
+            raise ValueError(
+                f"replace_text: 'old' must match exactly once in the body of {self.rel_path} "
+                f"(matched {count} times); include more surrounding text to make it unique"
+            )
+        self.body = self.body.replace(old, new, 1)
+
     def add_attestation(
         self,
         actor: str,
@@ -202,7 +222,8 @@ class Note:
     def from_raw(cls, cid: str, rel_path: str, raw_text: str) -> Note:
         """Construct Note entity by parsing raw OKF markdown."""
         fm, body = parse_frontmatter(raw_text)
-        return cls(cid=cid, rel_path=rel_path, frontmatter=fm, body=body)
+        source_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
+        return cls(cid=cid, rel_path=rel_path, frontmatter=fm, body=body, source_hash=source_hash)
 
 
 @dataclass

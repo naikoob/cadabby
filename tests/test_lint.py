@@ -216,6 +216,51 @@ verified:
         self.assertEqual(stale[0].severity, "warning")
         self.assertNotIn("VERIFICATION_UNBOUND", {f.code for f in findings})
 
+    def test_gate6_superseded_history_is_silent_when_reverified(self):
+        """§6.3 gate 6. Append-only `verified:` keeps older entries for `audit`.
+
+        Once a note is re-verified at its current body_hash with equal or higher
+        authority, the superseded entry is history rather than debt and must not
+        warn; a prior `human:*` entry followed only by an `agent:*` entry still
+        warns so an agent cannot silence an unpaid human re-review.
+        """
+        from cadabby.okf import compute_body_hash
+
+        body = "# Note\n\nUpdated prose. [[SQLite]]\n"
+        live_hash = compute_body_hash(body)
+
+        # 1. Superseded agent entry + current human entry -> silent.
+        (self.vault.wiki_dir / "Reverified-Human.md").write_text(
+            "---\ntype: concept\ntitle: Reverified Human\ndescription: Test\nstatus: active\n"
+            "verified:\n"
+            "  - by: agent:earlier\n    at: '2026-01-01T00:00:00Z'\n    of: 'sha256:deadbeef'\n"
+            f"  - by: human:owner\n    at: '2026-01-02T00:00:00Z'\n    of: '{live_hash}'\n"
+            f"---\n{body}",
+            "utf-8",
+        )
+        # 2. Superseded agent entry + current agent entry -> silent.
+        (self.vault.wiki_dir / "Reverified-Agent.md").write_text(
+            "---\ntype: concept\ntitle: Reverified Agent\ndescription: Test\nstatus: active\n"
+            "verified:\n"
+            "  - by: agent:earlier\n    at: '2026-01-01T00:00:00Z'\n    of: 'sha256:deadbeef'\n"
+            f"  - by: agent:later\n    at: '2026-01-02T00:00:00Z'\n    of: '{live_hash}'\n"
+            f"---\n{body}",
+            "utf-8",
+        )
+        # 3. Stale human entry + current agent entry -> still warns on the human entry.
+        (self.vault.wiki_dir / "Human-Superseded-By-Agent.md").write_text(
+            "---\ntype: concept\ntitle: Human Superseded By Agent\ndescription: Test\nstatus: active\n"
+            "verified:\n"
+            "  - by: human:owner\n    at: '2026-01-01T00:00:00Z'\n    of: 'sha256:deadbeef'\n"
+            f"  - by: agent:later\n    at: '2026-01-02T00:00:00Z'\n    of: '{live_hash}'\n"
+            f"---\n{body}",
+            "utf-8",
+        )
+
+        stale = [f for f in run_vault_lint(self.vault) if f.code == "VERIFICATION_STALE"]
+        self.assertEqual([f.rel_path for f in stale], ["wiki/Human-Superseded-By-Agent.md"])
+        self.assertIn("human:owner", stale[0].message)
+
     def test_gate5_orphan_detection_single_query(self):
         # Scaffold an orphan note with no inbound and no outbound links
         orphan = self.vault.wiki_dir / "Lonely-Orphan.md"
@@ -238,6 +283,82 @@ There are no links here.
         self.assertEqual(len(orphan_findings), 1)
         self.assertEqual(orphan_findings[0].rel_path, "wiki/Lonely-Orphan.md")
         self.assertEqual(orphan_findings[0].severity, "warning")
+
+    def test_gate3_anchor_check_strips_code_spans_and_normalizes_hyphens(self):
+        target = self.vault.wiki_dir / "Target-Note.md"
+        target.write_text(
+            "---\ntype: concept\ntitle: Target Note\ndescription: T\nstatus: active\n---\n"
+            "# Target Note\n\n"
+            "## B-Tree Indexes\n\n"
+            "```python\n"
+            "# Fake Heading Inside Code\n"
+            "```\n"
+            "[[SQLite]]\n",
+            "utf-8",
+        )
+        caller = self.vault.wiki_dir / "Caller-Note.md"
+        caller.write_text(
+            "---\ntype: concept\ntitle: Caller Note\ndescription: C\nstatus: active\n---\n"
+            "# Caller Note\n\n"
+            "Valid hyphenated anchor: [[Target-Note#B-Tree-Indexes]].\n"
+            "Invalid code comment anchor: [[Target-Note#Fake-Heading-Inside-Code]].\n",
+            "utf-8",
+        )
+        findings = run_vault_lint(self.vault)
+        anchor_warnings = [f for f in findings if f.code == "ANCHOR_MISSING" and f.rel_path == "wiki/Caller-Note.md"]
+        self.assertEqual(len(anchor_warnings), 1)
+        self.assertIn("Fake-Heading-Inside-Code", anchor_warnings[0].message)
+
+    def test_gate4_rejects_directories_and_non_raw_paths(self):
+        bad_src = self.vault.wiki_dir / "Bad-Source.md"
+        bad_src.write_text(
+            "---\ntype: concept\ntitle: Bad Source\ndescription: S\nstatus: active\n"
+            "sources:\n"
+            "  - raw\n"
+            "  - AGENTS.md\n"
+            "  - raw/../AGENTS.md\n"
+            "---\n# Bad Source\n\n[[SQLite]]\n",
+            "utf-8",
+        )
+        findings = run_vault_lint(self.vault)
+        missing = [f for f in findings if f.code == "SOURCE_MISSING" and f.rel_path == "wiki/Bad-Source.md"]
+        self.assertEqual(len(missing), 3)
+
+    def _write_domain_note(self, rel: str, body: str) -> None:
+        path = self.vault_root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "---\ntype: concept\ntitle: Raw Linker\ndescription: S\nstatus: active\n---\n# Raw Linker\n\n" + body + "\n",
+            "utf-8",
+        )
+
+    def test_raw_link_wrong_depth_is_reported_with_suggestion(self):
+        (self.vault_root / "raw").mkdir(exist_ok=True)
+        (self.vault_root / "raw" / "a.md").write_text("evidence\n", "utf-8")
+        self._write_domain_note("customers/acme/N.md", "Per [the call](../../../raw/a.md).")
+        findings = [f for f in run_vault_lint(self.vault) if f.code == "RAW_LINK_BROKEN"]
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, "error")
+        self.assertEqual(findings[0].rel_path, "customers/acme/N.md")
+        self.assertIn("did you mean '../../raw/a.md'", findings[0].message)
+
+    def test_correct_raw_links_code_spans_and_urls_are_ignored(self):
+        (self.vault_root / "raw").mkdir(exist_ok=True)
+        (self.vault_root / "raw" / "a.md").write_text("evidence\n", "utf-8")
+        self._write_domain_note(
+            "customers/acme/N.md",
+            "Per [the call](../../raw/a.md). Example: `[x](../raw/ghost.md)`. "
+            "See [upstream](https://example.com/raw/ghost.md).",
+        )
+        findings = [f for f in run_vault_lint(self.vault) if f.code == "RAW_LINK_BROKEN"]
+        self.assertEqual(findings, [])
+
+    def test_gate5_excludes_unparseable_notes_from_orphans(self):
+        broken = self.vault.wiki_dir / "Broken-Unparseable.md"
+        broken.write_text("---\ntags: [bad, flow]\n---\n# Broken\n", "utf-8")
+        findings = run_vault_lint(self.vault)
+        for_broken = [f.code for f in findings if f.rel_path == "wiki/Broken-Unparseable.md"]
+        self.assertEqual(for_broken, ["FRONTMATTER_UNPARSEABLE"])
 
 
 class TestLintTaxonomyIsClosed(unittest.TestCase):
@@ -311,6 +432,10 @@ class TestLintTaxonomyIsClosed(unittest.TestCase):
         self._write(
             "wiki/F-Source-Missing.md",
             self._fm("Source Missing", "sources:", "  - raw/ghost.pdf", body="[[SQLite]]"),
+        )
+        self._write(
+            "wiki/F-Raw-Link-Broken.md",
+            self._fm("Raw Link Broken", body="[[SQLite]] [src](../../raw/ghost.md)"),
         )
         # Gate 5 -- connectivity. No links in either direction.
         self._write("wiki/F-Orphan.md", self._fm("Orphan", body="Nothing links here and it links nowhere."))

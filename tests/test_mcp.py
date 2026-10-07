@@ -50,6 +50,31 @@ class TestMcpServer(unittest.TestCase):
         self.assertEqual(len(tools_res["tools"]), 7)
         self.assertEqual(set(tool_names), set(expected))
 
+    def test_update_note_schema_exposes_edits(self):
+        tools = {t["name"]: t for t in self.server.handle_tools_list()["tools"]}
+        self.assertEqual(len(tools), 7)
+        edits = tools["vault_update_note"]["inputSchema"]["properties"]["edits"]
+        self.assertEqual(edits["type"], "array")
+        self.assertEqual(
+            set(edits["items"]["properties"]["op"]["enum"]),
+            {"replace_text", "replace_section", "append_section"},
+        )
+        # Over the wire the batch is all-or-nothing: a bad third edit leaves the file alone.
+        target = self.vault_root / "wiki" / "SQLite.md"
+        before = target.read_bytes()
+        res = self.server.handle_tools_call(
+            "vault_update_note",
+            {
+                "cid": "wiki/SQLite",
+                "edits": [
+                    {"op": "replace_text", "old": "small, fast", "new": "small and fast"},
+                    {"op": "replace_text", "old": "text that is not in the note", "new": "x"},
+                ],
+            },
+        )
+        self.assertTrue(res["isError"])
+        self.assertEqual(target.read_bytes(), before)
+
     def test_tools_call_search_and_ground(self):
         self.server.handle_initialize({"clientInfo": {"name": "test-agent"}})
 
@@ -162,8 +187,13 @@ class TestMcpServer(unittest.TestCase):
             input_chunks.append(hdr + r_bytes)
         return self._drive_server_raw(b"".join(input_chunks))
 
-    def _drive_server_raw(self, stdin_bytes):
-        """Feed arbitrary stdin bytes through run_mcp_server and parse responses."""
+    def _drive_server_raw(self, stdin_bytes, with_framing=False):
+        """Feed arbitrary stdin bytes through run_mcp_server and parse responses.
+
+        Replies may arrive in either framing (§5.2); each is parsed in kind.
+        With `with_framing`, returns (framing, message) pairs so a test can
+        assert which framing the server chose.
+        """
         stdin_stream = io.BytesIO(stdin_bytes)
         stdout_stream = io.BytesIO()
 
@@ -183,20 +213,49 @@ class TestMcpServer(unittest.TestCase):
             sys.stdout = old_stdout
 
         stdout_bytes = stdout_stream.getvalue()
-        responses = []
+        framed = []
         idx = 0
         while idx < len(stdout_bytes):
-            header_end = stdout_bytes.find(b"\r\n\r\n", idx)
-            self.assertNotEqual(header_end, -1)
-            hdr_str = stdout_bytes[idx:header_end].decode("ascii")
-            self.assertTrue(hdr_str.lower().startswith("content-length:"))
-            length = int(hdr_str.split(":", 1)[1].strip())
-            body_start = header_end + 4
-            body_bytes = stdout_bytes[body_start : body_start + length]
-            self.assertEqual(len(body_bytes), length)
-            responses.append(json.loads(body_bytes.decode("utf-8")))
-            idx = body_start + length
-        return responses
+            if stdout_bytes[idx:].lower().startswith(b"content-length:"):
+                header_end = stdout_bytes.find(b"\r\n\r\n", idx)
+                self.assertNotEqual(header_end, -1)
+                hdr_str = stdout_bytes[idx:header_end].decode("ascii")
+                length = int(hdr_str.split(":", 1)[1].strip())
+                body_start = header_end + 4
+                body_bytes = stdout_bytes[body_start : body_start + length]
+                self.assertEqual(len(body_bytes), length)
+                framed.append(("content-length", json.loads(body_bytes.decode("utf-8"))))
+                idx = body_start + length
+            else:
+                line_end = stdout_bytes.find(b"\n", idx)
+                self.assertNotEqual(line_end, -1, "an ndjson reply must end with a newline")
+                framed.append(("ndjson", json.loads(stdout_bytes[idx:line_end].decode("utf-8"))))
+                idx = line_end + 1
+        return framed if with_framing else [msg for _, msg in framed]
+
+    def test_newline_delimited_request_gets_newline_delimited_reply(self):
+        """§10 C27. The MCP stdio standard framing is answered in kind, with no header."""
+        req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "t"}}})
+        stdin_bytes = (req + "\n").encode("utf-8")
+        framed = self._drive_server_raw(stdin_bytes, with_framing=True)
+        self.assertEqual([f for f, _ in framed], ["ndjson"])
+        self.assertEqual(framed[0][1]["id"], 1)
+        self.assertIn("serverInfo", framed[0][1]["result"])
+
+    def test_content_length_request_keeps_content_length_framing(self):
+        """§10 C27. LSP-style clients keep receiving LSP-style replies."""
+        req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode("utf-8")
+        stdin_bytes = b"Content-Length: %d\r\n\r\n" % len(req) + req
+        framed = self._drive_server_raw(stdin_bytes, with_framing=True)
+        self.assertEqual([f for f, _ in framed], ["content-length"])
+
+    def test_mixed_framing_stream_answers_each_message_in_kind(self):
+        """Framing is decided per message, not latched by the first one."""
+        a = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        b = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}).encode("utf-8")
+        stdin_bytes = (a + "\n").encode("utf-8") + b"Content-Length: %d\r\n\r\n" % len(b) + b
+        framed = self._drive_server_raw(stdin_bytes, with_framing=True)
+        self.assertEqual([(f, m["id"]) for f, m in framed], [("ndjson", 1), ("content-length", 2)])
 
     def test_run_mcp_server_survives_malformed_params(self):
         # Explicit null/non-dict params must not kill the loop or drop later requests

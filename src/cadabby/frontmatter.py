@@ -232,14 +232,19 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
                 if seq_val.startswith("-"):
                     raise FrontmatterParseError("Sequences of sequences are not permitted", line_idx)
 
+                is_quoted_scalar = seq_val.startswith('"') or seq_val.startswith("'")
+                is_mapping_item = not is_quoted_scalar and ":" in seq_val
+
                 # Initialize list container if not already started
                 if current_container_type is None:
-                    current_container_type = "scalar_seq" if ":" not in seq_val else "dict_seq"
+                    current_container_type = "dict_seq" if is_mapping_item else "scalar_seq"
                     current_seq = []
                     data[current_key] = current_seq
 
-                if ":" in seq_val:
+                if is_mapping_item:
                     # Sequence of flat mappings: '- key: value'
+                    if current_container_type == "scalar_seq":
+                        raise FrontmatterParseError("Cannot mix scalar and mapping items in sequence", line_idx)
                     current_container_type = "dict_seq"
                     sub_k, _, sub_v = seq_val.partition(":")
                     sub_k = sub_k.strip()
@@ -337,7 +342,7 @@ def format_scalar(val: Any) -> str:
     if isinstance(val, (int, float)):
         return str(val)
 
-    val_str = str(val)
+    val_str = str(val).replace("\r\n", "\n").replace("\r", "\n")
 
     # Empty string
     if not val_str:
@@ -377,6 +382,13 @@ def _scalar_at(val: Any, where: str) -> str:
         raise FrontmatterSerializeError(f"'{where}': {exc}") from None
 
 
+def _check_key(key: Any, where: str) -> str:
+    """Validate that a mapping key conforms to RE_KEY."""
+    if not isinstance(key, str) or not RE_KEY.match(key):
+        raise FrontmatterSerializeError(f"'{where}': Invalid key name '{key}'")
+    return key
+
+
 def serialize_frontmatter(data: dict[str, Any], body: str = "") -> str:
     """Canonicalizing frontmatter serializer conforming to §3.2.
 
@@ -393,6 +405,9 @@ def serialize_frontmatter(data: dict[str, Any], body: str = "") -> str:
     """
     if not data and not body:
         return ""
+
+    for k in data:
+        _check_key(k, str(k))
 
     # Canonicalize tags: lowercase, de-duplicate, reject whitespace (§3.1).
     # Copied rather than mutated — callers hold the original dict.
@@ -415,6 +430,10 @@ def serialize_frontmatter(data: dict[str, Any], body: str = "") -> str:
         if isinstance(val, list):
             if not val:
                 continue
+            has_dict = any(isinstance(item, dict) for item in val)
+            has_non_dict = any(not isinstance(item, dict) for item in val)
+            if has_dict and has_non_dict:
+                raise FrontmatterSerializeError(f"'{k}': Cannot mix scalar and mapping items in sequence")
             lines.append(f"{k}:")
             for item in val:
                 if isinstance(item, dict):
@@ -423,9 +442,10 @@ def serialize_frontmatter(data: dict[str, Any], body: str = "") -> str:
                     sub_keys = list(item.keys())
                     if not sub_keys:
                         continue
-                    first_k = sub_keys[0]
+                    first_k = _check_key(sub_keys[0], f"{k}[].{sub_keys[0]}")
                     lines.append(f"  - {first_k}: {_scalar_at(item[first_k], f'{k}[].{first_k}')}")
                     for other_k in sub_keys[1:]:
+                        _check_key(other_k, f"{k}[].{other_k}")
                         lines.append(f"    {other_k}: {_scalar_at(item[other_k], f'{k}[].{other_k}')}")
                 else:
                     lines.append(f"  - {_scalar_at(item, f'{k}[]')}")
@@ -437,6 +457,7 @@ def serialize_frontmatter(data: dict[str, Any], body: str = "") -> str:
                 continue
             lines.append(f"{k}:")
             for sub_k, sub_v in val.items():
+                _check_key(sub_k, f"{k}.{sub_k}")
                 lines.append(f"  {sub_k}: {_scalar_at(sub_v, f'{k}.{sub_k}')}")
             continue
 
