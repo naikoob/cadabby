@@ -31,7 +31,7 @@ class TestParallelRunner(unittest.TestCase):
         targets = discover_targets(self.repo_root, patterns=["test_audit"], granularity="class")
         self.assertEqual(len(targets), 1)
         self.assertEqual(targets[0][0], "tests.test_audit.TestAudit")
-        self.assertEqual(targets[0][1], 10)
+        self.assertEqual(targets[0][1], 11)
 
     def test_run_single_target(self):
         target = "tests.test_frontmatter.TestTagGrammar"

@@ -230,6 +230,54 @@ class TestCli(unittest.TestCase):
         # this as "the vault has findings" (§5.4).
         self.assertEqual(cmd_verify(args_verify), EXIT_USAGE)
 
+    def _verify_args(self, vault_root: Path, *, human: bool) -> DummyArgs:
+        return DummyArgs(vault=str(vault_root), cid="wiki/SQLite", human=human, agent=None, method=None)
+
+    def _run_verify_on_tty(self, args: DummyArgs, answer: str) -> tuple[int, str]:
+        out = io.StringIO()
+        with (
+            unittest.mock.patch("sys.stdin.isatty", return_value=True),
+            unittest.mock.patch("cadabby.cli.secrets.token_hex", return_value="ab12"),
+            unittest.mock.patch("builtins.input", return_value=answer) as fake_input,
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            code = cmd_verify(args)
+        self.last_prompt_count = fake_input.call_count
+        return code, out.getvalue()
+
+    def test_flagless_verify_in_a_tty_stamps_process_cli(self):
+        # §5.3: agents run shell commands in pseudo-terminals, so a TTY is no
+        # evidence of a human. Only the explicit flag reaches the human tier.
+        vault_root = copy_demo_vault(self.dir / "flagless-vault")
+        note = vault_root / "wiki" / "SQLite.md"
+        humans_before = note.read_text("utf-8").count("human:")
+        code, out = self._run_verify_on_tty(self._verify_args(vault_root, human=False), answer="")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.last_prompt_count, 0)
+        self.assertIn("'process:cli'", out)
+        text = note.read_text("utf-8")
+        self.assertIn("by: \"process:cli\"", text)
+        self.assertEqual(text.count("human:"), humans_before)
+
+    def test_human_verify_requires_typed_token(self):
+        vault_root = copy_demo_vault(self.dir / "token-vault")
+        code, out = self._run_verify_on_tty(self._verify_args(vault_root, human=True), answer="ab12")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.last_prompt_count, 1)
+        self.assertIn("wiki/SQLite", out)
+        self.assertIn("'human:", out)
+
+    def test_human_verify_wrong_token_writes_nothing(self):
+        vault_root = copy_demo_vault(self.dir / "wrong-token-vault")
+        note = vault_root / "wiki" / "SQLite.md"
+        before = note.read_bytes()
+        for answer in ("y", "yes", ""):
+            with self.subTest(answer=answer):
+                code, _ = self._run_verify_on_tty(self._verify_args(vault_root, human=True), answer=answer)
+                self.assertEqual(code, EXIT_USAGE)
+                self.assertEqual(note.read_bytes(), before)
+
     def test_cmd_install_workspace_defaults(self):
         vault_root = self.dir / "ws-install-vault"
         args_init = DummyArgs(vault=str(vault_root), name="ws-install-vault", obsidian=False)

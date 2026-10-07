@@ -5,6 +5,7 @@ Conforms to Cadabby Technical Specification §2.5, §4.3, §8.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,20 @@ from typing import Any
 from cadabby.constants import TYPE_MOC
 from cadabby.fsutil import advisory_lock, append_ledger, atomic_write
 from cadabby.vault import Vault
+
+RE_LEDGER_HEADER_YEAR = re.compile(r"^#\s+Activity Ledger\s+\((\d{4})\)", re.MULTILINE)
+RE_LEDGER_ENTRY_YEAR = re.compile(r"^-\s+\[(\d{4})-\d{2}-\d{2}T", re.MULTILINE)
+
+
+def _detect_ledger_year(content: str, fallback_year: str) -> str:
+    """Extract the active calendar year from log.md header or earliest entry timestamp."""
+    m_hdr = RE_LEDGER_HEADER_YEAR.search(content)
+    if m_hdr:
+        return m_hdr.group(1)
+    m_ent = RE_LEDGER_ENTRY_YEAR.search(content)
+    if m_ent:
+        return m_ent.group(1)
+    return fallback_year
 
 
 def append_vault_log(vault: Vault, message: str, actor: str | None = None) -> None:
@@ -25,36 +40,39 @@ def append_vault_log(vault: Vault, message: str, actor: str | None = None) -> No
 
 
 def rotate_vault_log(vault: Vault) -> Path | None:
-    """Rotate log.md into log/<year>.md if file exceeds log_rotate_bytes."""
+    """Rotate log.md into log/<year>.md if file exceeds log_rotate_bytes or crosses a calendar year (§8)."""
     log_file = vault.log_path
     if not log_file.exists():
         return None
 
     max_bytes = vault.config.get("log_rotate_bytes", 262144)
     st = log_file.stat()
-    if st.st_size < max_bytes:
+    current_year = datetime.now(UTC).strftime("%Y")
+    initial_content = log_file.read_text("utf-8")
+    ledger_year = _detect_ledger_year(initial_content, current_year)
+
+    if st.st_size < max_bytes and ledger_year == current_year:
         return None
 
-    year = datetime.now(UTC).strftime("%Y")
     log_dir = vault.log_dir
     log_dir.mkdir(parents=True, exist_ok=True)
-    target_rotated = log_dir / f"{year}.md"
+    target_rotated = log_dir / f"{ledger_year}.md"
 
     with advisory_lock(vault.lock_path):
         # Append existing log content into archive
         content = log_file.read_text("utf-8")
         if target_rotated.exists():
-            header_prefix = f"# Activity Ledger ({year})"
+            header_prefix = f"# Activity Ledger ({ledger_year})"
             body_content = content
             if body_content.startswith(header_prefix):
-                body_content = body_content[len(header_prefix):].lstrip("\r\n")
+                body_content = body_content[len(header_prefix) :].lstrip("\r\n")
             if body_content:
                 append_ledger(target_rotated, body_content)
         else:
             atomic_write(target_rotated, content)
 
         # Fresh active log
-        fresh_header = f"# Activity Ledger ({year})\n\n"
+        fresh_header = f"# Activity Ledger ({current_year})\n\n"
         atomic_write(log_file, fresh_header)
 
     return target_rotated

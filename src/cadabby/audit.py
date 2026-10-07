@@ -9,7 +9,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 
-from cadabby.frontmatter import split_frontmatter
+from cadabby.frontmatter import split_comment, split_frontmatter
 from cadabby.vault import Vault
 
 
@@ -52,7 +52,7 @@ def run_vault_audit(vault: Vault, require_signed: bool = False) -> tuple[list[Au
 
     all_note_files = [p for p, _, _ in vault.iter_domain_notes()]
 
-    re_human_by = re.compile(r"^\s*-\s*by:\s*[\"']?(human:[A-Za-z0-9._\-/]+)[\"']?\s*")
+    re_human_by = re.compile(r"^\s*(?:-\s*)?by:\s*[\"']?(human:[A-Za-z0-9._\-/]+)[\"']?\s*$")
 
     for file_path in all_note_files:
         rel_path = vault.rel_path(file_path)
@@ -69,8 +69,19 @@ def run_vault_audit(vault: Vault, require_signed: bool = False) -> tuple[list[Au
         if not raw_fm:
             continue
 
+        in_verified = False
         for line_no, line in enumerate(raw_fm.splitlines(), start=2):
-            match = re_human_by.match(line)
+            clean_line, _ = split_comment(line)
+            if not clean_line.strip():
+                continue
+            indent = len(clean_line) - len(clean_line.lstrip(" "))
+            if indent == 0:
+                in_verified = bool(re.match(r"^verified\s*:", clean_line))
+                continue
+            if not in_verified:
+                continue
+
+            match = re_human_by.match(clean_line)
             if not match:
                 continue
 

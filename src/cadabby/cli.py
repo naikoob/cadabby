@@ -8,10 +8,12 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import secrets
 import shutil
 import sys
 from pathlib import Path
 
+from cadabby.adapters.disk_storage import DiskNoteStorage
 from cadabby.audit import run_vault_audit
 from cadabby.cache import VaultCache
 from cadabby.constants import (
@@ -267,14 +269,15 @@ def cmd_search(args: argparse.Namespace) -> int:
         print(f"No results found matching '{args.query}'.")
         return EXIT_OK
 
+    cid_w = max(42, max(len(r.cid) for r in results) + 2)
     print(f"\nFound {len(results)} matches for '{args.query}':\n")
-    print(f"{'CID':<42} {'TRUST':<18} {'STATUS':<12} {'SCORE':<8} {'TITLE'}")
-    print("-" * 100)
+    print(f"{'CID':<{cid_w}} {'TRUST':<18} {'STATUS':<12} {'SCORE':<8} {'TITLE'}")
+    print("-" * (cid_w + 58))
     for r in results:
         tier = r.trust_tier or "unverified"
         st = r.status or "active"
         title = (r.title or "")[:35]
-        print(f"{r.cid:<42} {tier:<18} {st:<12} {r.score:<8.3f} {title}")
+        print(f"{r.cid:<{cid_w}} {tier:<18} {st:<12} {r.score:<8.3f} {title}")
     print()
     return EXIT_OK
 
@@ -340,6 +343,8 @@ def cmd_update(args: argparse.Namespace) -> int:
         parts = args.replace_section.split(":", 1)
         replace_sec = (parts[0], parts[1] if len(parts) > 1 else "")
 
+    edits = json.loads(args.edits) if getattr(args, "edits", None) else None
+
     path = update_note(
         vault=vault,
         cid_or_path=args.cid,
@@ -348,9 +353,33 @@ def cmd_update(args: argparse.Namespace) -> int:
         replace_section=replace_sec,
         expected_hash=args.expected_hash,
         actor=args.actor or f"human:{getpass.getuser()}",
+        edits=edits,
     )
     print(f"Updated note: {vault.rel_path(path)}")
     return EXIT_OK
+
+
+def _confirm_human_attestation(vault: Vault, cid: str) -> bool:
+    """Ask the person at the keyboard to type back a one-time token (§3.5).
+
+    The TTY check alone is satisfied by any pseudo-terminal, which is exactly
+    what agent harnesses run commands in. A token printed now and typed back
+    now cannot be answered by a pre-piped `y`, so an endorsement can no longer
+    be made by accident.
+    """
+    note = DiskNoteStorage(vault).get_note(cid)
+    if note is None:
+        # Let verify_note raise its normal NOT_FOUND error with the usual wording.
+        return True
+    token = secrets.token_hex(2)
+    print(f"You are about to record that you personally reviewed '{note.title}'.")
+    print(f"  cid:  {note.cid}")
+    print(f"  body: {note.body_hash[:23]}...")
+    try:
+        answer = input(f"Type {token} to sign, anything else to abort: ")
+    except EOFError:
+        return False
+    return answer.strip() == token
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
@@ -365,19 +394,20 @@ def cmd_verify(args: argparse.Namespace) -> int:
         if not sys.stdin.isatty():
             print("Error: --human requires an interactive TTY.", file=sys.stderr)
             return EXIT_USAGE
+        if not _confirm_human_attestation(vault, args.cid):
+            print("Aborted: confirmation token did not match; nothing was written.", file=sys.stderr)
+            return EXIT_USAGE
         actor = f"human:{getpass.getuser()}"
         is_human = True
     elif args.agent:
         actor = args.agent if args.agent.startswith(("agent:", "process:")) else f"agent:{args.agent}"
         is_human = False
     else:
-        # Default to process:cli unless interactive (§5.3)
-        if sys.stdin.isatty():
-            actor = f"human:{getpass.getuser()}"
-            is_human = True
-        else:
-            actor = "process:cli"
-            is_human = False
+        # §5.3: only an explicit --human ever stamps human:*. Agents run shell
+        # commands in pseudo-terminals, so inferring a human from isatty() let a
+        # flagless call issued by an agent mint a human endorsement silently.
+        actor = "process:cli"
+        is_human = False
 
     res = verify_note(
         vault=vault,
@@ -717,6 +747,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_update.add_argument("--patch-frontmatter", help="JSON frontmatter patch")
     p_update.add_argument("--append-section", help="Heading:Body to append")
     p_update.add_argument("--replace-section", help="Heading:Body to replace")
+    p_update.add_argument(
+        "--edits",
+        help='JSON list of body edits applied atomically, e.g. \'[{"op":"replace_text","old":"..","new":".."}]\'',
+    )
     p_update.add_argument("--expected-hash", help="Expected file hash for concurrency safety")
     p_update.add_argument("--actor", help="Actor identity")
     p_update.set_defaults(func=cmd_update)

@@ -22,6 +22,7 @@ from cadabby.constants import (
     DEFAULT_STATUS_MULTIPLIERS,
     DEFAULT_TRUST_MULTIPLIERS,
     FTS_COLUMN_WEIGHTS,
+    FTS_FIELD_HIT_FLOOR,
     SCHEMA_VERSION,
 )
 from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter
@@ -29,6 +30,18 @@ from cadabby.fsutil import compute_file_sha256
 from cadabby.graph import LinkTargetIndex, extract_wikilinks
 from cadabby.okf import compute_body_hash, derive_trust_tier
 from cadabby.vault import Vault, path_to_cid, path_to_layer, path_to_stem
+
+
+def _is_valid_raw_source(vault: Vault, src: str) -> bool:
+    """Return True if `src` is a relative path pointing to an existing regular file inside `raw/`."""
+    if not src or Path(src).is_absolute():
+        return False
+    try:
+        raw_root = vault.raw_dir.resolve()
+        candidate = (vault.root / src).resolve()
+        return candidate.is_relative_to(raw_root) and candidate.is_file()
+    except OSError:
+        return False
 
 
 def sanitize_fts5_query(query: str) -> str:
@@ -587,7 +600,7 @@ class VaultCache:
                     conn.execute("DELETE FROM sources WHERE source_cid = ?;", (cid,))
                     if sources:
                         source_tuples = [
-                            (cid, src, 1 if (self.vault.root / src).exists() else 0)
+                            (cid, src, 1 if _is_valid_raw_source(self.vault, src) else 0)
                             for src in sources
                             if isinstance(src, str)
                         ]
@@ -598,7 +611,7 @@ class VaultCache:
                             )
 
                 except FrontmatterParseError as e:
-                    # Unparseable frontmatter; record error, exclude from search
+                    # Unparseable frontmatter; record error, exclude from search, and clear stale graph edges
                     self.upsert_note(
                         rel_path=rel_path,
                         layer=layer,
@@ -616,6 +629,8 @@ class VaultCache:
                         body=content,
                         tags=None,
                     )
+                    conn.execute("DELETE FROM links WHERE source_cid = ?;", (cid,))
+                    conn.execute("DELETE FROM sources WHERE source_cid = ?;", (cid,))
             else:
                 # Raw file
                 is_text = rel_path.lower().endswith(raw_text_exts)
@@ -647,13 +662,7 @@ class VaultCache:
         # 3. Resolve link targets if vault structure changed or new/updated links exist
         if inserted_count > 0 or updated_count > 0 or deleted_count > 0 or force:
             resolver = self.get_link_resolver()
-
-            # If note topology changed (inserted/deleted/force), re-resolve all links.
-            # If only existing notes were updated, only resolve the newly inserted unresolved links.
-            if inserted_count > 0 or deleted_count > 0 or force:
-                cur = conn.execute("SELECT id, target_raw FROM links;")
-            else:
-                cur = conn.execute("SELECT id, target_raw FROM links WHERE target_cid IS NULL;")
+            cur = conn.execute("SELECT id, target_raw FROM links;")
 
             link_updates = []
             for link_row in cur.fetchall():
@@ -743,8 +752,13 @@ class VaultCache:
         # table name is chosen here, never interpolated from caller input.
         fts = _fts_table(domain)
 
+        field_hits = " + ".join(
+            f"(CASE WHEN instr(highlight({fts}, {idx}, char(1), char(2)), char(1)) > 0 THEN {w} ELSE 0.0 END)"
+            for idx, w in enumerate(FTS_COLUMN_WEIGHTS)
+        )
         score_expr = f"""
-            (-bm25({fts}, {FTS_COLUMN_WEIGHTS[0]}, {FTS_COLUMN_WEIGHTS[1]}, {FTS_COLUMN_WEIGHTS[2]}, {FTS_COLUMN_WEIGHTS[3]}))
+            ((-bm25({fts}, {FTS_COLUMN_WEIGHTS[0]}, {FTS_COLUMN_WEIGHTS[1]}, {FTS_COLUMN_WEIGHTS[2]}, {FTS_COLUMN_WEIGHTS[3]}))
+             + ({FTS_FIELD_HIT_FLOOR} * ({field_hits})))
             * ({multiplier_expr("n.trust_tier", trust_cfg)})
             * ({multiplier_expr("n.status", status_cfg)})
         """
@@ -789,7 +803,7 @@ class VaultCache:
             FROM {fts}
             JOIN notes n ON n.id = {fts}.rowid
             WHERE {" AND ".join(where_clauses)}
-            ORDER BY score DESC
+            ORDER BY score DESC, n.cid ASC
             LIMIT :limit;
         """
 

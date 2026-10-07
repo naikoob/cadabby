@@ -178,6 +178,26 @@ class TestVaultCache(unittest.TestCase):
         # Deprecated note should be heavily demoted
         self.assertGreater(sqlite_res.score, duckdb_res.score)
 
+    def test_small_vault_saturated_term_preserves_field_weight_hierarchy(self):
+        """§4.4, §10 C15. When a term hits >=50% of a small vault, FTS5 clamps IDF
+        to ~1e-6; the field-presence floor keeps title/description/tags weights
+        alive and keeps scores above 0.05 so CLI search never prints 0.000.
+        """
+        self.cache.scan()
+        # 'SQLite' appears in 5 of the 6 demo-vault notes, triggering FTS5 IDF clamping.
+        results = self.cache.search("SQLite")
+        by_cid = {r.cid: r for r in results}
+
+        self.assertGreaterEqual(by_cid["wiki/SQLite"].score, 0.35)
+        self.assertGreaterEqual(min(r.score for r in results), 0.05)
+
+        # 'Flash' hits 3 of 6 notes (>=50%): wiki/Flash-Attention (title + body,
+        # unverified 1.0x -> 0.25) must outrank wiki/Epistemic-Trust-Tiers
+        # (body-only mention, human-reviewed 2.0x -> 0.10).
+        flash_results = self.cache.search("Flash")
+        self.assertEqual(flash_results[0].cid, "wiki/Flash-Attention")
+        self.assertGreater(flash_results[0].score, flash_results[1].score)
+
     def test_search_tag_filtering(self):
         self.cache.scan()
 
@@ -542,6 +562,67 @@ class TestVaultCacheRanking(unittest.TestCase):
                     self.assertEqual(len(results), 1)
                     self.assertEqual(results[0].title, "Non Finite Test")
 
+    def test_scan_clears_links_when_note_becomes_unparseable(self):
+        note_a = self.vault.wiki_dir / "Note-A.md"
+        note_b = self.vault.wiki_dir / "Note-B.md"
+        note_a.parent.mkdir(parents=True, exist_ok=True)
+        note_a.write_text(
+            "---\ntype: concept\ntitle: Note A\ndescription: A\nstatus: active\n---\n# A\n[[Note-B]]\n",
+            "utf-8",
+        )
+        note_b.write_text(
+            "---\ntype: concept\ntitle: Note B\ndescription: B\nstatus: active\n---\n# B\n[[Note-A]]\n",
+            "utf-8",
+        )
+        with VaultCache(self.vault) as cache:
+            cache.scan()
+            conn = cache.get_connection()
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM links WHERE source_cid = 'wiki/Note-B';").fetchone()[0], 1)
+
+            # Corrupt Note-B frontmatter on update
+            note_b.write_text("---\ntags: [bad, flow]\n---\n# B\n", "utf-8")
+            cache.scan(force=True)
+
+            # Outbound links from Note-B must be cleared, and Note-A's link to Note-B must become unresolved (NULL)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM links WHERE source_cid = 'wiki/Note-B';").fetchone()[0], 0)
+            row = conn.execute("SELECT target_cid FROM links WHERE source_cid = 'wiki/Note-A';").fetchone()
+            self.assertIsNone(row["target_cid"])
+
+    def test_scan_reresolves_stem_priority_when_wiki_note_repaired(self):
+        (self.vault.root / "projects").mkdir(parents=True, exist_ok=True)
+        (self.vault.wiki_dir).mkdir(parents=True, exist_ok=True)
+
+        caller = self.vault.wiki_dir / "Caller.md"
+        wiki_shared = self.vault.wiki_dir / "Shared.md"
+        proj_shared = self.vault.root / "projects" / "Shared.md"
+
+        caller.write_text(
+            "---\ntype: concept\ntitle: Caller\ndescription: C\nstatus: active\n---\n# C\n[[Shared]]\n",
+            "utf-8",
+        )
+        # Initially wiki/Shared has broken frontmatter, so [[Shared]] resolves to projects/Shared
+        wiki_shared.write_text("---\ntags: [broken]\n---\n# Shared\n", "utf-8")
+        proj_shared.write_text(
+            "---\ntype: concept\ntitle: Shared\ndescription: P\nstatus: active\n---\n# P\n",
+            "utf-8",
+        )
+
+        with VaultCache(self.vault) as cache:
+            cache.scan()
+            conn = cache.get_connection()
+            row1 = conn.execute("SELECT target_cid FROM links WHERE source_cid = 'wiki/Caller';").fetchone()
+            self.assertEqual(row1["target_cid"], "projects/Shared")
+
+            # Repair wiki/Shared frontmatter (an update to an existing note)
+            wiki_shared.write_text(
+                "---\ntype: concept\ntitle: Shared\ndescription: W\nstatus: active\n---\n# W\n",
+                "utf-8",
+            )
+            cache.scan(force=True)
+            row2 = conn.execute("SELECT target_cid FROM links WHERE source_cid = 'wiki/Caller';").fetchone()
+            self.assertEqual(row2["target_cid"], "wiki/Shared")
+
 
 if __name__ == "__main__":
     unittest.main()
+

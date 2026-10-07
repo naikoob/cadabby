@@ -255,7 +255,118 @@ class TestOps(unittest.TestCase):
         self.assertEqual(grounded[0]["type"], "adr")
         self.assertEqual(grounded[0]["cid"], "wiki/ADR-001-Event-Sourcing")
 
+    def test_implicit_occ_detects_concurrent_modification_on_update_and_verify(self):
+        from cadabby.adapters.disk_storage import DiskNoteStorage, FileLedger
+        from cadabby.fsutil import VaultConflictError
+        from cadabby.ops import UpdateNoteUseCase, VerifyNoteUseCase
+
+        base_storage = DiskNoteStorage(self.vault)
+        ledger = FileLedger(self.vault)
+        note_path = self.vault.wiki_dir / "Flash-Attention.md"
+
+        class RacingStorage(DiskNoteStorage):
+            def get_note(self_inner, cid_or_path: str):
+                n = super().get_note(cid_or_path)
+                # Simulate another writer modifying the file after get_note() but before save_note()
+                note_path.write_text(note_path.read_text("utf-8") + "\nConcurrent edit.\n", "utf-8")
+                return n
+
+        racing = RacingStorage(self.vault)
+        with self.assertRaises(VaultConflictError):
+            UpdateNoteUseCase(racing, ledger).execute(
+                cid_or_path="wiki/Flash-Attention",
+                frontmatter_patch={"description": "Should fail due to concurrent edit"},
+            )
+
+        with self.assertRaises(VaultConflictError):
+            VerifyNoteUseCase(racing, ledger).execute(
+                cid_or_path="wiki/Flash-Attention",
+                actor="agent:verifier",
+            )
+        self.assertIsNotNone(base_storage.get_note("wiki/Flash-Attention"))
+
+    def test_ground_notes_closes_temporary_cache(self):
+        from unittest.mock import patch
+        from cadabby.cache import VaultCache
+
+        closed_instances: list[VaultCache] = []
+        orig_close = VaultCache.close
+
+        def tracking_close(cache_self: VaultCache) -> None:
+            closed_instances.append(cache_self)
+            orig_close(cache_self)
+
+        with patch.object(VaultCache, "close", autospec=True, side_effect=tracking_close):
+            grounded = ground_notes(self.vault, ["wiki/SQLite"], cache=None)
+            self.assertEqual(len(grounded), 1)
+            self.assertEqual(len(closed_instances), 1)
+
+
+class TestUpdateNoteEdits(unittest.TestCase):
+    """§5.1 `edits`: exact-text replacement and one atomic write per call (C28)."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.vault_root = copy_demo_vault(Path(self.tmp_dir.name) / "demo-vault")
+        self.vault = Vault(self.vault_root)
+        self.note = self.vault.wiki_dir / "Edits-Fixture.md"
+        self.note.write_text(
+            "---\ntype: concept\ntitle: Edits Fixture\ndescription: Preamble marker lives here too\n"
+            "status: active\n---\n# Edits Fixture\n\nPreamble sentence with a typo: teh vault.\n\n"
+            "## Alpha\n\nSame line.\n\n## Beta\n\nSame line.\n",
+            "utf-8",
+        )
+        self.log = self.vault_root / "log.md"
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def _update(self, edits):
+        return update_note(vault=self.vault, cid_or_path="wiki/Edits-Fixture", edits=edits, actor="agent:t")
+
+    def _log_lines(self) -> int:
+        return self.log.read_text("utf-8").count("\n") if self.log.exists() else 0
+
+    def test_replace_text_edits_the_preamble_above_first_section(self):
+        self._update([{"op": "replace_text", "old": "teh vault", "new": "the vault"}])
+        _, body = parse_frontmatter(self.note.read_text("utf-8"))
+        self.assertIn("Preamble sentence with a typo: the vault.", body)
+        self.assertIn("## Alpha", body)
+
+    def test_replace_text_zero_or_multiple_matches_writes_nothing(self):
+        before = self.note.read_bytes()
+        for old in ("absent text", "Same line."):
+            with self.subTest(old=old), self.assertRaises(ValueError):
+                self._update([{"op": "replace_text", "old": old, "new": "X"}])
+            self.assertEqual(self.note.read_bytes(), before)
+
+    def test_replace_text_cannot_reach_frontmatter(self):
+        before = self.note.read_bytes()
+        with self.assertRaises(ValueError):
+            self._update([{"op": "replace_text", "old": "Preamble marker lives here too", "new": "forged"}])
+        self.assertEqual(self.note.read_bytes(), before)
+
+    def test_batched_edits_are_atomic_and_logged_once(self):
+        before, log_before = self.note.read_bytes(), self._log_lines()
+        good = [
+            {"op": "replace_text", "old": "teh vault", "new": "the vault"},
+            {"op": "replace_section", "heading": "Alpha", "body": "Alpha rewritten."},
+        ]
+        with self.assertRaises(ValueError):
+            self._update([*good, {"op": "replace_text", "old": "nowhere in body", "new": "X"}])
+        self.assertEqual(self.note.read_bytes(), before)
+        self.assertEqual(self._log_lines(), log_before)
+
+        self._update([*good, {"op": "append_section", "heading": "Gamma", "body": "New."}])
+        _, body = parse_frontmatter(self.note.read_text("utf-8"))
+        self.assertIn("the vault", body)
+        self.assertIn("Alpha rewritten.", body)
+        self.assertIn("## Gamma", body)
+        self.assertEqual(self._log_lines(), log_before + 1)
+        self.assertIn("(3 edits)", self.log.read_text("utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

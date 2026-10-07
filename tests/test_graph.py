@@ -178,6 +178,26 @@ class TestExtractWikilinks(unittest.TestCase):
         self.assertEqual(links[1].target_stem, "projects/apollo/rfc-001")
         self.assertEqual(links[1].anchor, "Design")
 
+    def test_media_embeds_and_multiline_links_ignored(self):
+        text = (
+            "Embedded diagram ![[architecture.png]] and ![[diagram.svg|300]].\n"
+            "Multiline bracket [[\nBroken-Line\n]] is not a link.\n"
+            "Real link [[Valid-Target]].\n"
+        )
+        links = extract_wikilinks(text)
+        self.assertEqual([l.target_stem for l in links], ["Valid-Target"])
+
+    def test_tilde_fences_and_multi_backtick_spans_ignored(self):
+        text = (
+            "Double backtick: ``[[InsideDoubleBacktick]]`` and `` `[[StillCode]]` ``.\n"
+            "~~~\n"
+            "[[InsideTildeFence]]\n"
+            "~~~\n"
+            "Outside [[Actual-Link]].\n"
+        )
+        links = extract_wikilinks(text)
+        self.assertEqual([l.target_stem for l in links], ["Actual-Link"])
+
 
 class TestLinkTargetIndex(unittest.TestCase):
     def test_link_target_index(self):

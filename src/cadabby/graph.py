@@ -11,9 +11,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-# Regex matching [[Target#Anchor|Alias]] ignoring backtick code spans
-RE_WIKILINK = re.compile(r"\[\[([^\]|#]+)(?:#([^\]|]+))?(?:\|([^\]]+))?\]\]")
-RE_CODE_BLOCK = re.compile(r"```[\s\S]*?```|`[^`\n]+`")
+# Regex matching [[Target#Anchor|Alias]] ignoring embeds ![[...]], multiline brackets, and code spans
+RE_WIKILINK = re.compile(r"(?<!!)\[\[([^\]|#\n]+)(?:#([^\]|\n]+))?(?:\|([^\]\n]+))?\]\]")
+RE_CODE_BLOCK = re.compile(r"```[\s\S]*?```|~~~[\s\S]*?~~~|(`+)(?:(?!\1)[^\n])+\1")
 
 
 @dataclass

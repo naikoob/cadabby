@@ -263,6 +263,23 @@ class TestLogRotation(IndexerFixture):
         self.assertIn("Entry 1", content)
         self.assertIn("Entry 2", content)
 
+    def test_rotate_vault_log_on_year_rollover(self):
+        # High byte threshold so size alone does NOT trigger rotation
+        self.vault.config["log_rotate_bytes"] = 1_000_000
+        self.vault.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.vault.log_path.write_text(
+            "# Activity Ledger (2025)\n\n- [2025-12-31T23:59:00Z] agent:test: Prior year entry\n",
+            "utf-8",
+        )
+
+        rot = rotate_vault_log(self.vault)
+        self.assertIsNotNone(rot)
+        assert rot is not None
+        self.assertEqual(rot.name, "2025.md")
+        self.assertIn("Prior year entry", rot.read_text("utf-8"))
+        self.assertNotIn("Prior year entry", self.vault.log_path.read_text("utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()
+

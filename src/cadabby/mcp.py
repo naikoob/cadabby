@@ -126,7 +126,12 @@ TOOLS = [
     },
     {
         "name": "vault_update_note",
-        "description": "Non-destructive frontmatter patches and content section append/replace-by-heading. Never truncates a file it could not fully parse.",
+        "description": (
+            "Non-destructive frontmatter patches and body edits. Section operations address '##' "
+            "headings only; use edits with replace_text for anything else (a single line, the H1, "
+            "text above the first '##'). Batch related changes into one call: edits apply atomically "
+            "in one write with one log entry. Never truncates a file it could not fully parse."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -142,12 +147,31 @@ TOOLS = [
                 "append_section": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "[heading, section_body] to append to note",
+                    "description": "[heading, section_body] to append to note as a '##' section",
                 },
                 "replace_section": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "[heading, new_section_body] to replace in note",
+                    "description": "[heading, new_section_body] to replace the '##' section with that heading",
+                },
+                "edits": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "op": {"type": "string", "enum": ["replace_text", "replace_section", "append_section"]},
+                            "old": {"type": "string", "description": "replace_text: exact text, must match once"},
+                            "new": {"type": "string", "description": "replace_text: replacement text"},
+                            "heading": {"type": "string", "description": "section ops: '##' heading text"},
+                            "body": {"type": "string", "description": "section ops: section body"},
+                        },
+                        "required": ["op"],
+                    },
+                    "description": (
+                        "Ordered body edits applied atomically: if any fails (e.g. replace_text "
+                        "'old' matches zero or several times), nothing is written. replace_text "
+                        "reaches the whole body but never the frontmatter."
+                    ),
                 },
                 "expected_hash": {"type": "string", "description": "Expected file hash for concurrency safety"},
             },
@@ -318,6 +342,7 @@ class McpServer:
                     replace_section=rep_sec,
                     expected_hash=args.get("expected_hash"),
                     actor=self.client_id,
+                    edits=args.get("edits"),
                 )
                 self.cache.scan()
                 rel = self.vault.rel_path(path)
@@ -446,18 +471,31 @@ class McpServer:
 
 
 def run_mcp_server(vault: Vault) -> int:
-    """Run stdio JSON-RPC MCP server loop."""
+    """Run stdio JSON-RPC MCP server loop.
 
-    def write_response(resp: dict[str, Any]) -> None:
-        """Emit a JSON-RPC response with a byte-accurate Content-Length header."""
+    Newline-delimited JSON is the normative MCP stdio framing (§5.2).
+    `Content-Length` framing is accepted for LSP-style clients, and every
+    reply mirrors the framing of the message it answers, so neither kind of
+    client ever receives bytes it cannot parse.
+    """
+    ndjson = "ndjson"
+    content_length = "content-length"
+
+    def write_response(resp: dict[str, Any], framing: str) -> None:
+        """Emit a JSON-RPC response in the framing the request arrived in."""
+        # json.dumps escapes control characters, so the payload never contains
+        # a raw newline and is always exactly one line in ndjson framing.
         out_bytes = json.dumps(resp).encode("utf-8")
-        header = f"Content-Length: {len(out_bytes)}\r\n\r\n".encode("ascii")
-        sys.stdout.buffer.write(header + out_bytes)
+        if framing == content_length:
+            header = f"Content-Length: {len(out_bytes)}\r\n\r\n".encode("ascii")
+            sys.stdout.buffer.write(header + out_bytes)
+        else:
+            sys.stdout.buffer.write(out_bytes + b"\n")
         sys.stdout.buffer.flush()
 
-    def write_error(code: int, message: str) -> None:
+    def write_error(code: int, message: str, framing: str) -> None:
         """Emit an id-less error so a client awaiting a reply fails fast."""
-        write_response({"jsonrpc": "2.0", "id": None, "error": {"code": code, "message": message}})
+        write_response({"jsonrpc": "2.0", "id": None, "error": {"code": code, "message": message}}, framing)
 
     with McpServer(vault) as server:
         # Read lines from stdin using binary buffer for exact byte counts
@@ -472,6 +510,7 @@ def run_mcp_server(vault: Vault) -> int:
 
             # Check for Content-Length header framing
             if line.lower().startswith("content-length:"):
+                framing = content_length
                 try:
                     length = int(line.split(":", 1)[1].strip())
                 except ValueError:
@@ -480,7 +519,7 @@ def run_mcp_server(vault: Vault) -> int:
                     # The payload length is unknown, so the following bytes
                     # cannot be consumed and the stream cannot be resynchronized;
                     # reply and stop rather than reading payload as headers.
-                    write_error(-32700, "Parse error: malformed Content-Length header")
+                    write_error(-32700, "Parse error: malformed Content-Length header", framing)
                     break
                 # Read through any remaining header lines until empty line
                 while True:
@@ -491,13 +530,14 @@ def run_mcp_server(vault: Vault) -> int:
                 try:
                     req = json.loads(payload_bytes.decode("utf-8", errors="replace"))
                 except json.JSONDecodeError:
-                    write_error(-32700, "Parse error: request body is not valid JSON")
+                    write_error(-32700, "Parse error: request body is not valid JSON", framing)
                     continue
             else:
+                framing = ndjson
                 try:
                     req = json.loads(line)
                 except json.JSONDecodeError:
-                    write_error(-32700, "Parse error: request body is not valid JSON")
+                    write_error(-32700, "Parse error: request body is not valid JSON", framing)
                     continue
 
             if not isinstance(req, dict):
@@ -514,6 +554,7 @@ def run_mcp_server(vault: Vault) -> int:
                 write_error(
                     -32600,
                     "Invalid Request: batch and non-object payloads are not supported",
+                    framing,
                 )
                 continue
 
@@ -565,6 +606,6 @@ def run_mcp_server(vault: Vault) -> int:
                     "message": f"Method not found: {method}",
                 }
 
-            write_response(resp)
+            write_response(resp, framing)
 
     return 0
