@@ -11,8 +11,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-# Regex matching [[Target#Anchor|Alias]] ignoring embeds ![[...]], multiline brackets, and code spans
-RE_WIKILINK = re.compile(r"(?<!!)\[\[([^\]|#\n]+)(?:#([^\]|\n]+))?(?:\|([^\]\n]+))?\]\]")
+# Regex matching [[Target#Anchor|Alias]] (including table-escaped \| aliases)
+# ignoring embeds ![[...]], multiline brackets, and code spans
+RE_WIKILINK = re.compile(r"(?<!!)\[\[([^\]|#\n]+?)(?:#([^\]|\n]+?))?(?:\\?\|([^\]\n]+))?\]\]")
 RE_CODE_BLOCK = re.compile(r"```[\s\S]*?```|~~~[\s\S]*?~~~|(`+)(?:(?!\1)[^\n])+\1")
 
 
@@ -38,9 +39,19 @@ def extract_wikilinks(markdown_text: str) -> list[ExtractedLink]:
     links_by_target: dict[str, ExtractedLink] = {}
 
     for match in RE_WIKILINK.finditer(clean_text):
-        target_stem = match.group(1).strip()
-        anchor = match.group(2).strip() if match.group(2) else None
         alias = match.group(3).strip() if match.group(3) else None
+        raw_stem = (
+            match.group(1).rstrip("\\")
+            if (alias is not None and not match.group(2))
+            else match.group(1)
+        )
+        target_stem = raw_stem.strip()
+        raw_anchor = (
+            match.group(2).rstrip("\\")
+            if (alias is not None and match.group(2))
+            else match.group(2)
+        )
+        anchor = raw_anchor.strip() if raw_anchor else None
 
         # Format target_raw: "Target#Anchor" or "Target"
         target_raw = f"{target_stem}#{anchor}" if anchor else target_stem

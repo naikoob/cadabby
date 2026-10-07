@@ -19,4 +19,4 @@ When interacting with a workspace containing `.cadabby.json` or `AGENTS.md`:
 10. **Delegation**:
     - Ingestion, synthesis, and cross-referencing: delegate to the `librarian` agent (`.agents/skills/librarian/SKILL.md`).
     - Cache maintenance, diagnostics, and linting: delegate to the `technician` agent (`.agents/skills/technician/SKILL.md`).
-11. **No Server, No Trust Claims**: Without the MCP tools, say the vault is offline, report no trust tier as current, and write nothing. `AGENTS.md` §3 has the fallback.
+11. **No Server, No Trust Claims**: Without the MCP tools, say the vault is offline, never infer `trust_tier` from raw frontmatter or `log.md`, and write nothing. Use `cadabby status --json` for read-only status or see `AGENTS.md` §3 for the fallback.

@@ -10,6 +10,7 @@ The **librarian** is responsible for growing the knowledge base with compounding
 ## Core Responsibilities
 
 1. **Delta Detection & Ingestion**:
+   - Apply this full checklist whenever any new or follow-up `raw/` file is processed (whether the user invokes `/ingest` or asks in prose to "update the vault" with a new source).
    - Check `vault_status` for unprocessed files in `raw/` or verification debt.
    - Read the raw source using your native file reading tools.
    - Search the vault via `vault_search` to find existing related entities and concepts.

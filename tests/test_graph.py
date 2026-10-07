@@ -198,6 +198,24 @@ class TestExtractWikilinks(unittest.TestCase):
         links = extract_wikilinks(text)
         self.assertEqual([l.target_stem for l in links], ["Actual-Link"])
 
+    def test_table_escaped_pipe_wikilinks(self):
+        text = (
+            "| Constraint | Source |\n"
+            "| :--- | :--- |\n"
+            "| Residency | [[customers/northwind/Discovery-Call\\|Discovery Call]] |\n"
+            "| Latency | [[Storage-Architecture#LSM-Trees\\|LSM Section]] |\n"
+        )
+        links = extract_wikilinks(text)
+        self.assertEqual(len(links), 2)
+        self.assertEqual(links[0].target_raw, "customers/northwind/Discovery-Call")
+        self.assertEqual(links[0].target_stem, "customers/northwind/Discovery-Call")
+        self.assertIsNone(links[0].anchor)
+        self.assertEqual(links[0].alias, "Discovery Call")
+        self.assertEqual(links[1].target_raw, "Storage-Architecture#LSM-Trees")
+        self.assertEqual(links[1].target_stem, "Storage-Architecture")
+        self.assertEqual(links[1].anchor, "LSM-Trees")
+        self.assertEqual(links[1].alias, "LSM Section")
+
 
 class TestLinkTargetIndex(unittest.TestCase):
     def test_link_target_index(self):
