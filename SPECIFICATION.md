@@ -7,6 +7,34 @@
 
 ---
 
+## 0. Reading This Document
+
+This specification is ~27k tokens. Read the section you need, not the file.
+
+Every `§` citation in this document resolves to a real heading — `test_every_section_reference_resolves`
+fails the suite otherwise — so a section number found in code comments, `AGENTS.md`, or a test docstring is
+a safe address. Extract one with:
+
+```bash
+awk '/^## 4\./,/^## 5\./' SPECIFICATION.md     # one top-level section
+grep -n '^#\{2,4\} ' SPECIFICATION.md          # all headings with line numbers
+```
+
+| § | Section | Answers |
+| :--- | :--- | :--- |
+| 1 | Executive Summary & System Vision | What Cadabby is for and what it refuses to be |
+| 2 | Vault Architecture & Directory Conventions | Layer layout, flat `wiki/`, cognitive domains, `index.md` as gap report, vault resolution |
+| 3 | Epistemic Trust Tiers & OKF Frontmatter | The restricted YAML subset, body hashing, the four tiers, git provenance audit |
+| 4 | SQLite Ephemeral Cache & Search Engine | Schema, dual contentless-external FTS5 tables, retraction invariant, BM25 epistemic ranking |
+| 5 | Cadabby Tool Surface (CLI & MCP) | The 7-tool invariant, command surface, error taxonomy and exit codes |
+| 6 | Core Operational Workflows | Ingestion, synthesis, verification, and the six lint gates end to end |
+| 7 | Multi-Harness Consumption Architecture | Single-definition personas, plugin assembly, shims, templates, `init`/`install` ownership |
+| 8 | Durability & Concurrency | Atomic replace, advisory locking, append-only ledger writes |
+| 9 | Codebase Packaging & Repository Structure | The authoritative file tree and the ports/adapters boundary |
+| 10 | Acceptance Criteria | Falsifiable observations, each traced to the test that checks it |
+
+---
+
 ## 1. Executive Summary & System Vision
 
 **Cadabby** is a zero-dependency, pure Python standard library engine (CLI + Model Context Protocol server) designed to power personal and shared **LLM Wiki vaults** optimized for seamless co-working between humans and autonomous AI agents.

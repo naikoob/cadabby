@@ -663,6 +663,45 @@ class TestHarnessShimsStayThin(unittest.TestCase):
                 self.assertRegex(body, r"\.agents/skills/|AGENTS\.md", "A shim must delegate to vault content")
 
 
+class TestSpecReadingMap(unittest.TestCase):
+    """§0 exists so an agent can load one section instead of all ~27k tokens.
+
+    That only works while the map is complete: a section it omits is a section
+    nobody addresses directly, so the reader falls back to reading the whole
+    file and the map has cost more than it saved.
+    """
+
+    def setUp(self):
+        self.repo_root = Path(__file__).resolve().parent.parent
+        self.spec = (self.repo_root / "SPECIFICATION.md").read_text("utf-8")
+        self.table = self.spec.split("## 0. Reading This Document")[1].split("## 1.")[0]
+        self.mapped = set(re.findall(r"^\|\s*(\d+)\s*\|", self.table, re.M))
+
+    def test_every_top_level_section_is_mapped(self):
+        # §0 documents the others and does not list itself.
+        actual = {m.group(1) for m in re.finditer(r"^##\s+(\d+)\.", self.spec, re.M)} - {"0"}
+        self.assertEqual(
+            sorted(actual - self.mapped, key=int), [], "§0's reading map omits top-level sections"
+        )
+
+    def test_map_names_no_section_that_does_not_exist(self):
+        actual = {m.group(1) for m in re.finditer(r"^##\s+(\d+)\.", self.spec, re.M)}
+        self.assertEqual(
+            sorted(self.mapped - actual, key=int), [], "§0's reading map points at sections that do not exist"
+        )
+
+    def test_section_markers_are_unique_so_range_extraction_is_unambiguous(self):
+        """The documented `awk` range only works while each marker appears once.
+
+        A second line starting `## 4.` -- or a heading restyled past the
+        `^## <n>.` anchor -- silently truncates the extraction, handing the
+        reader a fragment they have no way to notice is partial.
+        """
+        for section in sorted(self.mapped, key=int):
+            hits = re.findall(rf"^##\s+{section}\.", self.spec, re.M)
+            self.assertEqual(len(hits), 1, f"`## {section}.` must anchor exactly one line, found {len(hits)}")
+
+
 class TestAcceptanceTraceability(unittest.TestCase):
     """§10's traceability table is only worth having if it cannot quietly rot.
 
