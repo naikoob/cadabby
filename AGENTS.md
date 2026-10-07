@@ -11,7 +11,7 @@ This document is the canonical constitution and operational handbook for AI agen
 ### Non-Negotiable Tenets
 1. **Zero Runtime Dependencies**: `pyproject.toml` specifies `dependencies = []`. Cadabby runs exclusively on the Python standard library (`sqlite3`, `pathlib`, `json`, `hashlib`, `re`, `argparse`, `dataclasses`, `typing`, `tempfile`, `shutil`, `sys`, `os`). Never introduce third-party runtime dependencies (no PyYAML, no Pydantic, no Click, no Requests).
 2. **Python >= 3.11 Standard**: Use modern Python idioms (`from __future__ import annotations`, `typing.Protocol`, structural pattern matching, `Path`, `datetime`). All functions must have strict type annotations.
-3. **Specification as Ground Truth**: [`SPECIFICATION.md`](SPECIFICATION.md) (v0.3.1) is the normative specification. If code and specification disagree, the specification is the truth, or the specification must be deliberately updated in concert with code and acceptance tests.
+3. **Specification as Ground Truth**: [`SPECIFICATION.md`](SPECIFICATION.md) (v0.3.1) is the normative specification. If code and specification disagree, the specification is the truth, or the specification must be deliberately updated in concert with code and acceptance tests. It is ~27k tokens: read the `§` you need rather than the whole file. §0 maps every section to the question it answers and gives the one-line `awk` recipe for extracting one, and the §-reference guard means any section number you find in a comment or test docstring is a safe address.
 4. **Hexagonal Architecture (Ports and Adapters)**: Core use cases in [`src/cadabby/ops.py`](src/cadabby/ops.py) interact with storage and ledgers via driven `typing.Protocol` interfaces in [`src/cadabby/ports.py`](src/cadabby/ports.py), allowing hermetic unit testing without disk I/O.
 5. **Atomic Durability**: Vault files are never written directly in place. All mutations use temporary files in the same directory, `fsync()`, and `os.replace()` to ensure crash-safe atomicity.
 
@@ -84,74 +84,30 @@ Any agent modifying Cadabby must strictly preserve the following architectural c
 
 ## 3. Repository Structure & Component Map
 
-```text
-cadabby/
-├── pyproject.toml              # Build config (flit_core), zero runtime dependencies, requires-python >= 3.11
-├── uv.lock                     # Developer environment lockfile
-├── README.md                   # User documentation, quickstart, CLI & harness guide
-├── SPECIFICATION.md            # Normative system specification (v0.3.1)
-├── AGENTS.md                   # This file (developer & agent constitution)
-├── LICENSE                     # MIT
-│
-├── src/cadabby/                # Core Python package
-│   ├── __init__.py             # Exports and __version__
-│   ├── __main__.py             # Entry point for `python3 -m cadabby`
-│   ├── cli.py                  # CLI subcommands, argument parsing, terminal output formatting
-│   ├── constants.py            # Enums, default configs, schemas, ignored directory lists
-│   ├── domain.py               # Note entity, cognitive domain definitions, {domain}/AGENTS.md parser
-│   ├── vault.py                # Vault root resolution (§2.7), config loading, CID/path mapping
-│   ├── frontmatter.py          # Restricted YAML subset parser & canonicalizing writer (§3.2)
-│   ├── okf.py                  # OKF validation, body hashing, trust tier derivation (§3.1-§3.4)
-│   ├── fsutil.py               # Atomic replace (tempfile + fsync), advisory lock, O_APPEND ledger writes
-│   ├── cache.py                # SQLite cache, FTS5 external content, scan, upsert/delete, BM25 search
-│   ├── graph.py                # Wikilink parsing, target CID resolution, backlinks
-│   ├── indexer.py              # Gap report generator (index.md) and activity ledger rotation (log.md)
-│   ├── lint.py                 # Dynamic six-gate epistemic linting across all cognitive domains
-│   ├── audit.py                # Git blame provenance audit for human:* attestations (§3.5)
-│   ├── ops.py                  # Core use cases (scaffold, update, verify, ground) implementing business logic
-│   ├── installer.py            # cadabby init / install harness registration, idempotent config merge
-│   ├── mcp.py                  # JSON-RPC 2.0 stdio MCP server (7 tools + domain resources)
-│   │
-│   ├── ports.py                # Driven ports: NoteStoragePort, LedgerPort, IndexCachePort
-│   ├── adapters/
-│   │   ├── disk_storage.py     # Production DiskNoteStorage, FileLedger
-│   │   └── memory_storage.py   # Hermetic InMemoryNoteStorage, InMemoryLedger for tests
-│   │
-│   └── assets/                 # Shipped inside the wheel
-│       ├── vault/              # Starter files (.cadabby.json, AGENTS.md, STYLE.md, index.md, etc.)
-│       │   ├── obsidian/       # app.json, plus templates.json for --obsidian-templates
-│       │   └── templates/      # Starter note templates (Concept.md, MOC.md)
-│       ├── skills/             # Canonical persona runbooks (librarian, technician)
-│       ├── commands/           # Thin slash-command shims (ingest, vault-status, vault-lint)
-│       └── plugins/cadabby/    # Bundled Antigravity plugin (plugin.json, mcp_config.json, skills, agents)
-│
-├── examples/
-│   └── demo-vault/             # Golden fixture vault used by tests and examples
-│
-└── tests/                      # Complete test suite (pure unittest, zero test dependencies)
-    ├── helpers.py              # Shared test fixtures, mock helpers, and demo-vault copy
-    ├── run_parallel.py         # Zero-dependency parallel test runner (process pool)
-    ├── test_fsutil.py          # Atomic durability (tempfile + fsync), locks, O_APPEND ledger
-    ├── test_vault.py           # Vault root resolution (§2.7), config deep merge, path/CID mapping
-    ├── test_frontmatter.py     # Subset parse/write boundary, round-trip fidelity (§3.2)
-    ├── test_okf.py             # Body hashing, actor/timestamp validation, tier derivation (§3.1-§3.4)
-    ├── test_cache.py           # Scan, deletion reconciliation, FTS5 ranking & integrity
-    ├── test_graph.py           # Wikilink resolution, anchors, aliases, dead links, target index
-    ├── test_indexer.py         # index.md gap report, MOC reachability, log rotation
-    ├── test_lint.py            # Six gates, taxonomy closure, warning vs error severities
-    ├── test_errors.py          # Code taxonomy, retryability, MCP payload, exit codes (§5.4)
-    ├── test_ops.py             # Scaffolding, attribution, conflict detection, atomicity
-    ├── test_audit.py           # Git blame provenance audit for human:* attestations (§3.5)
-    ├── test_adapters.py        # Driven secondary storage adapters (DiskNoteStorage, FileLedger) (§9.1)
-    ├── test_domain_model.py    # Note entity and use cases driven through memory adapters
-    ├── test_domains.py         # Multi-domain discovery, cache, linting, ops, MCP resources
-    ├── test_templates.py       # Template folder exclusion, scaffold from template, starters (§7.5)
-    ├── test_mcp.py             # MCP handshake, tool execution, human:* refusal
-    ├── test_cli.py             # Command surface, flags, JSON output, install refresh
-    ├── test_installer.py       # init scaffolding, idempotency, merge, uninstall, dry-run
-    ├── test_run_parallel.py    # Parallel test runner target discovery, worker dispatch, and CLI
-    └── test_acceptance.py      # §10 Acceptance criteria and TestAcceptanceTraceability
-```
+The authoritative file-by-file tree lives in [`SPECIFICATION.md` §9](SPECIFICATION.md), and is held true by
+`TestSpecRepositoryTree` in [`tests/test_acceptance.py`](tests/test_acceptance.py): a new module or test file
+that the tree does not name fails the suite, and a tree entry naming a file that does not exist fails it too.
+Read §9 when you need the full map. It is deliberately not copied here -- the copy that used to sit in this
+section was guarded by nothing and had already drifted, omitting `errors.py` after the error taxonomy landed.
+
+What follows is orientation only: where to enter the codebase for a given kind of change.
+
+| If you are changing... | Start at | Then check |
+| :--- | :--- | :--- |
+| Note schema, trust tiers, body hashing | `okf.py`, `frontmatter.py` | §3, `test_okf.py`, `test_frontmatter.py` |
+| Search, ranking, the FTS5 tables, scanning | `cache.py` | §4, `test_cache.py` |
+| Wikilink parsing, resolution, backlinks | `graph.py` | §2.5, `test_graph.py` |
+| `index.md` or `log.md` output | `indexer.py` | §2.5, `test_indexer.py` |
+| A lint gate's codes or severities | `lint.py` | §6.3, `test_lint.py` |
+| Scaffold / update / verify / ground behavior | `ops.py` (+ `ports.py`, `adapters/`) | §9.1, `test_ops.py`, `test_domain_model.py` |
+| The MCP tool surface or resources | `mcp.py` | §5, §7, `test_mcp.py` |
+| CLI flags, output, exit codes | `cli.py`, `errors.py` | §5.4, `test_cli.py`, `test_errors.py` |
+| `init` / `install` and file ownership | `installer.py` | §7.6, `test_installer.py` |
+| Anything shipped into a user's vault | `src/cadabby/assets/` | §7.1, §7.5, `test_templates.py` |
+
+Two structural facts worth holding without a lookup: every port has a production adapter and a hermetic
+in-memory twin, so a use case can be tested with no vault on disk; and everything under `src/cadabby/assets/`
+is inside the package on purpose, because anything outside it is absent from the built wheel.
 
 ---
 
