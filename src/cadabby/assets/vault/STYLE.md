@@ -3,7 +3,7 @@
 * **Voice**: Authoritative, analytical, objective, and dense. Avoid conversational filler, throat-clearing, and sycophantic intros.
 * **Epistemic Honesty Over Completeness**: Write only what the cited `raw/` sources and linked vault notes establish. Never extrapolate benchmarks, SLAs, architectural guarantees, or dates from general model knowledge to make a note look complete; omit unattested details or record them as explicit open questions.
 * **Titles**: Capitalized Human-Readable Stems (e.g., `Flash-Attention`, `Epistemic-Trust-Tiers`).
-* **Cross-Linking**: Generously link entities and concepts using `[[Wikilinks]]` or `[[Wikilinks|Aliases]]`.
+* **Cross-Linking**: Generously link entities and concepts using `[[Wikilinks]]` or `[[Wikilinks|Aliases]]`. Inside Markdown table cells, escape the alias pipe as `\|` (`[[Wikilinks\|Aliases]]` or `[[Wikilinks#Section\|Aliases]]`) so it does not split the table column; the link resolver strips the escape backslash automatically.
 * **OKF Frontmatter**: Every note across all cognitive domains (both `wiki/` and custom domains like `customers/` or `projects/`) must begin with strict YAML frontmatter specifying `type`, `title`, `description`, and `status`.
 * **Tags**: Lowercase kebab-case, with `/` for hierarchy (e.g. `knowledge-base`, `trust/human-reviewed`). Tags must never contain whitespace — write `machine-learning`, not `machine learning` — because a tag with a space silently breaks `--tag` filtering. Casing is normalized on write; whitespace is rejected outright.
 * **Governance**: Consult `AGENTS.md` for cognitive domain manifests, epistemic trust tiers, and operational rules.
