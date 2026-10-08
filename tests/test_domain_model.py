@@ -6,6 +6,7 @@ import unittest
 
 from cadabby.adapters.memory_storage import InMemoryLedger, InMemoryNoteStorage
 from cadabby.domain import Note, split_markdown_sections
+from cadabby.errors import HumanAttestationRefusedError
 from cadabby.fsutil import VaultConflictError
 from cadabby.ops import (
     GroundNotesUseCase,
@@ -52,6 +53,18 @@ class TestDomainModel(unittest.TestCase):
         # Invalid actor format raises ValueError
         with self.assertRaises(ValueError):
             note.add_attestation(actor="invalid-actor-without-prefix")
+
+    def test_missing_type_and_status_read_as_missing(self):
+        """C40: an omitted required field is reported empty, never as an invented default.
+
+        `type` used to read as `concept` and `status` as `draft`, so grounding
+        a note lint flags as FIELD_MISSING showed a plausible, fabricated value.
+        """
+        note = Note(cid="wiki/Bare", rel_path="wiki/Bare.md", frontmatter={"title": "Bare"}, body="# Bare\n")
+        self.assertEqual((note.type, note.status), ("", ""))
+        storage = InMemoryNoteStorage([note])
+        grounded = GroundNotesUseCase(storage).execute(["wiki/Bare"])
+        self.assertEqual((grounded[0]["type"], grounded[0]["status"]), ("", ""))
 
     def test_section_replace_and_append(self):
         body = "# Title\n\nIntro\n\n## Section A\n\nOld A content\n\n## Section B\n\nB content\n"
@@ -170,8 +183,9 @@ class TestInMemoryHexagonalUseCases(unittest.TestCase):
         self.assertEqual(len(self.ledger.entries), 2)
 
         # 3. Verify
-        # Human over non-human authorized raises PermissionError
-        with self.assertRaises(PermissionError):
+        # A human:* attestation without interactive authorization is refused with
+        # the categorical code, never PERMISSION_DENIED (C12).
+        with self.assertRaises(HumanAttestationRefusedError):
             verify_uc.execute(
                 cid_or_path="wiki/Fast-Attention",
                 actor="human:alice",

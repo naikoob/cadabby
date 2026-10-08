@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from cadabby.adapters.disk_storage import DiskNoteStorage
+from cadabby.errors import HumanAttestationRefusedError
 from cadabby.frontmatter import FrontmatterSerializeError, parse_frontmatter
 from cadabby.fsutil import compute_file_sha256
 from cadabby.ops import ground_notes, scaffold_note, update_note, verify_note
@@ -22,6 +23,25 @@ class TestOps(unittest.TestCase):
 
     def tearDown(self):
         self.tmp_dir.cleanup()
+
+    def test_scaffold_path_outside_note_locations_is_refused(self):
+        """§2.1, §2.2, C6: scaffold refuses any path the scan would never index."""
+        refused = (
+            "raw/Sneaky",
+            "log/Sneaky",
+            ".hidden/Note",
+            "customers/node_modules/Note",
+            "wiki/sub/Nested",
+            "customers/AGENTS",
+        )
+        for path in refused:
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(ValueError, "Cannot scaffold"):
+                    scaffold_note(self.vault, title="T", type_="concept", description="d", path=path)
+                self.assertFalse((self.vault_root / f"{path}.md").exists())
+        # A new domain folder needs no registration step (§2.2).
+        created = scaffold_note(self.vault, title="T", type_="concept", description="d", path="fresh/Note")
+        self.assertTrue(created.is_file())
 
     def test_update_note_rejects_out_of_subset_patch_without_touching_the_file(self):
         """An over-nested patch must fail the write, not corrupt the note (§3.2).
@@ -130,8 +150,9 @@ class TestOps(unittest.TestCase):
     def test_verify_note_human_refusal_and_machine_attestation(self):
         cid = "wiki/Flash-Attention"
 
-        # Attempting human verification over MCP (without is_human_authorized) must raise PermissionError
-        with self.assertRaises(PermissionError):
+        # A human:* attestation without interactive authorization is refused with
+        # the categorical code, never PERMISSION_DENIED (C12).
+        with self.assertRaises(HumanAttestationRefusedError):
             verify_note(
                 vault=self.vault,
                 cid_or_path=cid,
@@ -364,6 +385,45 @@ class TestUpdateNoteEdits(unittest.TestCase):
         self.assertIn("## Gamma", body)
         self.assertEqual(self._log_lines(), log_before + 1)
         self.assertIn("(3 edits)", self.log.read_text("utf-8"))
+
+    def test_truncate_to_budget_respects_budget_on_single_section_note(self):
+        from cadabby.domain import Note
+        from cadabby.ops import _truncate_to_budget
+
+        long_note = Note(
+            cid="wiki/Long",
+            rel_path="wiki/Long.md",
+            frontmatter={"type": "concept", "title": "Long", "description": "Desc", "status": "active"},
+            body="A" * 600 + "\n",
+        )
+        out, truncated = _truncate_to_budget(long_note, budget_tokens=100)
+        self.assertTrue(truncated)
+        self.assertLessEqual(len(out), 400)
+        self.assertIn("[truncated: 0 of 1 sections included]", out)
+
+    def test_scaffold_rejects_dot_segment_and_collapses_double_slashes(self):
+        from cadabby.adapters.memory_storage import InMemoryLedger, InMemoryNoteStorage
+        from cadabby.ops import ScaffoldNoteUseCase
+
+        uc = ScaffoldNoteUseCase(InMemoryNoteStorage(), InMemoryLedger())
+        with self.assertRaises(ValueError):
+            uc.execute(title="Dot", type_="concept", description="d", path="./Note")
+        with self.assertRaises(ValueError):
+            uc.execute(title="Dot", type_="concept", description="d", path="customers/./Note")
+
+        clean = uc.execute(title="Clean", type_="concept", description="d", domain="customers", path="customers//acme//Note")
+        self.assertEqual(clean.rel_path, "customers/acme/Note.md")
+
+    def test_verify_note_idempotency_sets_already_verified_and_skips_second_write(self):
+        from cadabby.ops import verify_note
+
+        first = verify_note(self.vault, "wiki/Edits-Fixture", actor="agent:test")
+        self.assertFalse(first["already_verified"])
+        log_after_first = self._log_lines()
+
+        second = verify_note(self.vault, "wiki/Edits-Fixture", actor="agent:test")
+        self.assertTrue(second["already_verified"])
+        self.assertEqual(self._log_lines(), log_after_first)
 
 
 if __name__ == "__main__":

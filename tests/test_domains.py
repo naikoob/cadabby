@@ -315,6 +315,7 @@ Apollo specific architecture design.
         d = proj_results[0].to_dict()
         self.assertEqual(d["domain"], "projects")
         self.assertEqual(d["cid"], "projects/apollo/Architecture")
+        cache.close()
 
     def test_cross_domain_links_and_stem_priority(self):
         # 1. Wiki canonical Architecture note
@@ -373,6 +374,7 @@ See standard [[Architecture]] and project [[apollo/Architecture]].
 
         # Specific [[apollo/Architecture]] MUST resolve to project note
         self.assertEqual(links["apollo/Architecture"], "projects/apollo/Architecture")
+        cache.close()
 
 
 class TestMultiDomainLinter(unittest.TestCase):
@@ -721,6 +723,52 @@ Details here.
             self.assertEqual(results[0]["cid"], "customers/Beta-Client")
             self.assertEqual(results[0]["domain"], "customers")
 
+
+class TestDomainManifestValidity(unittest.TestCase):
+    """§2.2, §6.3, C35. A manifest that cannot be honored is reported, never read as 'open'."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.vault_dir = Path(self.tmp.name) / "vault"
+        self.vault = create_test_vault(self.vault_dir, subdirs=("wiki", "customers", "raw", "log"))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _manifest(self, text):
+        (self.vault_dir / "customers" / "AGENTS.md").write_text(text, encoding="utf-8")
+
+    def test_invalid_manifest_is_reported_and_blocks_scaffold(self):
+        self._manifest("---\nallowed_types: [account, contact]\n---\n# Directives\n")
+        findings = [f for f in run_vault_lint(self.vault) if f.code == "DOMAIN_MANIFEST_INVALID"]
+        self.assertEqual([f.rel_path for f in findings], ["customers/AGENTS.md"])
+        self.assertEqual(findings[0].severity, "error")
+        with self.assertRaisesRegex(ValueError, "AGENTS.md is invalid"):
+            scaffold_note(self.vault, title="Acme", type_="account", description="d", domain="customers")
+        self.assertFalse((self.vault_dir / "customers" / "Acme.md").exists())
+        directives = self.vault.discover_domains()["customers"].directives_markdown
+        self.assertNotIn("allowed_types", directives)
+        self.assertIn("# Directives", directives)
+
+    def test_manifest_field_shapes_are_checked(self):
+        cases = {
+            "allowed_types": "---\nallowed_types: account\n---\n",
+            "require_sources": "---\nrequire_sources: yes\n---\n",
+            "folder name": "---\ndomain: clients\n---\n",
+        }
+        for needle, text in cases.items():
+            with self.subTest(field=needle):
+                self._manifest(text)
+                error = self.vault.discover_domains()["customers"].manifest_error
+                self.assertIsNotNone(error)
+                self.assertIn(needle, error)
+
+    def test_valid_manifest_has_no_error(self):
+        self._manifest("---\ndomain: customers\nallowed_types:\n  - account\nrequire_sources: true\n---\n")
+        domain = self.vault.discover_domains()["customers"]
+        self.assertIsNone(domain.manifest_error)
+        self.assertEqual(domain.allowed_types, ["account"])
+        self.assertTrue(domain.require_sources)
 
 class TestMultiDomainEndToEnd(unittest.TestCase):
     def setUp(self):

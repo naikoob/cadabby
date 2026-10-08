@@ -6,6 +6,7 @@ Conforms to Cadabby Technical Specification §2.1-§2.3.
 from __future__ import annotations
 
 import json
+import math
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -13,8 +14,10 @@ from pathlib import Path
 from typing import Any
 
 from cadabby.constants import (
+    CONFIG_SCHEMA_VERSION,
     DEFAULT_IGNORED_DIRS,
     DEFAULT_INTEGRITY,
+    INTEGRITY_MODES,
     DEFAULT_LOG_ROTATE_BYTES,
     DEFAULT_RAW_TEXT_EXTENSIONS,
     DEFAULT_STATUS_MULTIPLIERS,
@@ -31,7 +34,6 @@ from cadabby.constants import (
     FILE_LOCK,
     FILE_LOG,
     FILE_OBSIDIAN_TEMPLATES,
-    SCHEMA_VERSION,
 )
 from cadabby.domain import DomainDefinition
 
@@ -73,20 +75,19 @@ def vault_search_start(start_path: Path | str | None = None) -> Path:
 
 
 def find_vault_root(start_path: Path | str | None = None) -> Path | None:
-    """Locate the vault root, in order of precedence.
+    """Locate the vault root per §2.7 levels 2 and 3.
 
-    1. Explicit start_path (e.g. a caller-supplied search origin), walked upward.
-    2. CADABBY_VAULT environment variable, taken as an exact root.
-    3. The current working directory, walked upward.
-
-    CADABBY_VAULT is consulted only when start_path is None, since an explicit
-    start point is the more specific request. Walking upward looks for a root
-    marker (.cadabby.json or .obsidian); a start point with no marker above it
-    yields None rather than being accepted as a root. Raises FileNotFoundError
-    if CADABBY_VAULT is set but does not name a vault.
-
-    Note that --vault does not reach here: it designates a root exactly, via
+    Level 1 (--vault) never reaches here: it names a root exactly, via
     Vault.at(), which never walks up.
+
+    2. CADABBY_VAULT, taken as an exact root. Raises FileNotFoundError if it
+       is set but does not name a vault.
+    3. The working directory, walked upward to the first .cadabby.json or
+       .obsidian/ marker. None if no marker is found.
+
+    `start_path` replaces the working directory as the walk's origin (it is
+    how callers ask "which vault contains this file?"), and being the more
+    specific request, it also skips level 2.
     """
     if start_path is None:
         env_root = env_vault_root()
@@ -118,7 +119,7 @@ def _no_vault_message(location: Path | str) -> str:
 def default_vault_config(vault_name: str = "vault") -> dict[str, Any]:
     """Return default vault configuration dictionary."""
     return {
-        "schema": SCHEMA_VERSION,
+        "schema": CONFIG_SCHEMA_VERSION,
         "vault_name": vault_name,
         "raw_text_extensions": list(DEFAULT_RAW_TEXT_EXTENSIONS),
         "integrity": DEFAULT_INTEGRITY,
@@ -157,7 +158,9 @@ def _check_config_type(cfg_file: Path, key: str, value: Any, default: Any) -> No
     """
     if isinstance(default, bool):
         ok = isinstance(value, bool)
-    elif isinstance(default, (int, float)):
+    elif isinstance(default, int):
+        ok = isinstance(value, int) and not isinstance(value, bool)
+    elif isinstance(default, float):
         ok = isinstance(value, (int, float)) and not isinstance(value, bool)
     else:
         ok = isinstance(value, type(default))
@@ -214,7 +217,41 @@ def load_vault_config(vault_root: Path) -> dict[str, Any]:
                 # could have told its users it did nothing.
                 cfg[k] = v
 
+        _check_config_values(cfg_file, cfg)
+
     return cfg
+
+
+def _check_config_values(cfg_file: Path, cfg: dict[str, Any]) -> None:
+    """Reject values of the right JSON type but outside their domain (§2.6).
+
+    After this, every consumer may index the known keys directly: there is no
+    second, silent repair further down (search used to coerce a bad multiplier
+    to 1.0 and rank on, with nothing telling the user their setting was inert).
+    """
+
+    def fail(key: str, expected: str) -> None:
+        raise VaultConfigError(f"Invalid configuration value in {cfg_file}: '{key}' must be {expected}")
+
+    if cfg["integrity"] not in INTEGRITY_MODES:
+        fail("integrity", " or ".join(f"'{m}'" for m in INTEGRITY_MODES))
+    if isinstance(cfg["log_rotate_bytes"], bool) or not isinstance(cfg["log_rotate_bytes"], int) or cfg["log_rotate_bytes"] < 1:
+        fail("log_rotate_bytes", "a positive integer")
+    for table in ("trust", "status"):
+        for name, mult in cfg["ranking"][table].items():
+            # json.loads accepts NaN and Infinity; neither renders as SQL.
+            if isinstance(mult, bool) or not isinstance(mult, (int, float)) or not math.isfinite(mult):
+                fail(f"ranking.{table}.{name}", "a finite number")
+    if not all(isinstance(ext, str) for ext in cfg["raw_text_extensions"]):
+        fail("raw_text_extensions", "an array of strings")
+    for actor, emails in cfg["identities"].items():
+        if not isinstance(emails, list) or not all(isinstance(e, str) for e in emails):
+            fail(f"identities.{actor}", "an array of email strings")
+
+
+def normalize_rel(path: str | Path) -> str:
+    """Forward slashes, no leading or trailing slash: the one spelling of a vault-relative path."""
+    return str(path).replace("\\", "/").strip("/")
 
 
 def path_to_cid(rel_path: str | Path) -> str:
@@ -227,7 +264,7 @@ def path_to_cid(rel_path: str | Path) -> str:
         'raw/paper.pdf' -> 'raw/paper.pdf'
         'raw/notes.md' -> 'raw/notes.md'
     """
-    clean_path = str(rel_path).replace("\\", "/").strip("/")
+    clean_path = normalize_rel(rel_path)
     first_seg = clean_path.split("/")[0]
     if first_seg in (DIR_RAW, DIR_LOG) or not clean_path.endswith(".md"):
         return clean_path
@@ -242,7 +279,7 @@ def cid_to_path(cid: str) -> str:
         'customers/acme/README' -> 'customers/acme/README.md'
         'raw/paper.pdf' -> 'raw/paper.pdf'
     """
-    clean_cid = str(cid).replace("\\", "/").strip("/")
+    clean_cid = str(cid).replace("\\", "/").rstrip("/")
     first_seg = clean_cid.split("/")[0]
     if first_seg in (DIR_RAW, DIR_LOG) or clean_cid.endswith(".md"):
         return clean_cid
@@ -258,7 +295,7 @@ def path_to_layer(rel_path: str | Path) -> str:
         'projects/apollo/rfc-001.md' -> 'projects'
         'raw/data.csv' -> 'raw'
     """
-    clean = str(rel_path).replace("\\", "/").strip("/")
+    clean = normalize_rel(rel_path)
     parts = clean.split("/")
     return parts[0] if len(parts) > 1 else "root"
 
@@ -266,6 +303,44 @@ def path_to_layer(rel_path: str | Path) -> str:
 def path_to_stem(rel_path: str | Path) -> str:
     """Extract the note or file stem."""
     return Path(rel_path).stem
+
+
+def is_excluded_dir(name: str) -> bool:
+    """Whether discovery skips a folder of this name at any depth (§2.2)."""
+    return name.startswith(".") or name in DEFAULT_IGNORED_DIRS
+
+
+def note_path_violation(rel_path: str, template_rel: str | None = None, *, for_write: bool = False) -> str | None:
+    """Why `rel_path` cannot hold a note, or None if it can (§2.1, §2.2, §7.5).
+
+    The single statement of "which paths are notes": the scan's walk
+    (`discover_domains` + `iter_domain_notes`), the storage adapter, Markdown
+    link classification and scaffold all ask here. `template_rel` is the
+    vault-relative Obsidian template folder, if one is configured.
+
+    `for_write` adds the flat-wiki rule. A nested wiki note is still a note --
+    the scan indexes it so gate 2 can report it -- but nothing may create one.
+    """
+    if not rel_path or str(rel_path).startswith(("/", "\\")) or Path(rel_path).is_absolute():
+        return "a note path must be relative to the vault root"
+    clean = normalize_rel(rel_path)
+    parts = clean.split("/")
+    if len(parts) < 2 or any(p in ("", ".", "..") for p in parts):
+        return "a note lives inside a domain folder, never at the vault root"
+    *dirs, name = parts
+    if any(is_excluded_dir(d) for d in dirs):
+        return "dot-folders and ignored folders are never indexed"
+    if dirs[0] in (DIR_RAW, DIR_LOG):
+        return f"'{dirs[0]}/' is reserved and holds no notes"
+    if template_rel and clean.startswith(normalize_rel(template_rel) + "/"):
+        return "the Obsidian template folder holds templates, not notes"
+    if name == FILE_AGENTS:
+        return f"{FILE_AGENTS} is the domain's manifest, not a note"
+    if name.startswith(".") or not name.endswith(".md"):
+        return "a note is a visible .md file"
+    if for_write and dirs[0] == DIR_WIKI and len(parts) > 2:
+        return "wiki/ is flat; nested folders are not allowed"
+    return None
 
 
 def obsidian_template_dir(root: Path | str) -> Path | None:
@@ -298,7 +373,7 @@ def obsidian_template_dir(root: Path | str) -> Path | None:
     if not isinstance(folder, str) or not folder.strip():
         return None
 
-    rel = folder.replace("\\", "/").strip("/")
+    rel = normalize_rel(folder)
     parts = [p for p in rel.split("/") if p and p != "."]
     # Checked before stripping made it invisible: '/etc' survives strip('/')
     # as 'etc' and would silently exclude <vault>/etc.
@@ -317,18 +392,18 @@ def obsidian_template_dir(root: Path | str) -> Path | None:
 
 @dataclass
 class Vault:
-    """Encapsulates a local Cadabby vault directory and configuration."""
+    """Encapsulates a local Cadabby vault directory and configuration.
 
-    root: Path | str | None = None
+    `root` is taken as given. Discovery (§2.7) lives in `Vault.open()` and
+    `Vault.at()`; there is no silent fallback to the working directory, which
+    used to open a non-vault as though it were one.
+    """
+
+    root: Path | str
     config: dict[str, Any] = field(default_factory=dict)
 
-    def __post_init__(self):
-        if self.root is None:
-            discovered = find_vault_root()
-            self.root = discovered if discovered is not None else Path.cwd().resolve()
-        else:
-            self.root = Path(self.root).resolve()
-
+    def __post_init__(self) -> None:
+        self.root = Path(self.root).resolve()
         if not self.config:
             self.config = load_vault_config(self.root)
 
@@ -377,11 +452,6 @@ class Vault:
         return self.dot_cadabby_dir / FILE_CACHE_DB
 
     @property
-    def cache_path(self) -> Path:
-        """Alias for cache_db_path."""
-        return self.cache_db_path
-
-    @property
     def lock_path(self) -> Path:
         return self.dot_cadabby_dir / FILE_LOCK
 
@@ -410,6 +480,15 @@ class Vault:
         """The folder Obsidian's core Templates plugin writes templates into (§7.5)."""
         return obsidian_template_dir(self.root)
 
+    def template_rel(self) -> str | None:
+        """`template_dir()` as a vault-relative path, the form `note_path_violation` takes."""
+        tpl_dir = self.template_dir()
+        return self.rel_path(tpl_dir) if tpl_dir is not None else None
+
+    def note_path_violation(self, rel_path: str, *, for_write: bool = False) -> str | None:
+        """`note_path_violation` against this vault's template folder."""
+        return note_path_violation(rel_path, self.template_rel(), for_write=for_write)
+
     def read_template_body(self, name: str) -> str:
         """Body of a named Obsidian template, with its frontmatter discarded.
 
@@ -429,7 +508,7 @@ class Vault:
 
         # is_absolute is asked of the original, as in template_dir: strip('/')
         # would turn '/etc/passwd' into a plausible-looking relative name.
-        stem = name.replace("\\", "/").strip("/")
+        stem = normalize_rel(name)
         if not stem or Path(name).is_absolute():
             raise ValueError(f"Invalid template name '{name}'")
         filename = stem if stem.endswith(".md") else f"{stem}.md"
@@ -441,7 +520,7 @@ class Vault:
         if not path.is_file():
             raise FileNotFoundError(f"Template not found: {self.rel_path(path)}")
 
-        _, body, _ = split_frontmatter(path.read_text("utf-8"))
+        _, body = split_frontmatter(path.read_text("utf-8"))
         return body
 
     def discover_domains(self) -> dict[str, DomainDefinition]:
@@ -453,14 +532,7 @@ class Vault:
         if wiki_agents_md.exists():
             domains[DIR_WIKI] = self._load_domain_from_agents_md(DIR_WIKI, self.wiki_dir, wiki_agents_md)
         else:
-            domains[DIR_WIKI] = DomainDefinition(
-                name=DIR_WIKI,
-                path=self.wiki_dir,
-                description="Canonical knowledge base",
-                allowed_types=None,
-                require_sources=False,
-                directives_markdown="",
-            )
+            domains[DIR_WIKI] = DomainDefinition.permissive(DIR_WIKI, self.wiki_dir, "Canonical knowledge base")
 
         # 2. Discover arbitrary top-level directories
         if self.root.exists():
@@ -469,11 +541,7 @@ class Vault:
                 if not entry.is_dir():
                     continue
                 name = entry.name
-                if (
-                    name.startswith(".")
-                    or name in (DIR_WIKI, DIR_RAW, DIR_LOG)
-                    or name in DEFAULT_IGNORED_DIRS
-                ):
+                if is_excluded_dir(name) or name in (DIR_WIKI, DIR_RAW, DIR_LOG):
                     continue
                 # A template folder holds pre-notes, not notes (§7.5).
                 if tpl_dir is not None and entry.resolve() == tpl_dir:
@@ -483,14 +551,7 @@ class Vault:
                 if agents_md.exists():
                     domains[name] = self._load_domain_from_agents_md(name, entry, agents_md)
                 else:
-                    domains[name] = DomainDefinition(
-                        name=name,
-                        path=entry,
-                        description=f"{name.capitalize()} domain",
-                        allowed_types=None,  # Open
-                        require_sources=False,
-                        directives_markdown="",
-                    )
+                    domains[name] = DomainDefinition.permissive(name, entry)
         return domains
 
     def iter_domain_notes(self) -> Iterator[tuple[Path, str, DomainDefinition]]:
@@ -519,9 +580,7 @@ class Vault:
                 dirs[:] = sorted(
                     d
                     for d in dirs
-                    if d not in DEFAULT_IGNORED_DIRS
-                    and not d.startswith(".")
-                    and (tpl_dir is None or (Path(root) / d).resolve() != tpl_dir)
+                    if not is_excluded_dir(d) and (tpl_dir is None or (Path(root) / d).resolve() != tpl_dir)
                 )
                 for f in sorted(files):
                     # AGENTS.md is the domain's own manifest, not a note in it.
@@ -529,32 +588,75 @@ class Vault:
                         continue
                     yield Path(root) / f, domain_name, domain_def
 
+    def iter_raw_files(self) -> Iterator[Path]:
+        """Every file under raw/, in a stable order (§2.4).
+
+        The single answer to "which files are raw evidence", shared by the
+        cache scan and DiskNoteStorage. Pruning applies only below raw/: the
+        scan's former copy also filtered on the absolute path's parts, which
+        silently dropped every raw file of a vault living under a folder named
+        `target` or `venv` while the storage adapter still listed them.
+        """
+        if not self.raw_dir.exists():
+            return
+        for root, dirs, files in os.walk(self.raw_dir, topdown=True):
+            dirs[:] = sorted(d for d in dirs if not is_excluded_dir(d))
+            for f in sorted(files):
+                if not f.startswith("."):
+                    yield Path(root) / f
+
     def _load_domain_from_agents_md(
         self, name: str, dir_path: Path, agents_md: Path
     ) -> DomainDefinition:
-        """Parse an AGENTS.md file into a DomainDefinition."""
+        """Parse `{domain}/AGENTS.md` into a DomainDefinition (§2.2).
+
+        A manifest that cannot be honored is not silently read as "open": the
+        domain still loads permissively so search keeps working, but
+        `manifest_error` says why, lint reports DOMAIN_MANIFEST_INVALID, and
+        scaffold into the domain is refused until it is fixed.
+        """
         raw_text = agents_md.read_text("utf-8", errors="replace")
         try:
             fm, body = parse_frontmatter(raw_text)
-        except (FrontmatterParseError, ValueError):
-            fm, body = {}, raw_text
+        except FrontmatterParseError as e:
+            _, body = _split_without_parsing(raw_text)
+            domain = DomainDefinition.permissive(name, dir_path)
+            domain.directives_markdown = body.strip()
+            domain.manifest_error = f"frontmatter does not parse: {e}"
+            return domain
 
-        schema_cfg = fm.get("schema", {}) if isinstance(fm.get("schema"), dict) else fm
+        problems: list[str] = []
+        allowed_types = fm.get("allowed_types")
+        allowed_types_list: list[str] | None = None
+        if allowed_types is not None:
+            if isinstance(allowed_types, list) and all(isinstance(t, str) for t in allowed_types):
+                allowed_types_list = list(allowed_types)
+            else:
+                problems.append("'allowed_types' must be a list of strings")
 
-        allowed_types = schema_cfg.get("allowed_types", fm.get("allowed_types"))
-        if isinstance(allowed_types, list):
-            allowed_types_list: list[str] | None = [str(t) for t in allowed_types]
-        else:
-            allowed_types_list = None
+        require_sources = fm.get("require_sources", False)
+        if not isinstance(require_sources, bool):
+            problems.append("'require_sources' must be true or false")
+            require_sources = False
 
-        require_sources = bool(schema_cfg.get("require_sources", fm.get("require_sources", False)))
-        description = str(fm.get("description", f"{name.capitalize()} domain"))
+        declared = fm.get("domain")
+        if declared is not None and declared != name:
+            problems.append(f"'domain: {declared}' does not match the folder name '{name}'")
 
         return DomainDefinition(
             name=name,
             path=dir_path,
-            description=description,
+            description=str(fm.get("description") or f"{name.capitalize()} domain"),
             allowed_types=allowed_types_list,
             require_sources=require_sources,
             directives_markdown=body.strip(),
+            manifest_error="; ".join(problems) or None,
         )
+
+
+def _split_without_parsing(raw_text: str) -> tuple[str | None, str]:
+    """Split frontmatter from body without interpreting it, so raw YAML never leaks into directives."""
+    try:
+        return split_frontmatter(raw_text)
+    except FrontmatterParseError:
+        return None, raw_text

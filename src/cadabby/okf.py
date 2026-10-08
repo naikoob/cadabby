@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from cadabby.constants import (
@@ -27,6 +27,21 @@ _TAG_SEGMENT = r"[^\W_]+(?:-[^\W_]+)*"
 RE_TAG = re.compile(rf"^{_TAG_SEGMENT}(?:/{_TAG_SEGMENT})*$")
 
 
+def utc_now_iso() -> str:
+    """The current UTC time in the one timestamp form OKF writes (§3.1): `YYYY-MM-DDTHH:MM:SSZ`."""
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def split_lines(text: str) -> list[str]:
+    """Split on line endings only (§3.3): `\r\n`, `\r` and `\n`.
+
+    `str.splitlines()` also breaks on U+2028, U+0085, form feed and vertical
+    tab, so the parser saw line breaks the file does not have and the body
+    hash disagreed with any implementation that follows the spec.
+    """
+    return text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+
 def compute_body_hash(body: str) -> str:
     """Compute normative body hash conforming strictly to §3.3.
 
@@ -36,7 +51,7 @@ def compute_body_hash(body: str) -> str:
     4. Strip leading and trailing blank lines.
     5. Encode UTF-8, sha256 lowercase hex prefixed with 'sha256:'.
     """
-    lines = [line.rstrip() for line in body.splitlines()]
+    lines = [line.rstrip() for line in split_lines(body)]
 
     start = 0
     while start < len(lines) and not lines[start]:
@@ -124,47 +139,27 @@ def is_valid_timestamp(ts: Any) -> bool:
 
 
 def derive_trust_tier(verified_list: list[Any] | None, current_body_hash: str) -> str:
-    """Derive epistemic trust tier from valid verification entries conforming to §3.4.
+    """Derive the epistemic trust tier from valid verification entries (§3.4).
 
-    A verification entry is valid when its 'of:' field is present and equals current_body_hash.
-    Tiers:
-    - 'human-reviewed': At least one valid entry with by: human:*
-    - 'machine-confirmed': No valid human entry, but at least one valid entry with by: agent:* or process:*
-    - 'stale-verified': at least one attestation record exists, but none is valid —
-      including records broken enough to never have bound (no 'of:', bad actor).
-      Preserving them as debt is the point; silently ignoring them would read as
-      'never verified' and hide the breakage.
-    - 'unverified': verified is absent, empty, or contains no attestation records
+    An entry is valid when it is a mapping with a well-formed `by:` actor and
+    an `of:` equal to `current_body_hash`. Valid human beats valid machine;
+    a non-empty list with no valid entry is `stale-verified` -- including
+    records too broken to ever have bound, which stay visible as debt rather
+    than reading as "never verified". Absent or empty is `unverified`.
     """
     if not verified_list or not isinstance(verified_list, list):
         return "unverified"
 
-    valid_human = False
-    valid_machine = False
-    has_any_attestation = False
-
-    for item in verified_list:
-        if not isinstance(item, dict):
-            continue
-        has_any_attestation = True
-
-        actor = item.get("by")
-        target_hash = item.get("of")
-
-        if not isinstance(actor, str) or not is_valid_actor(actor):
-            continue
-
-        # Check content binding
-        if target_hash and target_hash == current_body_hash:
-            if is_actor_human(actor):
-                valid_human = True
-            elif is_actor_machine(actor):
-                valid_machine = True
-
-    if valid_human:
+    valid_actors = [
+        item["by"]
+        for item in verified_list
+        if isinstance(item, dict)
+        and isinstance(item.get("by"), str)
+        and is_valid_actor(item["by"])
+        and item.get("of") == current_body_hash
+    ]
+    if any(is_actor_human(a) for a in valid_actors):
         return "human-reviewed"
-    if valid_machine:
+    if any(is_actor_machine(a) for a in valid_actors):
         return "machine-confirmed"
-    if has_any_attestation:
-        return "stale-verified"
-    return "unverified"
+    return "stale-verified"

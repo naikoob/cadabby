@@ -9,8 +9,13 @@ import re
 import subprocess
 from dataclasses import dataclass
 
-from cadabby.frontmatter import split_comment, split_frontmatter
+from cadabby.constants import ACTOR_PATTERN
+from cadabby.frontmatter import FrontmatterParseError, split_comment, split_frontmatter
+from cadabby.okf import is_actor_human, split_lines
 from cadabby.vault import Vault
+
+# What `git blame --porcelain` reports as the commit of a line not yet committed.
+UNCOMMITTED_SHA = "0" * 40
 
 
 @dataclass
@@ -47,12 +52,13 @@ def run_vault_audit(vault: Vault, require_signed: bool = False) -> tuple[list[Au
     if not is_git_repository(vault):
         return [], "Vault is not a Git repository. Provenance audit requires Git history."
 
-    identities: dict[str, list[str]] = vault.config.get("identities", {})
+    identities: dict[str, list[str]] = vault.config["identities"]
     findings: list[AuditFinding] = []
 
     all_note_files = [p for p, _, _ in vault.iter_domain_notes()]
 
-    re_human_by = re.compile(r"^\s*(?:-\s*)?by:\s*[\"']?(human:[A-Za-z0-9._\-/]+)[\"']?\s*$")
+    # A `by:` line under `verified:`, actor grammar taken from the spec's one pattern (§3.4).
+    re_by = re.compile(rf"^\s*(?:-\s*)?by:\s*[\"']?({ACTOR_PATTERN.strip('^$')})[\"']?\s*$")
 
     for file_path in all_note_files:
         rel_path = vault.rel_path(file_path)
@@ -62,15 +68,15 @@ def run_vault_audit(vault: Vault, require_signed: bool = False) -> tuple[list[Au
             continue
 
         try:
-            raw_fm, _, _ = split_frontmatter(content)
-        except Exception:
+            raw_fm, _ = split_frontmatter(content)
+        except FrontmatterParseError:
             continue
 
         if not raw_fm:
             continue
 
         in_verified = False
-        for line_no, line in enumerate(raw_fm.splitlines(), start=2):
+        for line_no, line in enumerate(split_lines(raw_fm), start=2):
             clean_line, _ = split_comment(line)
             if not clean_line.strip():
                 continue
@@ -81,8 +87,8 @@ def run_vault_audit(vault: Vault, require_signed: bool = False) -> tuple[list[Au
             if not in_verified:
                 continue
 
-            match = re_human_by.match(clean_line)
-            if not match:
+            match = re_by.match(clean_line)
+            if not match or not is_actor_human(match.group(1)):
                 continue
 
             actor = match.group(1).strip()
@@ -114,8 +120,21 @@ def run_vault_audit(vault: Vault, require_signed: bool = False) -> tuple[list[Au
                     raw_mail = blame_line[len("author-mail ") :].strip()
                     author_mail = raw_mail.strip("<>").strip()
 
-            # Cross-reference with identities map
-            if not allowed_emails or author_mail not in allowed_emails:
+            # Cross-reference with identities map. An empty author (unparseable
+            # blame) never matches, even if "" crept into the identities list.
+            if commit_hash == UNCOMMITTED_SHA:
+                message = (
+                    f"'{actor}' attestation is not yet committed, so Git records no author for it; "
+                    "commit it to make its provenance auditable"
+                )
+            elif not author_mail or author_mail not in allowed_emails:
+                message = (
+                    f"Commit author '{author_mail}' ({commit_hash[:8]}) is not mapped "
+                    f"to '{actor}' in .cadabby.json identities"
+                )
+            else:
+                message = ""
+            if message:
                 findings.append(
                     AuditFinding(
                         code="PROVENANCE_MISMATCH",
@@ -123,15 +142,13 @@ def run_vault_audit(vault: Vault, require_signed: bool = False) -> tuple[list[Au
                         line=line_no,
                         actor=actor,
                         commit=commit_hash,
-                        message=(
-                            f"Commit author '{author_mail}' ({commit_hash[:8]}) is not mapped "
-                            f"to '{actor}' in .cadabby.json identities"
-                        ),
+                        message=message,
                     )
                 )
 
-            # Check commit signature if requested
-            if require_signed and commit_hash:
+            # %G? is 'G' (good) or 'U' (good, untrusted key) for a valid signature;
+            # anything else -- 'N' unsigned, 'B' bad, 'E' unverifiable -- is flagged.
+            if require_signed and commit_hash and commit_hash != UNCOMMITTED_SHA:
                 try:
                     sig_res = subprocess.run(
                         ["git", "log", "-1", "--format=%G?", commit_hash],

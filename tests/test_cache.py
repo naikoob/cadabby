@@ -5,14 +5,15 @@ Conforms to acceptance criteria from §4 and §10.
 
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
 
-from cadabby.cache import VaultCache, sanitize_fts5_query
+from cadabby.cache import VaultCache, or_fallback_fts5_query, sanitize_fts5_query
 from cadabby.indexer import generate_index_markdown
-from cadabby.vault import Vault
+from cadabby.vault import Vault, VaultConfigError
 from tests.helpers import copy_demo_vault
 
 
@@ -64,6 +65,7 @@ class TestVaultCache(unittest.TestCase):
 
         # Re-run search: must reconstruct cache and produce identical result order
         cache2 = VaultCache(self.vault)
+        cache2.scan()
         results2 = cache2.search("SQLite")
         cache2.close()
 
@@ -249,6 +251,53 @@ class TestVaultCache(unittest.TestCase):
         self.assertEqual(sanitize_fts5_query("SQLite AND"), "SQLite")
         self.assertEqual(sanitize_fts5_query("SQLite OR DuckDB"), "SQLite OR DuckDB")
 
+    def test_or_fallback_fts5_query_helper(self):
+        # Single token returns None (no fallback needed)
+        self.assertIsNone(or_fallback_fts5_query("SQLite"))
+        self.assertIsNone(or_fallback_fts5_query('"write heavy"'))
+        self.assertIsNone(or_fallback_fts5_query(""))
+
+        # Explicit operators return None so caller boolean intent is preserved
+        self.assertIsNone(or_fallback_fts5_query("SQLite AND DuckDB"))
+        self.assertIsNone(or_fallback_fts5_query("SQLite OR DuckDB"))
+        self.assertIsNone(or_fallback_fts5_query("SQLite NOT DuckDB"))
+
+        # Multi-term queries without explicit operators join tokens with OR
+        self.assertEqual(
+            or_fallback_fts5_query("AppendEntries XTerm XIndex TestInitialElection2A"),
+            "AppendEntries OR XTerm OR XIndex OR TestInitialElection2A",
+        )
+        self.assertEqual(
+            or_fallback_fts5_query('"write heavy" "B-tree"'),
+            '"write heavy" OR "B-tree"',
+        )
+
+    def test_multi_term_query_falls_back_to_or_when_implicit_and_returns_nothing(self):
+        """§4.4, §10 C15. Multi-term queries with 0 implicit-AND hits retry with OR."""
+        (self.vault.raw_dir / "lab2-spec.md").write_text(
+            "Fast backup conflict fields: XTerm, XIndex, XLen in AppendEntries.\n",
+            encoding="utf-8",
+        )
+        self.cache.scan()
+
+        # "SQLite" is in wiki/SQLite and wiki/SQLite-vs-DuckDB; "nonexistent_xyz_token"
+        # is nowhere in the vault. Implicit AND returns 0 rows, so search() falls back
+        # to OR and still surfaces the SQLite notes.
+        fallback_hits = self.cache.search("SQLite nonexistent_xyz_token")
+        self.assertGreater(len(fallback_hits), 0)
+        cids = [r.cid for r in fallback_hits]
+        self.assertIn("wiki/SQLite", cids)
+
+        # When the caller supplies an explicit AND, no OR fallback runs and 0 rows return.
+        explicit_and_hits = self.cache.search("SQLite AND nonexistent_xyz_token")
+        self.assertEqual(explicit_and_hits, [])
+
+        # Also works across the raw_fts table when searching domain="raw"
+        raw_hits = self.cache.search("AppendEntries XTerm TestInitialElection2A", domain="raw")
+        self.assertGreater(len(raw_hits), 0)
+        self.assertEqual(raw_hits[0].cid, "raw/lab2-spec.md")
+        self.assertTrue(all(r.domain == "raw" for r in raw_hits))
+
     def test_hyphenated_and_special_queries(self):
         self.cache.scan()
 
@@ -344,6 +393,78 @@ class TestOnlyMarkdownIsANote(unittest.TestCase):
         self.assertEqual(walked, sorted(walked))
 
 
+class TestCitationResolution(unittest.TestCase):
+    """§4.3, §10 C33. A citation resolves against the indexed raw set, on every changed scan."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp_dir.name) / "v"
+        (self.root / "wiki").mkdir(parents=True)
+        (self.root / "raw").mkdir(parents=True)
+        (self.root / ".cadabby.json").write_text('{"vault_name": "v"}\n', encoding="utf-8")
+        self.vault = Vault(self.root)
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def _cite(self, src):
+        (self.root / "wiki" / "Citer.md").write_text(
+            f"---\ntype: concept\ntitle: Citer\ndescription: d\nstatus: active\nsources:\n  - {src}\n---\n\nBody.\n",
+            encoding="utf-8",
+        )
+
+    def _source_missing(self):
+        from cadabby.lint import run_vault_lint
+
+        return [f for f in run_vault_lint(self.vault) if f.code == "SOURCE_MISSING"]
+
+    def test_source_resolution_tracks_raw_arrivals(self):
+        self._cite("raw/later.md")
+        self.assertEqual(len(self._source_missing()), 1)
+        (self.root / "raw" / "later.md").write_text("evidence", encoding="utf-8")
+        self.assertEqual(self._source_missing(), [])
+        (self.root / "raw" / "later.md").unlink()
+        self.assertEqual(len(self._source_missing()), 1)
+
+    def test_dot_slash_citation_counts_as_processed(self):
+        (self.root / "raw" / "x.md").write_text("evidence", encoding="utf-8")
+        self._cite("./raw/x.md")
+        with VaultCache(self.vault) as cache:
+            cache.scan()
+            self.assertEqual(cache.unprocessed_raw_paths(), [])
+            self.assertEqual(cache.get_status()["unprocessed_raw"], 0)
+            self.assertNotIn("## Raw Sources", generate_index_markdown(self.vault, cache=cache))
+        self.assertEqual(self._source_missing(), [])
+
+class TestRawWalkIsShared(unittest.TestCase):
+    """§2.4. The cache and the storage adapter agree on which files are raw evidence.
+
+    The scan's copy of the raw walk also filtered on the *absolute* path's
+    parts, so a vault living under any folder named `target`, `venv` or
+    `node_modules` indexed zero raw files -- raw full-text search silently
+    returned nothing -- while the storage adapter's own walk still listed
+    them. The scan now reads `Vault.iter_raw_files()`, the one raw walk.
+    """
+
+    def test_raw_files_indexed_when_vault_lives_under_ignored_folder_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "target" / "v"
+            (root / "raw" / "nested").mkdir(parents=True)
+            (root / "wiki").mkdir(parents=True)
+            (root / ".cadabby.json").write_text('{"vault_name": "v"}\n', encoding="utf-8")
+            (root / "raw" / "a.md").write_text("evidence\n", encoding="utf-8")
+            (root / "raw" / "nested" / "b.txt").write_text("more evidence\n", encoding="utf-8")
+            vault = Vault(root)
+            with VaultCache(vault) as cache:
+                cache.scan()
+                rows = cache.get_connection().execute(
+                    "SELECT rel_path FROM notes WHERE layer = 'raw' ORDER BY rel_path;"
+                ).fetchall()
+            indexed = [r["rel_path"] for r in rows]
+            self.assertEqual(indexed, ["raw/a.md", "raw/nested/b.txt"])
+            self.assertEqual(indexed, sorted(vault.rel_path(p) for p in vault.iter_raw_files()))
+
+
 class TestRawSourceSearch(unittest.TestCase):
     """§2.4/§4.2. Raw sources are searchable, in their own corpus.
 
@@ -396,10 +517,68 @@ class TestRawSourceSearch(unittest.TestCase):
         (self.root / ".cadabby.json").write_text('{"vault_name": "v", "raw_text_extensions": [".org"]}\n', "utf-8")
         self.cache.close()
         self.cache = VaultCache(Vault(self.root))
-        self.cache.scan(force=True)
+        self.cache.scan()
 
         found = {h.cid for h in self.cache.search("alpaca", domain="raw")}
         self.assertEqual(found, {"raw/notes.org"}, "replacement semantics: .md drops out when not listed")
+
+    def _set_raw_exts(self, exts: list[str]) -> None:
+        """Rewrite the config and reopen the cache, as the next CLI/MCP call would."""
+        (self.root / ".cadabby.json").write_text(
+            json.dumps({"vault_name": "v", "raw_text_extensions": exts}) + "\n", "utf-8"
+        )
+        self.cache.close()
+        self.vault = Vault(self.root)
+        self.cache = VaultCache(self.vault)
+
+    def test_extension_list_change_reaches_untouched_raw_files(self):
+        """C41 (§4.3, §4.5). The scan used to key re-reads on stat alone, so widening
+        the list left a `.log` already in raw/ indexed by filename only until
+        it was touched or the cache rebuilt -- and an agent told the user to
+        restart the server, which fixed nothing."""
+        defaults = [".md", ".markdown", ".txt", ".rst", ".csv"]
+        self._raw("run.log", "prefill_overhead_pct=18.5 zzqx42")
+        self.cache.scan()
+        self.assertEqual(self.cache.get_status()["filename_only_raw"], {".log": 1})
+        self.assertEqual(self.cache.search("zzqx42", domain="raw"), [])
+
+        self._set_raw_exts(defaults + [".log"])
+        self.cache.scan()
+        self.assertEqual(self.cache.get_status()["filename_only_raw"], {})
+        self.assertEqual([h.cid for h in self.cache.search("zzqx42", domain="raw")], ["raw/run.log"])
+
+        self._set_raw_exts(defaults)
+        self.cache.scan()
+        self.assertEqual(self.cache.get_status()["filename_only_raw"], {".log": 1})
+        self.assertEqual(self.cache.search("zzqx42", domain="raw"), [], "narrowed list left stale text")
+        conn = self.cache.get_connection()
+        conn.execute("INSERT INTO raw_fts(raw_fts) VALUES('integrity-check');")
+
+    def test_status_filename_only_raw_distinguishes_skipped_extensions_from_empty_text_files(self):
+        """C41 (§2.4, §4.5). An empty .md file has body == '' in SQLite, but its extension is
+        in raw_text_extensions, so it must not be reported under filename_only_raw."""
+        self._raw("empty.md", "")
+        self._raw("paper-a.pdf", "%PDF-1.4")
+        self._raw("PAPER-B.PDF", "%PDF-1.4")
+        self._raw("trace.log", "run_id=1")
+        self.cache.scan()
+
+        status = self.cache.get_status()
+        self.assertEqual(status["total_raw"], 4)
+        self.assertEqual(status["filename_only_raw"], {".log": 1, ".pdf": 2})
+
+    def test_unchanged_extension_list_rescans_nothing(self):
+        """C41 (§4.3, C16). The list check must not turn every scan into a raw re-read."""
+        self._raw("run.log", "zzqx42")
+        self._raw("transcript.md", "alpaca")
+        self._wiki("Note", "body")
+        _, _, _, total = self.cache.scan()
+        self.assertEqual(self.cache.scan(), (0, 0, 0, total))
+
+        self._set_raw_exts([".md", ".log"])
+        inserted, updated, deleted, _ = self.cache.scan()
+        self.assertEqual((inserted, updated, deleted), (0, 2, 0), "only the two raw rows re-read")
+        self.assertEqual(self.cache.scan(), (0, 0, 0, total))
 
     def test_binary_sources_are_findable_by_filename(self):
         self._raw("alpaca-paper.pdf", "%PDF-1.4 binary junk")
@@ -515,13 +694,15 @@ class TestVaultCacheRanking(unittest.TestCase):
             "utf-8",
         )
         with VaultCache(self.vault) as cache:
+            cache.scan()
             results = cache.search("Query")
             self.assertEqual(len(results), 1)
             self.assertEqual(results[0].title, "Search Test")
             self.assertGreater(results[0].score, 0.0)
 
     def test_vault_cache_search_sanitized_ranking_cases(self):
-        # Even with custom malicious single quotes or non-numeric values in ranking config, search works
+        # Multiplier names are free-form strings and reach SQL as literals, so
+        # quotes in them must be escaped. (Values are validated at load, §2.6.)
         note = self.vault.wiki_dir / "concepts" / "SanitizeTest.md"
         note.parent.mkdir(parents=True, exist_ok=True)
         note.write_text(
@@ -529,7 +710,7 @@ class TestVaultCacheRanking(unittest.TestCase):
             "utf-8",
         )
         self.vault.config["ranking"] = {
-            "trust": {"malicious' OR 1=1 --": 2.0, "bad_num": "not_a_float"},
+            "trust": {"malicious' OR 1=1 --": 2.0},
             "status": {"active'; DROP TABLE notes; --": 1.5},
         }
         with VaultCache(self.vault) as cache:
@@ -539,28 +720,48 @@ class TestVaultCacheRanking(unittest.TestCase):
             self.assertEqual(results[0].title, "Sanitize Test")
 
     def test_vault_cache_search_malformed_ranking_config(self):
-        # Non-finite, empty, null, and non-mapping ranking config must neither
-        # produce invalid SQL nor raise; search falls back to neutral multipliers.
-        note = self.vault.wiki_dir / "concepts" / "NonFiniteTest.md"
-        note.parent.mkdir(parents=True, exist_ok=True)
-        note.write_text(
-            "---\ntype: concept\ntitle: Non Finite Test\ndescription: Testing ranking\nstatus: active\n---\n# Non Finite Test\nQuery target.\n",
-            "utf-8",
-        )
-        for ranking in (
-            {"trust": {"human-reviewed": 1e999}, "status": {"active": float("nan")}},
-            {"trust": {}, "status": {}},
-            {"trust": None, "status": None},
-            None,
-            "not-a-mapping",
+        """C36: a ranking value search could not use fails at load, naming the key.
+
+        Search used to coerce NaN, Infinity, and strings to a neutral 1.0 and
+        rank on, so the setting was silently inert. Now the vault refuses to
+        open and says which multiplier is wrong (§2.6).
+        """
+        import json
+
+        cfg_file = self.vault.root / ".cadabby.json"
+        for ranking, key in (
+            ({"trust": {"human-reviewed": float("inf")}}, "ranking.trust.human-reviewed"),
+            ({"status": {"active": float("nan")}}, "ranking.status.active"),
+            ({"trust": {"machine-confirmed": "2.0"}}, "ranking.trust.machine-confirmed"),
+            ({"status": {"draft": True}}, "ranking.status.draft"),
         ):
-            with self.subTest(ranking=ranking):
-                self.vault.config["ranking"] = ranking
-                with VaultCache(self.vault) as cache:
-                    cache.scan()
-                    results = cache.search("Query")
-                    self.assertEqual(len(results), 1)
-                    self.assertEqual(results[0].title, "Non Finite Test")
+            with self.subTest(key=key):
+                cfg_file.write_text(json.dumps({"ranking": ranking}), "utf-8")
+                with self.assertRaises(VaultConfigError) as ctx:
+                    Vault(self.vault.root)
+                self.assertIn(f"'{key}'", str(ctx.exception))
+
+        # An empty table is valid: the defaults merge underneath it.
+        cfg_file.write_text(json.dumps({"ranking": {"trust": {}, "status": {}}}), "utf-8")
+        self.assertEqual(Vault(self.vault.root).config["ranking"]["trust"]["human-reviewed"], 2.0)
+
+    def test_search_propagates_non_syntax_sqlite_errors(self):
+        """C36: only an FTS5 syntax error reads as "no results"; a lock surfaces (§5.4)."""
+        import sqlite3
+        from unittest import mock
+
+        with VaultCache(self.vault) as cache:
+            cache.scan()
+            for message, raises in (("fts5: syntax error near \"*\"", False), ("database is locked", True)):
+                with self.subTest(message=message):
+                    conn = mock.MagicMock()
+                    conn.execute.side_effect = sqlite3.OperationalError(message)
+                    with mock.patch.object(cache, "get_connection", return_value=conn):
+                        if raises:
+                            with self.assertRaises(sqlite3.OperationalError):
+                                cache.search("Query")
+                        else:
+                            self.assertEqual(cache.search("Query"), [])
 
     def test_scan_clears_links_when_note_becomes_unparseable(self):
         note_a = self.vault.wiki_dir / "Note-A.md"

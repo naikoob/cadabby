@@ -366,6 +366,41 @@ class TestMcpServer(unittest.TestCase):
         self.assertEqual(responses[2]["id"], 3)
         self.assertIn("result", responses[2])
 
+    def test_dispatch_request_routes_methods_and_suppresses_notifications(self):
+        self.assertIsNone(
+            self.server.dispatch_request({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        )
+
+        ping_resp = self.server.dispatch_request({"jsonrpc": "2.0", "id": 10, "method": "ping"})
+        self.assertEqual(ping_resp, {"jsonrpc": "2.0", "id": 10, "result": {}})
+
+        unknown_resp = self.server.dispatch_request({"jsonrpc": "2.0", "id": 11, "method": "unknown/method"})
+        self.assertEqual(unknown_resp["id"], 11)
+        self.assertEqual(unknown_resp["error"]["code"], -32601)
+
+        res_err = self.server.dispatch_request(
+            {"jsonrpc": "2.0", "id": 12, "method": "resources/read", "params": {"uri": "bad://uri"}}
+        )
+        self.assertEqual(res_err["id"], 12)
+        self.assertEqual(res_err["error"]["code"], -32602)
+
+    def test_handle_tools_call_rejects_malformed_arguments_and_section_shapes(self):
+        non_dict = self.server.handle_tools_call("vault_status", ["not", "a", "dict"])  # type: ignore[arg-type]
+        self.assertTrue(non_dict["isError"])
+        self.assertEqual(json.loads(non_dict["content"][0]["text"])["error"]["code"], "INVALID_ARGUMENT")
+
+        str_cids = self.server.handle_tools_call("vault_ground", {"cids": "wiki/SQLite"})
+        self.assertTrue(str_cids["isError"])
+        self.assertEqual(json.loads(str_cids["content"][0]["text"])["error"]["code"], "INVALID_ARGUMENT")
+
+        str_append = self.server.handle_tools_call(
+            "vault_update_note",
+            {"cid": "wiki/SQLite", "append_section": "Heading:Body"},
+        )
+        self.assertTrue(str_append["isError"])
+        self.assertEqual(json.loads(str_append["content"][0]["text"])["error"]["code"], "INVALID_ARGUMENT")
+
 
 if __name__ == "__main__":
     unittest.main()
+

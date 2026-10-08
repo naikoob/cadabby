@@ -6,11 +6,14 @@ Conforms to Cadabby Technical Specification §2.5, §4.3, §8.
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+import sqlite3
 from pathlib import Path
 from typing import Any
 
-from cadabby.constants import TYPE_MOC
+from cadabby.okf import utc_now_iso
+
+from cadabby.cache import VaultCache, unprocessed_raw_paths
+from cadabby.constants import LEDGER_TITLE, TYPE_MOC
 from cadabby.fsutil import advisory_lock, append_ledger, atomic_write
 from cadabby.vault import Vault
 
@@ -31,8 +34,7 @@ def _detect_ledger_year(content: str, fallback_year: str) -> str:
 
 def append_vault_log(vault: Vault, message: str, actor: str | None = None) -> None:
     """Append a timestamped entry to the active log.md ledger."""
-    now_iso = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    prefix = f"[{now_iso}]"
+    prefix = f"[{utc_now_iso()}]"
     if actor:
         prefix += f" {actor}:"
     entry = f"- {prefix} {message}"
@@ -40,50 +42,47 @@ def append_vault_log(vault: Vault, message: str, actor: str | None = None) -> No
 
 
 def rotate_vault_log(vault: Vault) -> Path | None:
-    """Rotate log.md into log/<year>.md if file exceeds log_rotate_bytes or crosses a calendar year (§8)."""
+    """Rotate log.md into log/<year>.md if it exceeds log_rotate_bytes or crosses a calendar year (§8).
+
+    The size, the year and the decision are all read under the lock: decided
+    outside it, two concurrent syncs could both choose to rotate and archive
+    the same ledger twice.
+    """
     log_file = vault.log_path
-    if not log_file.exists():
-        return None
-
-    max_bytes = vault.config.get("log_rotate_bytes", 262144)
-    st = log_file.stat()
-    current_year = datetime.now(UTC).strftime("%Y")
-    initial_content = log_file.read_text("utf-8")
-    ledger_year = _detect_ledger_year(initial_content, current_year)
-
-    if st.st_size < max_bytes and ledger_year == current_year:
-        return None
-
-    log_dir = vault.log_dir
-    log_dir.mkdir(parents=True, exist_ok=True)
-    target_rotated = log_dir / f"{ledger_year}.md"
+    max_bytes = vault.config["log_rotate_bytes"]
 
     with advisory_lock(vault.lock_path):
-        # Append existing log content into archive
+        if not log_file.exists():
+            return None
         content = log_file.read_text("utf-8")
+        current_year = utc_now_iso()[:4]
+        ledger_year = _detect_ledger_year(content, current_year)
+        if len(content.encode("utf-8")) < max_bytes and ledger_year == current_year:
+            return None
+
+        target_rotated = vault.log_dir / f"{ledger_year}.md"
+        target_rotated.parent.mkdir(parents=True, exist_ok=True)
         if target_rotated.exists():
-            header_prefix = f"# Activity Ledger ({ledger_year})"
-            body_content = content
-            if body_content.startswith(header_prefix):
-                body_content = body_content[len(header_prefix) :].lstrip("\r\n")
+            header_prefix = f"{LEDGER_TITLE} ({ledger_year})"
+            body_content = content.removeprefix(header_prefix).lstrip("\r\n") if content.startswith(
+                header_prefix
+            ) else content
             if body_content:
                 append_ledger(target_rotated, body_content)
         else:
             atomic_write(target_rotated, content)
 
-        # Fresh active log
-        fresh_header = f"# Activity Ledger ({current_year})\n\n"
-        atomic_write(log_file, fresh_header)
+        atomic_write(log_file, f"{LEDGER_TITLE} ({current_year})\n\n")
 
     return target_rotated
 
 
 def _cell(value: Any, fallback: str = "") -> str:
     """Escape a value for a markdown table cell."""
-    return (value or fallback).replace("|", "\\|")
+    return str(value or fallback).replace("\n", " ").replace("|", "\\|")
 
 
-def _entry_points(conn: Any) -> list[str]:
+def _entry_points(conn: sqlite3.Connection) -> list[str]:
     """Section 1: every MOC, linked. The human's starting page (§2.5)."""
     rows = conn.execute(
         """
@@ -100,7 +99,7 @@ def _entry_points(conn: Any) -> list[str]:
     return lines + [""]
 
 
-def _unfiled(conn: Any) -> list[str]:
+def _unfiled(conn: sqlite3.Connection) -> list[str]:
     """Section 2: wiki notes no MOC reaches by forward link at any depth (§2.5).
 
     The one failure mode flat layout introduces, and the one `lint` cannot
@@ -147,18 +146,9 @@ def _unfiled(conn: Any) -> list[str]:
     return lines + [""]
 
 
-def _raw_queue(conn: Any) -> list[str]:
+def _raw_queue(conn: sqlite3.Connection) -> list[str]:
     """Section 3: the ingestion queue. Vault-wide -- any domain may cite raw/."""
-    rows = conn.execute(
-        """
-        SELECT r.rel_path,
-               (SELECT COUNT(*) FROM sources s WHERE s.raw_path = r.rel_path) AS citation_count
-        FROM notes r
-        WHERE r.layer = 'raw'
-        ORDER BY r.rel_path ASC;
-        """
-    ).fetchall()
-    pending = [r for r in rows if not r["citation_count"]]
+    pending = unprocessed_raw_paths(conn)
     if not pending:
         return []
     lines = [
@@ -169,18 +159,18 @@ def _raw_queue(conn: Any) -> list[str]:
         "| Source File |",
         "| :--- |",
     ]
-    lines += [f"| `{r['rel_path']}` |" for r in pending]
+    lines += [f"| `{path}` |" for path in pending]
     return lines + [""]
 
 
-def _verification_debt(conn: Any) -> list[str]:
+def _verification_debt(conn: sqlite3.Connection) -> list[str]:
     """Section 4: notes whose verification entries have all gone stale (§3.4).
 
     Vault-wide: any note in any domain can carry verification entries.
     """
     rows = conn.execute(
         """
-        SELECT cid, stem, trust_tier FROM notes
+        SELECT cid FROM notes
         WHERE trust_tier = 'stale-verified' AND parse_error IS NULL
         ORDER BY cid ASC;
         """
@@ -199,53 +189,42 @@ def _verification_debt(conn: Any) -> list[str]:
     return lines + [""]
 
 
-def _build_index_lines_from_conn(vault: Vault, conn: Any) -> str:
+def _build_index_lines_from_conn(vault: Vault, conn: sqlite3.Connection) -> str:
     """Render the vault-wide gap report (§2.5).
 
     Deliberately not a catalog. A table of every wiki note duplicates what MOCs
     curate, what a file explorer shows for a flat folder, and what search ranks
     better -- while churning the Git diff on every note added. Each section
     below is omitted when empty, so a fully filed, fully ingested, fully
-    verified vault produces a header and nothing else. Shrinking this file is
+    verified vault produces its entry points and one "Nothing outstanding" line. Shrinking this file is
     the objective: every row is work someone still has to do.
     """
     lines = [
-        f"# {vault.config.get('vault_name', 'Wiki')} Index",
+        f"# {vault.config['vault_name']} Index",
         "",
         "> Auto-generated gap report (§2.5). Not a catalog, and never hand-edited:",
         "> edits are overwritten on the next scan that finds changes.",
         "",
     ]
 
-    sections = (
-        _entry_points(conn)
-        + _unfiled(conn)
-        + _raw_queue(conn)
-        + _verification_debt(conn)
-    )
-    if not sections:
+    gaps = _unfiled(conn) + _raw_queue(conn) + _verification_debt(conn)
+    lines += _entry_points(conn)
+    if not gaps:
         lines.append("Nothing outstanding: every note is filed, every source processed, every attestation current.")
-    lines += sections
+    lines += gaps
 
     return "\n".join(lines).strip() + "\n"
 
 
-def generate_index_markdown(vault: Vault, cache: Any | None = None) -> str:
-    """Render the gap report for index.md (§2.5).
+def generate_index_markdown(vault: Vault, cache: VaultCache) -> str:
+    """Render the gap report for index.md (§2.5) from an already-scanned cache.
 
     Deterministic sort order guarantees zero Git diff churn on idempotent runs.
     """
-    if cache is not None:
-        return _build_index_lines_from_conn(vault, cache.get_connection())
-
-    from cadabby.cache import VaultCache
-
-    with VaultCache(vault) as new_cache:
-        new_cache.scan(regenerate_index=False)
-        return _build_index_lines_from_conn(vault, new_cache.get_connection())
+    return _build_index_lines_from_conn(vault, cache.get_connection())
 
 
-def sync_vault_index(vault: Vault, cache: Any | None = None) -> bool:
+def sync_vault_index(vault: Vault, cache: VaultCache) -> bool:
     """Regenerate index.md under advisory lock only if bytes have changed.
 
     Returns True if file was rewritten, False if unchanged.

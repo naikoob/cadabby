@@ -1,36 +1,57 @@
-"""Wikilink extraction, target resolution, and graph edge parsing.
+"""Wikilink and Markdown note-link extraction, target resolution, and graph edge parsing.
 
-Conforms to Cadabby Technical Specification §4.2, §6.3.
+Conforms to Cadabby Technical Specification §4.2, §4.4, §6.3.
 """
 
 from __future__ import annotations
 
+import posixpath
 import re
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any
+from urllib.parse import unquote
+
+from cadabby.constants import DIR_RAW
+from cadabby.domain import iter_fence_states
+from cadabby.vault import cid_to_path, normalize_rel, path_to_cid
 
 # Regex matching [[Target#Anchor|Alias]] (including table-escaped \| aliases)
 # ignoring embeds ![[...]], multiline brackets, and code spans
 RE_WIKILINK = re.compile(r"(?<!!)\[\[([^\]|#\n]+?)(?:#([^\]|\n]+?))?(?:\\?\|([^\]\n]+))?\]\]")
-RE_CODE_BLOCK = re.compile(r"```[\s\S]*?```|~~~[\s\S]*?~~~|(`+)(?:(?!\1)[^\n])+\1")
+RE_INLINE_CODE = re.compile(r"(`+)(?:(?!\1)[^\n])+\1")
+
+# Inline Markdown link, not an image embed: [label](target "optional title").
+# The angle-bracket form [label](<My Note.md>) is what Obsidian writes for
+# paths containing spaces, so group 1 takes it and group 2 the bare form.
+RE_MD_LINK = re.compile(r'(?<!!)\[[^\]\n]*\]\(\s*(?:<([^>\n]+)>|([^)\s]+))(?:\s+"[^"\n]*")?\s*\)')
+RE_URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:")
+
+LINK_KIND_WIKI = "wiki"
+LINK_KIND_MARKDOWN = "markdown"
 
 
 @dataclass
 class ExtractedLink:
-    """Represents a single wikilink reference in a markdown note."""
+    """Represents a single wikilink or Markdown note-link reference in a markdown note."""
 
-    target_raw: str  # Exactly as written in the link target, e.g. "Note#Heading"
-    target_stem: str  # Note stem or path part, e.g. "Note"
+    target_raw: str  # Exactly as written in the link target, e.g. "Note#Heading" or "../wiki/Note.md#Heading"
+    target_stem: str  # Note stem or decoded path part, e.g. "Note" or "../wiki/Note.md"
     anchor: str | None = None  # Heading anchor, e.g. "Heading"
     alias: str | None = None  # Link display alias, e.g. "alias"
     occurrences: int = 1
+    kind: str = LINK_KIND_WIKI  # "wiki" for [[...]], "markdown" for [label](path.md)
 
 
 def strip_code_spans(text: str) -> str:
-    """Replace fenced code blocks and inline code with spaces to prevent false link matching."""
-    return RE_CODE_BLOCK.sub(" ", text)
+    """Blank fenced code and inline code so neither yields links or headings.
+
+    Fenced lines become empty rather than vanishing, so line positions survive.
+    """
+    unfenced = "\n".join("" if in_fence else line for line, in_fence in iter_fence_states(text.split("\n")))
+    return RE_INLINE_CODE.sub(" ", unfenced)
 
 
 def extract_wikilinks(markdown_text: str) -> list[ExtractedLink]:
@@ -70,13 +91,75 @@ def extract_wikilinks(markdown_text: str) -> list[ExtractedLink]:
     return list(links_by_target.values())
 
 
+def iter_markdown_link_targets(markdown_text: str) -> Iterator[str]:
+    """Yield relative inline Markdown link targets outside code, exactly as written.
+
+    URLs (any scheme), vault-absolute paths and same-note `#heading` jumps are
+    skipped: none of them is a relative path a note could be addressed by.
+    Shared by the graph extractor and gate 4's raw-citation check (§6.3).
+    """
+    for match in RE_MD_LINK.finditer(strip_code_spans(markdown_text)):
+        target = (match.group(1) or match.group(2) or "").strip()
+        if not target or target.startswith(("/", "#")) or RE_URL_SCHEME.match(target):
+            continue
+        yield target
+
+
+def extract_markdown_note_links(markdown_text: str) -> list[ExtractedLink]:
+    """Extract relative Markdown links that may name a note (§4.4).
+
+    Only `.md` targets qualify: without the extension a link cannot be told
+    apart from one to a folder or a non-note file, and both Obsidian's
+    Markdown link format and GitHub write it. Paths with a `raw` segment are
+    citations, owned by gate 4's `RAW_LINK_BROKEN`, and never graph edges.
+    """
+    links_by_target: dict[str, ExtractedLink] = {}
+    for target in iter_markdown_link_targets(markdown_text):
+        path_part, _, anchor = target.partition("#")
+        decoded = unquote(path_part)
+        if not decoded.lower().endswith(".md") or DIR_RAW in PurePosixPath(decoded).parts:
+            continue
+        if target in links_by_target:
+            links_by_target[target].occurrences += 1
+            continue
+        links_by_target[target] = ExtractedLink(
+            target_raw=target,
+            target_stem=decoded,
+            anchor=unquote(anchor).strip() or None,
+            kind=LINK_KIND_MARKDOWN,
+        )
+    return list(links_by_target.values())
+
+
+def resolve_markdown_target(source_cid: str, target_raw: str) -> str | None:
+    """Return the CID a relative Markdown link names from its source note's folder.
+
+    Resolution is by exact path only, never by stem: a stem fallback would
+    silently absorb the one-`../`-too-many mistakes the dead-link check exists
+    to catch. Returns None when the path climbs out of the vault.
+    """
+    source_dir = posixpath.dirname(cid_to_path(source_cid))
+    path_part = unquote(target_raw.split("#", 1)[0])
+    joined = posixpath.normpath(posixpath.join(source_dir, path_part))
+    if joined in (".", "..") or joined.startswith("../"):
+        return None
+    return path_to_cid(joined)
+
+
+def relative_note_path(source_cid: str, target_cid: str) -> str:
+    """The relative Markdown path from source_cid's folder to target_cid's file."""
+    source_dir = posixpath.dirname(cid_to_path(source_cid)) or "."
+    return posixpath.relpath(cid_to_path(target_cid), source_dir)
+
+
 class LinkTargetIndex:
     """Precomputed index for O(1) resolution of wikilink targets to canonical CIDs."""
 
-    def __init__(self, known_cids: Sequence[str]):
+    def __init__(self, known_cids: Sequence[str]) -> None:
         self._exact_map: dict[str, str] = {}
         self._suffix_map: dict[str, str] = {}
         self._stem_map: dict[str, str] = {}
+        self.known_cids: frozenset[str] = frozenset(known_cids)
 
         # Prioritize wiki/ notes first so canonical knowledge takes precedence
         # for bare stem resolution (e.g. [[Architecture]]), while suffix matches
@@ -92,7 +175,7 @@ class LinkTargetIndex:
                     self._exact_map[short] = cid
 
             parts = cid.split("/")
-            for i in range(1, len(parts)):
+            for i in range(1, len(parts) - 1):
                 suffix = "/".join(parts[i:])
                 if suffix not in self._suffix_map:
                     self._suffix_map[suffix] = cid
@@ -103,8 +186,7 @@ class LinkTargetIndex:
 
     def resolve(self, target_stem: str) -> str | None:
         """Resolve a target stem against the precomputed index in O(1) time."""
-        clean = target_stem.replace("\\", "/").strip("/")
-        clean = clean.removesuffix(".md")
+        clean = normalize_rel(target_stem).removesuffix(".md")
 
         # 1. Exact CID or wiki-relative match
         if clean in self._exact_map:
@@ -114,21 +196,27 @@ class LinkTargetIndex:
         if clean in self._suffix_map:
             return self._suffix_map[clean]
 
-        # 3. Note stem match
-        stem = clean.split("/")[-1]
+        # 3. Bare stem only (§4.4). A target with a path segment names a
+        #    location; falling back to its stem would hide exactly the typo
+        #    gate 3 exists to catch (`[[customers/acmee/README]]`).
+        return None if "/" in clean else self._stem_map.get(clean)
+
+    def suggest(self, target_path: str) -> str | None:
+        """Best-guess CID for a missed path, by its final stem (hints only, never resolution)."""
+        stem = normalize_rel(target_path).split("/")[-1].removesuffix(".md")
         return self._stem_map.get(stem)
 
 
-def resolve_link_target(target_stem: str, known_cids: Sequence[str]) -> str | None:
-    """Resolve a target stem or relative path against known vault CIDs.
+def normalize_link_target(text: str) -> str:
+    """Reduce what a caller typed to a resolvable target: strip `[[ ]]`, `|alias` and `#anchor`.
 
-    Matches:
-    1. Exact CID match (e.g. 'wiki/concepts/Note' -> 'wiki/concepts/Note').
-    2. Path suffix match (e.g. 'concepts/Note' -> 'wiki/concepts/Note').
-    3. Note stem match (e.g. 'Note' -> 'wiki/concepts/Note').
-    Returns matching CID or None if unresolved (broken link).
+    Shared by `vault_ground` and `cadabby graph`, so both accept the same
+    spellings and resolve them through the same `LinkTargetIndex`.
     """
-    return LinkTargetIndex(known_cids).resolve(target_stem)
+    clean = text.strip()
+    if clean.startswith("[[") and clean.endswith("]]"):
+        clean = clean[2:-2].strip()
+    return clean.split("|")[0].split("#")[0].strip()
 
 
 def get_note_graph(conn: sqlite3.Connection, target_cid: str) -> dict[str, Any] | None:
@@ -153,22 +241,22 @@ def get_note_graph(conn: sqlite3.Connection, target_cid: str) -> dict[str, Any] 
 
     # 2. 1-hop forward links
     cur = conn.execute(
-        "SELECT target_raw, target_cid, anchor FROM links WHERE source_cid = ? ORDER BY target_cid ASC;",
+        "SELECT target_raw, target_cid, anchor, kind FROM links WHERE source_cid = ? ORDER BY target_cid ASC;",
         (target_cid,),
     )
     forward_links = [
-        {"target_raw": r["target_raw"], "target_cid": r["target_cid"], "anchor": r["anchor"]}
+        {"target_raw": r["target_raw"], "target_cid": r["target_cid"], "anchor": r["anchor"], "kind": r["kind"]}
         for r in cur.fetchall()
     ]
     forward_cids = {r["target_cid"] for r in forward_links if r["target_cid"]}
 
     # 3. 1-hop backlinks
     cur = conn.execute(
-        "SELECT source_cid, target_raw, anchor FROM links WHERE target_cid = ? ORDER BY source_cid ASC;",
+        "SELECT source_cid, target_raw, anchor, kind FROM links WHERE target_cid = ? ORDER BY source_cid ASC;",
         (target_cid,),
     )
     backlinks = [
-        {"source_cid": r["source_cid"], "target_raw": r["target_raw"], "anchor": r["anchor"]}
+        {"source_cid": r["source_cid"], "target_raw": r["target_raw"], "anchor": r["anchor"], "kind": r["kind"]}
         for r in cur.fetchall()
     ]
     backlink_cids = {r["source_cid"] for r in backlinks if r["source_cid"]}

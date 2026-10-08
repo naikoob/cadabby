@@ -28,10 +28,13 @@ class TestParallelRunner(unittest.TestCase):
             self.assertGreater(count, 0)
 
     def test_discover_targets_pattern_filter(self):
+        from tests.test_audit import TestAudit
+
+        expected_count = unittest.defaultTestLoader.loadTestsFromTestCase(TestAudit).countTestCases()
         targets = discover_targets(self.repo_root, patterns=["test_audit"], granularity="class")
         self.assertEqual(len(targets), 1)
         self.assertEqual(targets[0][0], "tests.test_audit.TestAudit")
-        self.assertEqual(targets[0][1], 11)
+        self.assertEqual(targets[0][1], expected_count)
 
     def test_run_single_target(self):
         target = "tests.test_frontmatter.TestTagGrammar"

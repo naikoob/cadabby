@@ -249,5 +249,30 @@ class TestExitCodes(unittest.TestCase):
         self.assertEqual(exit_code_for("NOT_A_REAL_CODE"), EXIT_UNEXPECTED)
 
 
+
+class TestHumanRefusalIsOneCode(unittest.TestCase):
+    """§3.4, C12: every surface refuses human:* with HUMAN_ATTESTATION_REFUSED."""
+
+    def test_use_case_human_refusal_code(self):
+        from cadabby.adapters.memory_storage import InMemoryLedger, InMemoryNoteStorage
+        from cadabby.domain import Note
+        from cadabby.errors import HumanAttestationRefusedError
+        from cadabby.ops import VerifyNoteUseCase
+
+        storage = InMemoryNoteStorage()
+        storage.save_note(
+            Note(
+                cid="wiki/N",
+                rel_path="wiki/N.md",
+                frontmatter={"type": "concept", "title": "N", "description": "d", "status": "active"},
+                body="# N\n",
+            )
+        )
+        with self.assertRaises(HumanAttestationRefusedError) as ctx:
+            VerifyNoteUseCase(storage, InMemoryLedger()).execute(cid_or_path="wiki/N", actor="human:alice")
+        info = classify(ctx.exception)
+        self.assertEqual(info.code, "HUMAN_ATTESTATION_REFUSED")
+        self.assertNotIn("MCP", info.message)
+
 if __name__ == "__main__":
     unittest.main()

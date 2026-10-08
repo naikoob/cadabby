@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from cadabby.lint import run_vault_lint
@@ -96,6 +97,47 @@ class TestLint(unittest.TestCase):
         # Ensure custom domain nesting didn't trigger any layout error
         cust_errors = [f for f in findings if "customers" in f.rel_path and f.severity == "error"]
         self.assertEqual(len(cust_errors), 0)
+
+    def test_gate2_nested_folder_named_wiki_is_still_nested(self):
+        """Gate 2 compares the whole parent path; the folder's name alone let this through."""
+        nested = self.vault.wiki_dir / "x" / "wiki"
+        nested.mkdir(parents=True)
+        (nested / "N.md").write_text(
+            "---\ntype: concept\ntitle: N\ndescription: Test\nstatus: active\n---\n# N\n",
+            "utf-8",
+        )
+        findings = [f for f in run_vault_lint(self.vault) if f.code == "WIKI_NESTING_DISALLOWED"]
+        self.assertEqual([f.rel_path for f in findings], ["wiki/x/wiki/N.md"])
+        self.assertIn("'wiki/x/wiki/'", findings[0].message)
+
+    def test_lint_parses_only_unparseable_notes(self):
+        """Lint reads the scan's rows; it re-parses only notes whose frontmatter failed.
+
+        Gates 1, 2 and 6 used to re-read and re-parse every note straight after
+        the scan had done exactly that. The broken note is re-parsed once to
+        recover the parser's line number, and nothing else is.
+        """
+        import cadabby.lint as lint_module
+
+        (self.vault.wiki_dir / "Bad-Yaml.md").write_text("---\ntags: [flow, style]\n---\n# Bad\n", "utf-8")
+        real_parse = lint_module.parse_frontmatter
+        calls: list[str] = []
+
+        def counting_parse(content: str):
+            calls.append(content)
+            return real_parse(content)
+
+        from cadabby.cache import VaultCache
+
+        with VaultCache(self.vault) as cache:
+            cache.scan()
+            with unittest.mock.patch.object(lint_module, "parse_frontmatter", counting_parse):
+                findings = run_vault_lint(self.vault, cache)
+
+        self.assertEqual(len(calls), 1)
+        unparseable = [f for f in findings if f.code == "FRONTMATTER_UNPARSEABLE"]
+        self.assertEqual([f.rel_path for f in unparseable], ["wiki/Bad-Yaml.md"])
+        self.assertEqual(unparseable[0].line, 2)
 
     def test_gate3_dead_link_error(self):
         # Add a dead link to a note
@@ -423,6 +465,8 @@ class TestLintTaxonomyIsClosed(unittest.TestCase):
             "wiki/F-Tag-Cased.md",
             self._fm("Tag Cased", "tags:", "  - Machine-Learning", body="[[SQLite]]"),
         )
+        # A domain manifest whose contract cannot be honored (flow style).
+        self._write("broken/AGENTS.md", "---\nallowed_types: [a, b]\n---\nDirectives.\n")
         # Gate 2 -- flat wiki.
         self._write("wiki/nested/F-Nested.md", self._fm("Nested", body="[[SQLite]]"))
         # Gate 3 -- links. Dead target vs live target with a bad anchor.
@@ -526,6 +570,152 @@ class TestLintTaxonomyIsClosed(unittest.TestCase):
             {"TAG_MALFORMED"},
             "TAG_MALFORMED is the only code that is both, and only for the case arm",
         )
+
+
+class TestMarkdownNoteLinks(unittest.TestCase):
+    """§4.4, §6.3, §10 C29. Relative Markdown links to notes are graph edges like wikilinks."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.vault_root = Path(self.tmp_dir.name) / "vault"
+        for sub in ("wiki", "raw"):
+            (self.vault_root / sub).mkdir(parents=True)
+        (self.vault_root / "STYLE.md").write_text("# Style\n", "utf-8")
+        self.vault = Vault(self.vault_root)
+        self._note("wiki/Architecture.md", "Architecture", "## B-Tree Indexes (v2)\n\nDetail.")
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def _note(self, rel, title, body):
+        path = self.vault_root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"---\ntype: concept\ntitle: {title}\ndescription: Fixture\nstatus: active\n---\n# {title}\n\n{body}\n",
+            "utf-8",
+        )
+
+    def _codes_for(self, rel):
+        return [(f.code, f.message) for f in run_vault_lint(self.vault) if f.rel_path == rel]
+
+    def test_qualified_link_never_falls_back_to_stem(self):
+        """§4.4, C9: a target with a path segment resolves by exact CID or suffix only."""
+        self._note("projects/apollo/Architecture.md", "Apollo Architecture", "Design.")
+        self._note(
+            "projects/apollo/Plan.md",
+            "Plan",
+            "[[apollo/Architecture]] [[apollo/Architcture]] [[customers/acmee/Architecture]] [[Architecture]]",
+        )
+        dead = sorted(m for c, m in self._codes_for("projects/apollo/Plan.md") if c == "LINK_DEAD")
+        self.assertEqual(len(dead), 2, dead)
+        self.assertTrue(any("apollo/Architcture" in m for m in dead))
+        self.assertTrue(any("customers/acmee/Architecture" in m for m in dead))
+
+    def test_gate2_reported_alongside_unparseable_frontmatter(self):
+        """§6.3, C11: the layout gate reads only the path, so a broken header cannot hide it."""
+        path = self.vault_root / "wiki" / "sub" / "Broken.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("---\ntags: [flow, style]\n---\n# Broken\n", "utf-8")
+        codes = {c for c, _ in self._codes_for("wiki/sub/Broken.md")}
+        self.assertEqual(codes, {"FRONTMATTER_UNPARSEABLE", "WIKI_NESTING_DISALLOWED"})
+
+    def test_status_broken_links_matches_lint(self):
+        """§4.5, C34: vault_status.broken_links counts exactly what gate 3 calls LINK_DEAD."""
+        from cadabby.cache import VaultCache
+
+        self._note("wiki/Linker.md", "Linker", "[[Architecture]] [[Nope]] [[x/Missing]] [md](./Gone.md)")
+        dead = [f for f in run_vault_lint(self.vault) if f.code == "LINK_DEAD"]
+        with VaultCache(self.vault) as cache:
+            cache.scan()
+            status = cache.get_status()
+        self.assertEqual(status["broken_links"], len(dead))
+        self.assertEqual(len(dead), 3)
+        self.assertNotIn("unprocessed_raw_sources", status)
+
+    def test_markdown_link_is_a_graph_edge_with_backlink(self):
+        from cadabby.cache import VaultCache
+        from cadabby.graph import get_note_graph
+
+        self._note("customers/acme/Deal.md", "Deal", "Built on [Arch](../../wiki/Architecture.md).")
+        with VaultCache(self.vault) as cache:
+            cache.scan()
+            graph = get_note_graph(cache.get_connection(), "wiki/Architecture")
+        self.assertEqual(
+            [(b["source_cid"], b["kind"]) for b in graph["backlinks"]],
+            [("customers/acme/Deal", "markdown")],
+        )
+
+    def test_markdown_link_prevents_orphan(self):
+        self._note("customers/acme/Deal.md", "Deal", "Built on [Arch](../../wiki/Architecture.md).")
+        self.assertNotIn("NOTE_ORPHAN", [c for c, _ in self._codes_for("wiki/Architecture.md")])
+
+    def test_dead_markdown_link_suggests_relative_path(self):
+        self._note("customers/acme/Deal.md", "Deal", "Built on [Arch](../wiki/Architecture.md#B-Tree).")
+        dead = [m for c, m in self._codes_for("customers/acme/Deal.md") if c == "LINK_DEAD"]
+        self.assertEqual(len(dead), 1)
+        self.assertIn("Dead Markdown link '../wiki/Architecture.md#B-Tree'", dead[0])
+        self.assertIn("did you mean '../../wiki/Architecture.md#B-Tree'?", dead[0])
+
+    def test_markdown_link_to_non_note_file_is_not_an_edge(self):
+        (self.vault_root / "customers").mkdir()
+        (self.vault_root / "customers" / "AGENTS.md").write_text("---\ndescription: c\n---\n", "utf-8")
+        self._note(
+            "wiki/Guide.md",
+            "Guide",
+            "See [style](../STYLE.md), [manifest](../customers/AGENTS.md), [cite](../raw/x.md) "
+            "and [[Architecture]].",
+        )
+        codes = [c for c, _ in self._codes_for("wiki/Guide.md")]
+        self.assertNotIn("LINK_DEAD", codes)
+
+    def test_anchor_matches_github_slug(self):
+        self._note(
+            "wiki/Reader.md",
+            "Reader",
+            "[ok](Architecture.md#b-tree-indexes-v2) [[Architecture#B-Tree Indexes (v2)]] "
+            "[bad](Architecture.md#no-such-heading)",
+        )
+        missing = [m for c, m in self._codes_for("wiki/Reader.md") if c == "ANCHOR_MISSING"]
+        self.assertEqual(len(missing), 1)
+        self.assertIn("#no-such-heading", missing[0])
+
+    def test_ground_payload_reports_link_kind(self):
+        from cadabby.ops import ground_notes
+
+        self._note("wiki/Reader.md", "Reader", "[Arch](Architecture.md) and [[Architecture]].")
+        payload = ground_notes(self.vault, ["wiki/Reader"])
+        kinds = sorted(link["kind"] for link in payload[0]["links"])
+        self.assertEqual(kinds, ["markdown", "wiki"])
+
+    def test_gate6_non_string_of_hash_emits_verification_unbound(self):
+        (self.vault_root / "wiki" / "BoolOf.md").write_text(
+            "---\ntype: concept\ntitle: BoolOf\ndescription: Desc\nstatus: active\n"
+            "verified:\n  - by: agent:claude\n    at: '2026-01-01T00:00:00Z'\n    of: true\n---\n\n[[Architecture]]\n",
+            "utf-8",
+        )
+        codes = [c for c, _ in self._codes_for("wiki/BoolOf.md")]
+        self.assertIn("VERIFICATION_UNBOUND", codes)
+
+    def test_gate1_empty_or_non_string_required_fields_are_rejected(self):
+        (self.vault_root / "wiki" / "EmptyFields.md").write_text(
+            '---\ntype: ""\ntitle: ""\ndescription: "   "\nstatus: false\n---\n\n[[Architecture]]\n',
+            "utf-8",
+        )
+        findings = self._codes_for("wiki/EmptyFields.md")
+        missing = [m for c, m in findings if c == "FIELD_MISSING"]
+        invalid = [m for c, m in findings if c == "ENUM_INVALID"]
+        self.assertEqual(len(missing), 3)
+        self.assertEqual(len(invalid), 1)
+        self.assertIn("Invalid status 'False'", invalid[0])
+
+    def test_anchor_matches_heading_containing_inline_code(self):
+        self._note(
+            "wiki/CodeHeading.md",
+            "CodeHeading",
+            "## The `vault_search` Tool\n\nSee [[CodeHeading#the-vault_search-tool]] and [[CodeHeading#The vault_search Tool]].",
+        )
+        codes = [c for c, _ in self._codes_for("wiki/CodeHeading.md")]
+        self.assertNotIn("ANCHOR_MISSING", codes)
 
 
 if __name__ == "__main__":

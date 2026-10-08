@@ -10,11 +10,12 @@ from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from cadabby.domain import Note
+from cadabby.graph import LinkTargetIndex
 
 
 @runtime_checkable
 class NoteStoragePort(Protocol):
-    """Secondary port for persisting and retrieving notes and raw sources."""
+    """Secondary port for persisting and retrieving notes."""
 
     def get_note(self, cid_or_path: str) -> Note | None:
         """Retrieve Note entity by CID or vault-relative path. Returns None if not found."""
@@ -30,14 +31,6 @@ class NoteStoragePort(Protocol):
 
     def list_note_cids(self) -> Sequence[str]:
         """List all note CIDs tracked in the storage layer."""
-        ...
-
-    def list_raw_sources(self) -> Sequence[str]:
-        """List all raw source paths tracked in the storage layer."""
-        ...
-
-    def raw_source_exists(self, rel_path: str) -> bool:
-        """Check if a raw source file exists on the storage layer."""
         ...
 
 
@@ -66,8 +59,14 @@ class IndexCachePort(Protocol):
         """Return aggregate epistemic health metrics."""
         ...
 
-    def get_connection(self) -> Any:
-        """Return underlying database connection."""
+    def get_link_resolver(self) -> LinkTargetIndex:
+        """Return a LinkTargetIndex over all valid non-raw note CIDs."""
+        ...
+
+    def get_note_neighborhood(
+        self, cid: str
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        """Return (forward_links, backlinks, sources) for `cid`."""
         ...
 
     def close(self) -> None:

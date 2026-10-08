@@ -1,10 +1,20 @@
 """System constants, defaults, enums, and schema order for Cadabby."""
 
-# Bumped to 3 when raw sources began being written to the FTS index (§2.4).
-# A cache built before that holds no raw rows and no amount of incremental
-# scanning adds them, since the files are unchanged; the version mismatch is
-# what forces the one-time rebuild that picks them up.
-SCHEMA_VERSION = 3
+from __future__ import annotations
+
+# Bumped to 3 when raw sources began being written to the FTS index (§2.4), and
+# to 4 when `links` gained the `kind` column and `(source_cid, kind, target_raw)`
+# unique index for relative Markdown note links (§4.2, §4.4). A cache built under
+# an older schema either lacks raw rows or lacks the `kind` column, so the version
+# mismatch forces a one-time rebuild.
+# 5 adds `sources.resolved_path`, so citations resolve against the indexed raw
+# set and `./raw/x` counts as citing `raw/x` (§4.3).
+SCHEMA_VERSION = 5
+
+# `.cadabby.json`'s "schema" (§2.6). Independent of SCHEMA_VERSION above: the
+# cache is disposable and rebuilds on mismatch, the config is user-owned and is
+# never migrated by the engine, so the two numbers must not move together.
+CONFIG_SCHEMA_VERSION = 3
 
 # Note frontmatter enums and constants
 TYPE_MOC = "moc"
@@ -63,6 +73,7 @@ DEFAULT_STATUS_MULTIPLIERS = {
 # Vault defaults
 DEFAULT_RAW_TEXT_EXTENSIONS = (".md", ".markdown", ".txt", ".rst", ".csv")
 DEFAULT_INTEGRITY = "mtime_size"
+INTEGRITY_MODES: tuple[str, ...] = ("mtime_size", "hash")
 DEFAULT_LOG_ROTATE_BYTES = 262144  # 256 KB
 
 # Directory & file conventions
@@ -113,3 +124,7 @@ DIR_TEMPLATES = "templates"
 ACTOR_PATTERN = r"^(human|agent|process):[A-Za-z0-9._\-/]+$"
 RFC3339_TIMESTAMP_PATTERN = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$"
 BODY_HASH_PREFIX = "sha256:"
+
+# First line(s) of a fresh `log.md` (§2.5); a rotated one appends " (<year>)".
+LEDGER_TITLE = "# Activity Ledger"
+LEDGER_HEADER = f"{LEDGER_TITLE}\n\n"

@@ -6,27 +6,42 @@ import contextlib
 import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
 
-from cadabby.errors import EXIT_USAGE
+from cadabby.errors import EXIT_ENVIRONMENT, EXIT_USAGE, classify, exit_code_for
 from cadabby.cli import (
+    build_parser,
+    cmd_graph,
     cmd_ground,
     cmd_init,
     cmd_install,
     cmd_lint,
+    cmd_log,
     cmd_scaffold,
     cmd_search,
     cmd_status,
     cmd_sync,
+    cmd_update,
     cmd_verify,
 )
 from cadabby.installer import mcp_launch_argv
 
 
 from tests.helpers import DummyArgs, copy_demo_vault
+
+
+def _run_like_main(cmd, args) -> int:
+    """Run a command the way `main()` does: a raised error becomes its exit code (§5.4)."""
+    try:
+        return cmd(args)
+    except Exception as e:  # noqa: BLE001
+        info = classify(e)
+        print(f"Error [{info.code}]: {info.message}", file=sys.stderr)
+        return exit_code_for(info.code)
 
 
 class TestCli(unittest.TestCase):
@@ -226,9 +241,13 @@ class TestCli(unittest.TestCase):
             agent="test-agent",
             method=None,
         )
-        # EXIT_USAGE, not 1: the command never ran, so a caller must not read
-        # this as "the vault has findings" (§5.4).
-        self.assertEqual(cmd_verify(args_verify), EXIT_USAGE)
+        # The parser rejects the pair itself, so exit 2 stays argparse's (§5.4).
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as ctx:
+            build_parser().parse_args(["verify", "wiki/Test", "--human", "--agent", "a"])
+        self.assertEqual(ctx.exception.code, EXIT_USAGE)
+        # A programmatic caller that bypasses the parser gets INVALID_ARGUMENT.
+        with self.assertRaises(ValueError):
+            cmd_verify(args_verify)
 
     def _verify_args(self, vault_root: Path, *, human: bool) -> DummyArgs:
         return DummyArgs(vault=str(vault_root), cid="wiki/SQLite", human=human, agent=None, method=None)
@@ -242,8 +261,10 @@ class TestCli(unittest.TestCase):
             contextlib.redirect_stdout(out),
             contextlib.redirect_stderr(io.StringIO()),
         ):
-            code = cmd_verify(args)
-        self.last_prompt_count = fake_input.call_count
+            try:
+                code = cmd_verify(args)
+            finally:
+                self.last_prompt_count = fake_input.call_count
         return code, out.getvalue()
 
     def test_flagless_verify_in_a_tty_stamps_process_cli(self):
@@ -274,9 +295,74 @@ class TestCli(unittest.TestCase):
         before = note.read_bytes()
         for answer in ("y", "yes", ""):
             with self.subTest(answer=answer):
-                code, _ = self._run_verify_on_tty(self._verify_args(vault_root, human=True), answer=answer)
-                self.assertEqual(code, EXIT_USAGE)
+                # INVALID_ARGUMENT (exit 3) via main(), never 2, which is argparse's (§5.4).
+                with self.assertRaises(ValueError):
+                    self._run_verify_on_tty(self._verify_args(vault_root, human=True), answer=answer)
                 self.assertEqual(note.read_bytes(), before)
+
+    def test_human_verify_without_tty_is_invalid_argument(self):
+        vault_root = copy_demo_vault(self.dir / "no-tty-vault")
+        with unittest.mock.patch("sys.stdin.isatty", return_value=False):
+            with self.assertRaises(ValueError) as ctx:
+                cmd_verify(self._verify_args(vault_root, human=True))
+        self.assertIn("TTY", str(ctx.exception))
+
+    def test_cli_writes_default_to_process_cli_even_on_a_tty(self):
+        """C37: scaffold, update and log record `process:cli` unless `--actor` is given.
+
+        A terminal is no evidence of a person (§5.3): agents run commands in
+        pseudo-terminals. The old `human:<user>` default let any flagless
+        agent call attribute its writes to the human.
+        """
+        vault_root = copy_demo_vault(self.dir / "actor-vault")
+        common = dict(vault=str(vault_root), sources=None, tags=None, actor=None)
+        with unittest.mock.patch("sys.stdin.isatty", return_value=True), contextlib.redirect_stdout(io.StringIO()):
+            cmd_scaffold(DummyArgs(title="Actor Probe", type="concept", desc="d", **common))
+            cmd_update(
+                DummyArgs(
+                    vault=str(vault_root),
+                    cid="wiki/Actor-Probe",
+                    patch_frontmatter=None,
+                    append_section="Notes:more",
+                    replace_section=None,
+                    expected_hash=None,
+                    edits=None,
+                    actor=None,
+                )
+            )
+            cmd_log(DummyArgs(vault=str(vault_root), message="probe", actor=None))
+            cmd_log(DummyArgs(vault=str(vault_root), message="explicit", actor="agent:me"))
+
+        note = (vault_root / "wiki" / "Actor-Probe.md").read_text("utf-8")
+        self.assertIn('by: "process:cli"', note)
+        self.assertNotIn("human:", note)
+        log = (vault_root / "log.md").read_text("utf-8")
+        for entry in ("Scaffolded wiki/Actor-Probe.md", "Updated wiki/Actor-Probe.md", "probe"):
+            line = next(l for l in log.splitlines() if entry in l)
+            self.assertIn("process:cli", line)
+        self.assertIn("agent:me", next(l for l in log.splitlines() if "explicit" in l))
+
+    def test_graph_unknown_note_is_not_found(self):
+        vault_root = copy_demo_vault(self.dir / "graph-vault")
+        with self.assertRaises(FileNotFoundError):
+            cmd_graph(DummyArgs(vault=str(vault_root), cid="wiki/No-Such-Note", json=True))
+
+    def test_install_usage_errors_and_refusals_never_exit_findings(self):
+        """C38: install's usage errors are INVALID_ARGUMENT; a refused install exits 3, never 1."""
+        vault_root = self.dir / "install-codes-vault"
+        cmd_init(DummyArgs(vault=str(vault_root), name="v", obsidian=False))
+        base = dict(vault=str(vault_root), path=None, is_global=False, uninstall=False, dry_run=False, force=False)
+        with self.assertRaises(ValueError):
+            cmd_install(DummyArgs(antigravity=False, claude=False, all=False, **base))
+        with self.assertRaises(ValueError):
+            cmd_install(DummyArgs(antigravity=False, claude=False, all=True, **{**base, "path": str(self.dir / "x")}))
+
+        claude_cfg = self.dir / "claude.json"
+        claude_cfg.write_text("{not json", "utf-8")
+        args = DummyArgs(antigravity=False, claude=True, all=False, **{**base, "path": str(claude_cfg)})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cmd_install(args), EXIT_ENVIRONMENT)
+        self.assertEqual(claude_cfg.read_text("utf-8"), "{not json")
 
     def test_cmd_install_workspace_defaults(self):
         vault_root = self.dir / "ws-install-vault"
@@ -425,6 +511,27 @@ class TestCli(unittest.TestCase):
         args = parser.parse_args(["init", "/tmp/my-vault"])
         self.assertEqual(args.target_path, Path("/tmp/my-vault"))
 
+    def test_cmd_update_invalid_json_flags_name_the_offending_flag(self):
+        vault_path = copy_demo_vault(self.dir / "demo-vault")
+        base = {
+            "vault": str(vault_path),
+            "cid": "SQLite",
+            "patch_frontmatter": None,
+            "append_section": None,
+            "replace_section": None,
+            "expected_hash": None,
+            "actor": None,
+            "edits": None,
+        }
+        with self.assertRaisesRegex(ValueError, r"Invalid JSON for --patch-frontmatter"):
+            cmd_update(DummyArgs(**{**base, "patch_frontmatter": "{bad"}))
+        with self.assertRaisesRegex(ValueError, r"Expected JSON object for --patch-frontmatter"):
+            cmd_update(DummyArgs(**{**base, "patch_frontmatter": "[1, 2]"}))
+        with self.assertRaisesRegex(ValueError, r"Invalid JSON for --edits"):
+            cmd_update(DummyArgs(**{**base, "edits": "[bad"}))
+        with self.assertRaisesRegex(ValueError, r"Expected JSON array for --edits"):
+            cmd_update(DummyArgs(**{**base, "edits": '{"op": "append_section"}'}))
+
 
 class TestInstallIsTheRefreshVerb(unittest.TestCase):
     """§7.4/§7.6. `install` repairs what `init` scaffolded and will not revisit.
@@ -454,7 +561,7 @@ class TestInstallIsTheRefreshVerb(unittest.TestCase):
         }
         args.update(overrides)
         with contextlib.redirect_stdout(io.StringIO()) as out:
-            code = cmd_install(DummyArgs(**args))
+            code = _run_like_main(cmd_install, DummyArgs(**args))
         return code, out.getvalue()
 
     def _mcp(self):
@@ -500,7 +607,7 @@ class TestInstallIsTheRefreshVerb(unittest.TestCase):
         (self.vault / ".mcp.json").write_text(json.dumps(data, indent=2))
 
         code, _ = self._install()
-        self.assertEqual(code, 1)
+        self.assertEqual(code, EXIT_ENVIRONMENT)
         self.assertEqual(self._mcp()["mcpServers"]["cadabby"]["args"][-1], "/somewhere/else")
 
     def test_a_foreign_server_under_our_key_is_still_a_conflict(self):
@@ -510,7 +617,7 @@ class TestInstallIsTheRefreshVerb(unittest.TestCase):
         (self.vault / ".mcp.json").write_text(json.dumps(data, indent=2))
 
         code, _ = self._install()
-        self.assertEqual(code, 1)
+        self.assertEqual(code, EXIT_ENVIRONMENT)
         self.assertEqual(self._mcp()["mcpServers"]["cadabby"]["command"], "node")
 
     def test_refreshes_every_engine_owned_shim_and_no_user_document(self):
@@ -602,13 +709,13 @@ class TestInstallPathIsSingleTarget(unittest.TestCase):
         args.update(overrides)
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = cmd_install(DummyArgs(**args))
+            code = _run_like_main(cmd_install, DummyArgs(**args))
         return code, out.getvalue() + err.getvalue()
 
     def test_path_with_all_is_refused_before_anything_is_written(self):
         dest = self.dir / "dest"
         code, output = self._install(all=True, path=str(dest))
-        self.assertEqual(code, 1)
+        self.assertEqual(code, EXIT_ENVIRONMENT)
         self.assertIn("single destination", output)
         self.assertFalse(dest.exists(), "refusal must precede the Antigravity write, not follow it")
 
@@ -616,24 +723,24 @@ class TestInstallPathIsSingleTarget(unittest.TestCase):
         """--all is sugar for this; the guard keys on the targets, not the flag."""
         dest = self.dir / "dest"
         code, _ = self._install(antigravity=True, claude=True, path=str(dest))
-        self.assertEqual(code, 1)
+        self.assertEqual(code, EXIT_ENVIRONMENT)
         self.assertFalse(dest.exists())
 
     def test_path_with_all_is_refused_under_dry_run(self):
         """The preview exists to catch exactly this before the user commits."""
         code, output = self._install(all=True, path=str(self.dir / "dest"), dry_run=True)
-        self.assertEqual(code, 1)
+        self.assertEqual(code, EXIT_ENVIRONMENT)
         self.assertNotIn("Would", output, "dry-run must not report success for an impossible install")
 
     def test_path_with_all_is_refused_for_uninstall_too(self):
         code, _ = self._install(all=True, path=str(self.dir / "dest"), uninstall=True)
-        self.assertEqual(code, 1)
+        self.assertEqual(code, EXIT_ENVIRONMENT)
 
     def test_claude_rejects_a_directory_destination(self):
         adir = self.dir / "adir"
         adir.mkdir()
         code, output = self._install(claude=True, path=str(adir))
-        self.assertEqual(code, 1)
+        self.assertEqual(code, EXIT_ENVIRONMENT)
         self.assertIn("must be a JSON file", output)
         self.assertEqual(list(adir.iterdir()), [], "nothing may be written into it")
 
@@ -641,14 +748,14 @@ class TestInstallPathIsSingleTarget(unittest.TestCase):
         afile = self.dir / "afile.json"
         afile.write_text("{}\n")
         code, output = self._install(antigravity=True, path=str(afile))
-        self.assertEqual(code, 1)
+        self.assertEqual(code, EXIT_ENVIRONMENT)
         self.assertIn("must be a directory", output)
 
     def test_wrong_kind_is_reported_by_dry_run(self):
         adir = self.dir / "adir"
         adir.mkdir()
         code, output = self._install(claude=True, path=str(adir), dry_run=True)
-        self.assertEqual(code, 1)
+        self.assertEqual(code, EXIT_ENVIRONMENT)
         self.assertNotIn("Would", output)
 
     def test_force_does_not_destroy_an_unrelated_destination(self):
@@ -656,7 +763,7 @@ class TestInstallPathIsSingleTarget(unittest.TestCase):
         afile = self.dir / "afile.json"
         afile.write_text("{}\n")
         code, _ = self._install(antigravity=True, path=str(afile), force=True)
-        self.assertEqual(code, 1)
+        self.assertEqual(code, EXIT_ENVIRONMENT)
         self.assertEqual(afile.read_text("utf-8"), "{}\n")
 
     def test_uninstall_rejects_a_wrong_kind_destination(self):
@@ -664,7 +771,7 @@ class TestInstallPathIsSingleTarget(unittest.TestCase):
         adir = self.dir / "adir"
         adir.mkdir()
         code, _ = self._install(claude=True, path=str(adir), uninstall=True)
-        self.assertEqual(code, 1)
+        self.assertEqual(code, EXIT_ENVIRONMENT)
         self.assertTrue(adir.is_dir(), "a failed uninstall must not remove it")
 
     def test_single_target_path_still_installs(self):
@@ -720,7 +827,7 @@ class TestGlobalInstallBindsOnlyWhenAsked(unittest.TestCase):
         os.chdir(cwd)
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = cmd_install(DummyArgs(**args))
+            code = _run_like_main(cmd_install, DummyArgs(**args))
         os.chdir(self._cwd)
         return code, out.getvalue() + err.getvalue()
 
@@ -792,6 +899,15 @@ class TestGlobalInstallBindsOnlyWhenAsked(unittest.TestCase):
         self.assertEqual(code, 0)
         cfg = json.loads((self.vault_a / ".mcp.json").read_text("utf-8"))
         self.assertIn(str(self.vault_a.resolve()), cfg["mcpServers"]["cadabby"]["args"])
+
+    def test_cmd_status_renders_filename_only_raw_line_in_human_output(self):
+        (self.vault_a / "raw" / "paper.pdf").write_bytes(b"%PDF-1.4\n")
+        (self.vault_a / "raw" / "slides.pptx").write_bytes(b"PK\x03\x04")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = cmd_status(DummyArgs(vault=str(self.vault_a), json=False))
+        self.assertEqual(code, 0)
+        rendered = out.getvalue()
+        self.assertIn("Filename-Only Raw (body not indexed): 2 (.pdf: 1, .pptx: 1)", rendered)
 
 
 if __name__ == "__main__":

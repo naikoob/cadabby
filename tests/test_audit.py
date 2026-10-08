@@ -137,6 +137,42 @@ class TestAudit(unittest.TestCase):
             self.assertEqual(findings[0].code, "PROVENANCE_MISMATCH")
             self.assertIn("is not mapped to 'human:bob'", findings[0].message)
 
+    def test_uncommitted_endorsement_is_a_provenance_failure(self):
+        """C39: an endorsement Git has no commit for is reported as such, not as "unsigned".
+
+        `git blame` attributes an uncommitted line to the all-zero commit with
+        a placeholder author. It used to surface under --require-signed as
+        "unsigned (status=)" from a `git log` of a commit that does not exist.
+        """
+        self._write_note(
+            "Note-Alice",
+            frontmatter_extra="verified:\n  - by: human:alice\n    at: '2026-10-01T00:00:00Z'\n    of: sha256:abc",
+        )
+        blame = f"{'0' * 40} 1 1 1\nauthor Not Committed Yet\nauthor-mail <not.committed.yet>\n\t  - by: human:alice\n"
+        with (
+            patch("cadabby.audit.is_git_repository", return_value=True),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(returncode=0, stdout=blame)
+            findings, _ = run_vault_audit(self.vault, require_signed=True)
+        self.assertEqual([f.code for f in findings], ["PROVENANCE_MISMATCH"])
+        self.assertIn("not yet committed", findings[0].message)
+        self.assertEqual(mock_run.call_count, 1, "no `git log` for a commit that does not exist")
+
+    def test_empty_author_never_matches(self):
+        (self.vault_root / ".cadabby.json").write_text('{"identities": {"human:alice": [""]}}', "utf-8")
+        self._write_note(
+            "Note-Alice",
+            frontmatter_extra="verified:\n  - by: human:alice\n    at: '2026-10-01T00:00:00Z'\n    of: sha256:abc",
+        )
+        with (
+            patch("cadabby.audit.is_git_repository", return_value=True),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(returncode=0, stdout="commit123 1 1 1\nauthor-mail <>\n")
+            findings, _ = run_vault_audit(Vault(self.vault_root))
+        self.assertEqual([f.code for f in findings], ["PROVENANCE_MISMATCH"])
+
     def test_unsigned_endorsement_when_require_signed(self):
         self._write_note(
             "Note-Alice",

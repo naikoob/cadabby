@@ -16,6 +16,7 @@ from pathlib import Path
 # Imported rather than defined here: the taxonomy lives in one place (§5.4),
 # and every existing `from cadabby.fsutil import VaultConflictError` still
 # resolves.
+from cadabby.constants import BODY_HASH_PREFIX
 from cadabby.errors import LockTimeoutError, VaultConflictError
 
 
@@ -79,7 +80,7 @@ def atomic_replace_checked(
     target = Path(target_path).resolve()
 
     if expected_hash is not None and target.exists():
-        normalized_expected = expected_hash.removeprefix("sha256:")
+        normalized_expected = expected_hash.removeprefix(BODY_HASH_PREFIX)
         current_hash = compute_file_sha256(target)
         if current_hash != normalized_expected:
             raise VaultConflictError(
@@ -170,18 +171,20 @@ def advisory_lock(
                     is_stale = True
 
                 if is_stale:
-                    # Break stale or malformed lock atomically via OCC
+                    # Break the stale lock by removing it, then let O_EXCL alone
+                    # decide the winner. Replacing it in place raced: two breakers
+                    # could both "win". A lock we cannot remove falls through to
+                    # the timeout check below rather than spinning forever.
                     try:
-                        atomic_replace_checked(
-                            target,
-                            lock_content,
-                            expected_hash=compute_bytes_sha256(raw_bytes),
-                        )
-                        acquired = True
-                        break
-                    except (VaultConflictError, OSError):
+                        if target.read_bytes() == raw_bytes:
+                            target.unlink()
+                        continue
+                    except FileNotFoundError:
+                        continue
+                    except OSError:
                         pass
-                    continue
+            except FileNotFoundError:
+                continue  # released between our O_EXCL attempt and the read
             except (ValueError, OSError):
                 pass
 
