@@ -8,12 +8,14 @@ from __future__ import annotations
 import json
 import re
 import sys
+from collections.abc import Iterator
 from types import TracebackType
 from typing import Any, Self
 
 from cadabby import __version__
 from cadabby.cache import VaultCache
-from cadabby.errors import HUMAN_ATTESTATION_REFUSED, INVALID_ARGUMENT, UNKNOWN_TOOL, classify
+from cadabby.constants import DIR_WIKI
+from cadabby.errors import INVALID_ARGUMENT, UNKNOWN_TOOL, HumanAttestationRefusedError, classify
 from cadabby.lint import run_vault_lint
 from cadabby.ops import ground_notes, scaffold_note, update_note, verify_note
 from cadabby.vault import Vault, path_to_cid
@@ -91,7 +93,7 @@ TOOLS = [
     },
     {
         "name": "vault_status",
-        "description": "Epistemic health summary: note counts by tier and type, verification debt (stale count), unprocessed raw files, broken-link and orphan counts.",
+        "description": "Epistemic health summary: note counts by tier and type, verification debt (stale count), unprocessed and filename-only raw files, and broken-link count.",
         "inputSchema": {
             "type": "object",
             "properties": {},
@@ -210,10 +212,20 @@ def _required_args(tool: str) -> tuple[str, ...]:
     return _REQUIRED_ARGS.get(tool, ())
 
 
+def _section_arg(args: dict[str, Any], key: str) -> tuple[str, str] | None:
+    """Parse an optional [heading, body] array parameter for vault_update_note."""
+    s = args.get(key)
+    if s is None:
+        return None
+    if not isinstance(s, (list, tuple)) or not (1 <= len(s) <= 2) or not all(isinstance(x, str) for x in s):
+        raise ValueError(f"'{key}' must be a [heading, body] array of strings")
+    return (s[0], s[1]) if len(s) > 1 else (s[0], "")
+
+
 class McpServer:
     """JSON-RPC 2.0 stdio MCP Server implementation."""
 
-    def __init__(self, vault: Vault):
+    def __init__(self, vault: Vault) -> None:
         self.vault = vault
         self.cache = VaultCache(self.vault)
         self.client_id = "agent:unknown"
@@ -264,8 +276,117 @@ class McpServer:
     def handle_tools_list(self) -> dict[str, Any]:
         return {"tools": TOOLS}
 
+    def _tool_search(self, args: dict[str, Any]) -> dict[str, Any]:
+        self.cache.scan()
+        res = self.cache.search(
+            query=args["query"],
+            type_=args.get("type"),
+            status=args.get("status"),
+            trust=args.get("trust"),
+            tag=args.get("tag"),
+            domain=args.get("domain"),
+            limit=args.get("limit", 20),
+        )
+        return _tool_ok([r.to_dict() for r in res])
+
+    def _tool_ground(self, args: dict[str, Any]) -> dict[str, Any]:
+        cids = args["cids"]
+        if not isinstance(cids, list) or not all(isinstance(c, str) for c in cids):
+            raise ValueError("'cids' must be a list of strings")
+        self.cache.scan()
+        grounded = ground_notes(
+            self.vault,
+            cids,
+            budget_tokens=args.get("budget_tokens"),
+            cache=self.cache,
+        )
+        return _tool_ok(grounded)
+
+    def _tool_scaffold_note(self, args: dict[str, Any]) -> dict[str, Any]:
+        path = scaffold_note(
+            vault=self.vault,
+            title=args["title"],
+            type_=args["type"],
+            description=args["description"],
+            tags=args.get("tags"),
+            sources=args.get("sources"),
+            body=args.get("body", ""),
+            actor=self.client_id,
+            domain=args.get("domain", DIR_WIKI),
+            path=args.get("path"),
+            template=args.get("template"),
+            cache=self.cache,
+        )
+        rel = self.vault.rel_path(path)
+        return _tool_ok(f"Scaffolded note: {rel} (CID: {path_to_cid(rel)})")
+
+    def _tool_update_note(self, args: dict[str, Any]) -> dict[str, Any]:
+        path = update_note(
+            vault=self.vault,
+            cid_or_path=args["cid"],
+            frontmatter_patch=args.get("patch_frontmatter"),
+            append_section=_section_arg(args, "append_section"),
+            replace_section=_section_arg(args, "replace_section"),
+            expected_hash=args.get("expected_hash"),
+            actor=self.client_id,
+            edits=args.get("edits"),
+            cache=self.cache,
+        )
+        rel = self.vault.rel_path(path)
+        return _tool_ok(f"Updated note: {rel}")
+
+    def _tool_verify_note(self, args: dict[str, Any]) -> dict[str, Any]:
+        actor_param = args.get("actor") or args.get("by")
+        if actor_param and str(actor_param).startswith("human:"):
+            # Defense in depth: the server stamps its own client id regardless,
+            # but an explicit human:* request is refused rather than ignored.
+            raise HumanAttestationRefusedError("Verification by human:* cannot be performed over MCP.")
+
+        res = verify_note(
+            vault=self.vault,
+            cid_or_path=args["cid"],
+            actor=self.client_id,
+            method=args.get("method", "automated-check"),
+            is_human_authorized=False,
+            cache=self.cache,
+        )
+        return _tool_ok(
+            f"Attested {res['cid']} by {res['actor']} "
+            f"with content-binding {res['of'][:16]}... "
+            f"-> derived trust tier: '{res['trust_tier']}'"
+        )
+
+    def _tool_status(self, _args: dict[str, Any]) -> dict[str, Any]:
+        self.cache.scan()
+        return _tool_ok(self.cache.get_status())
+
+    def _tool_lint(self, _args: dict[str, Any]) -> dict[str, Any]:
+        findings = run_vault_lint(self.vault, cache=self.cache)
+        out = [f.to_dict() for f in findings]
+        has_errors = any(f.severity == "error" for f in findings)
+        # Deliberately neither _tool_ok nor _tool_error: the call
+        # succeeded, and isError mirrors the CLI's exit 1 for "the
+        # vault has findings" (§5.4). The body is the findings list,
+        # not an error envelope.
+        return {
+            "content": [{"type": "text", "text": json.dumps(out, indent=2)}],
+            "isError": has_errors,
+        }
+
+    _TOOL_HANDLERS = {
+        "vault_search": _tool_search,
+        "vault_ground": _tool_ground,
+        "vault_scaffold_note": _tool_scaffold_note,
+        "vault_update_note": _tool_update_note,
+        "vault_verify_note": _tool_verify_note,
+        "vault_status": _tool_status,
+        "vault_lint": _tool_lint,
+    }
+
     def handle_tools_call(self, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
         """Route tool invocation to underlying engine functions."""
+        if args is not None and not isinstance(args, dict):
+            return _tool_error(name, INVALID_ARGUMENT, "'arguments' must be a JSON object", retryable=False)
         args = args or {}
 
         # Checked here rather than left to the `args["cids"]` lookups below,
@@ -282,117 +403,12 @@ class McpServer:
                 retryable=False,
             )
 
+        handler = self._TOOL_HANDLERS.get(name)
+        if handler is None:
+            return _tool_error(name, UNKNOWN_TOOL, f"Unknown tool: {name}", retryable=False)
+
         try:
-            if name == "vault_search":
-                res = self.cache.search(
-                    query=args["query"],
-                    type_=args.get("type"),
-                    status=args.get("status"),
-                    trust=args.get("trust"),
-                    tag=args.get("tag"),
-                    domain=args.get("domain"),
-                    limit=args.get("limit", 20),
-                )
-                return _tool_ok([r.to_dict() for r in res])
-
-            elif name == "vault_ground":
-                self.cache.scan()
-                grounded = ground_notes(
-                    self.vault,
-                    args["cids"],
-                    budget_tokens=args.get("budget_tokens"),
-                    cache=self.cache,
-                )
-                return _tool_ok(grounded)
-
-            elif name == "vault_scaffold_note":
-                path = scaffold_note(
-                    vault=self.vault,
-                    title=args["title"],
-                    type_=args["type"],
-                    description=args["description"],
-                    tags=args.get("tags"),
-                    sources=args.get("sources"),
-                    body=args.get("body", ""),
-                    actor=self.client_id,
-                    domain=args.get("domain", "wiki"),
-                    path=args.get("path"),
-                    template=args.get("template"),
-                )
-                self.cache.scan()
-                rel = self.vault.rel_path(path)
-                return _tool_ok(f"Scaffolded note: {rel} (CID: {path_to_cid(rel)})")
-
-            elif name == "vault_update_note":
-                app_sec = None
-                if args.get("append_section"):
-                    s = args["append_section"]
-                    app_sec = (s[0], s[1]) if len(s) > 1 else (s[0], "")
-
-                rep_sec = None
-                if args.get("replace_section"):
-                    s = args["replace_section"]
-                    rep_sec = (s[0], s[1]) if len(s) > 1 else (s[0], "")
-
-                path = update_note(
-                    vault=self.vault,
-                    cid_or_path=args["cid"],
-                    frontmatter_patch=args.get("patch_frontmatter"),
-                    append_section=app_sec,
-                    replace_section=rep_sec,
-                    expected_hash=args.get("expected_hash"),
-                    actor=self.client_id,
-                    edits=args.get("edits"),
-                )
-                self.cache.scan()
-                rel = self.vault.rel_path(path)
-                return _tool_ok(f"Updated note: {rel}")
-
-            elif name == "vault_verify_note":
-                actor_param = args.get("actor") or args.get("by")
-                if actor_param and str(actor_param).startswith("human:"):
-                    return _tool_error(
-                        name,
-                        HUMAN_ATTESTATION_REFUSED,
-                        "Verification by human:* cannot be performed over MCP.",
-                        retryable=False,
-                    )
-
-                res = verify_note(
-                    vault=self.vault,
-                    cid_or_path=args["cid"],
-                    actor=self.client_id,
-                    method=args.get("method", "automated-check"),
-                    is_human_authorized=False,
-                )
-                self.cache.scan()
-                return _tool_ok(
-                    f"Attested {res['cid']} by {res['actor']} "
-                    f"with content-binding {res['of'][:16]}... "
-                    f"-> derived trust tier: '{res['trust_tier']}'"
-                )
-
-            elif name == "vault_status":
-                self.cache.scan()
-                status_out = self.cache.get_status()
-                return _tool_ok(status_out)
-
-            elif name == "vault_lint":
-                findings = run_vault_lint(self.vault, cache=self.cache)
-                out = [f.to_dict() for f in findings]
-                has_errors = any(f.severity == "error" for f in findings)
-                # Deliberately neither _tool_ok nor _tool_error: the call
-                # succeeded, and isError mirrors the CLI's exit 1 for "the
-                # vault has findings" (§5.4). The body is the findings list,
-                # not an error envelope.
-                return {
-                    "content": [{"type": "text", "text": json.dumps(out, indent=2)}],
-                    "isError": has_errors,
-                }
-
-            else:
-                return _tool_error(name, UNKNOWN_TOOL, f"Unknown tool: {name}", retryable=False)
-
+            return handler(self, args)
         except Exception as e:  # noqa: BLE001
             info = classify(e)
             return _tool_error(name, info.code, info.message, retryable=info.retryable)
@@ -469,6 +485,137 @@ class McpServer:
 
         raise ValueError(f"Unknown resource URI: {uri}")
 
+    def dispatch_request(self, req: dict[str, Any]) -> dict[str, Any] | None:
+        """Route a parsed JSON-RPC 2.0 request object and return its response (or None for notifications)."""
+        req_id = req.get("id")
+        if req_id is None:
+            return None
+
+        method = req.get("method")
+        params = req.get("params")
+        if not isinstance(params, dict):
+            params = {}
+
+        resp: dict[str, Any] = {"jsonrpc": "2.0", "id": req_id}
+
+        if method == "initialize":
+            try:
+                resp["result"] = self.handle_initialize(params)
+            except Exception as e:  # noqa: BLE001
+                resp["error"] = {"code": -32603, "message": f"Internal error during initialize: {e!s}"}
+        elif method == "tools/list":
+            try:
+                resp["result"] = self.handle_tools_list()
+            except Exception as e:  # noqa: BLE001
+                resp["error"] = {"code": -32603, "message": f"Internal error during tools/list: {e!s}"}
+        elif method == "tools/call":
+            try:
+                resp["result"] = self.handle_tools_call(
+                    params.get("name", ""), params.get("arguments")
+                )
+            except Exception as e:  # noqa: BLE001
+                resp["error"] = {"code": -32603, "message": f"Internal error during tools/call: {e!s}"}
+        elif method == "resources/list":
+            try:
+                resp["result"] = self.handle_resources_list()
+            except Exception as e:  # noqa: BLE001
+                resp["error"] = {"code": -32603, "message": f"Internal error during resources/list: {e!s}"}
+        elif method == "resources/read":
+            try:
+                resp["result"] = self.handle_resources_read(params.get("uri", ""))
+            except Exception as e:  # noqa: BLE001
+                resp["error"] = {"code": -32602, "message": f"Resource error: {e!s}"}
+        elif method == "ping":
+            resp["result"] = {}
+        else:
+            resp["error"] = {"code": -32601, "message": f"Method not found: {method}"}
+
+        return resp
+
+
+_FRAMING_NDJSON = "ndjson"
+_FRAMING_CONTENT_LENGTH = "content-length"
+
+
+def _write_framed(resp: dict[str, Any], framing: str) -> None:
+    """Emit a JSON-RPC response in the framing the request arrived in."""
+    out_bytes = json.dumps(resp).encode("utf-8")
+    if framing == _FRAMING_CONTENT_LENGTH:
+        header = f"Content-Length: {len(out_bytes)}\r\n\r\n".encode("ascii")
+        sys.stdout.buffer.write(header + out_bytes)
+    else:
+        sys.stdout.buffer.write(out_bytes + b"\n")
+    sys.stdout.buffer.flush()
+
+
+def _write_framed_error(code: int, message: str, framing: str) -> None:
+    """Emit an id-less error so a client awaiting a reply fails fast."""
+    _write_framed({"jsonrpc": "2.0", "id": None, "error": {"code": code, "message": message}}, framing)
+
+
+def _is_notification_only_batch(payload: Any) -> bool:
+    """Return True when payload is a non-empty JSON-RPC batch containing only notifications."""
+    return (
+        isinstance(payload, list)
+        and bool(payload)
+        and all(isinstance(item, dict) and item.get("id") is None for item in payload)
+    )
+
+
+def _iter_framed_messages() -> Iterator[tuple[dict[str, Any], str]]:
+    """Yield `(req_dict, framing)` pairs from `sys.stdin.buffer`, emitting framing errors inline."""
+    while True:
+        raw_line = sys.stdin.buffer.readline()
+        if not raw_line:
+            break
+
+        line = raw_line.decode("utf-8", errors="replace").strip()
+        if not line:
+            continue
+
+        if line.lower().startswith("content-length:"):
+            framing = _FRAMING_CONTENT_LENGTH
+            try:
+                length = int(line.split(":", 1)[1].strip())
+            except ValueError:
+                length = -1
+            if length < 0:
+                _write_framed_error(-32700, "Parse error: malformed Content-Length header", framing)
+                break
+            while True:
+                hdr_bytes = sys.stdin.buffer.readline()
+                if hdr_bytes in (b"\r\n", b"\n", b""):
+                    break
+            if not hdr_bytes:
+                break
+            payload_bytes = sys.stdin.buffer.read(length)
+            if len(payload_bytes) < length:
+                break
+            try:
+                req = json.loads(payload_bytes.decode("utf-8", errors="replace"))
+            except json.JSONDecodeError:
+                _write_framed_error(-32700, "Parse error: request body is not valid JSON", framing)
+                continue
+        else:
+            framing = _FRAMING_NDJSON
+            try:
+                req = json.loads(line)
+            except json.JSONDecodeError:
+                _write_framed_error(-32700, "Parse error: request body is not valid JSON", framing)
+                continue
+
+        if not isinstance(req, dict):
+            if _is_notification_only_batch(req):
+                continue
+            _write_framed_error(
+                -32600,
+                "Invalid Request: batch and non-object payloads are not supported",
+                framing,
+            )
+            continue
+
+        yield req, framing
+
 
 def run_mcp_server(vault: Vault) -> int:
     """Run stdio JSON-RPC MCP server loop.
@@ -478,134 +625,10 @@ def run_mcp_server(vault: Vault) -> int:
     reply mirrors the framing of the message it answers, so neither kind of
     client ever receives bytes it cannot parse.
     """
-    ndjson = "ndjson"
-    content_length = "content-length"
-
-    def write_response(resp: dict[str, Any], framing: str) -> None:
-        """Emit a JSON-RPC response in the framing the request arrived in."""
-        # json.dumps escapes control characters, so the payload never contains
-        # a raw newline and is always exactly one line in ndjson framing.
-        out_bytes = json.dumps(resp).encode("utf-8")
-        if framing == content_length:
-            header = f"Content-Length: {len(out_bytes)}\r\n\r\n".encode("ascii")
-            sys.stdout.buffer.write(header + out_bytes)
-        else:
-            sys.stdout.buffer.write(out_bytes + b"\n")
-        sys.stdout.buffer.flush()
-
-    def write_error(code: int, message: str, framing: str) -> None:
-        """Emit an id-less error so a client awaiting a reply fails fast."""
-        write_response({"jsonrpc": "2.0", "id": None, "error": {"code": code, "message": message}}, framing)
-
     with McpServer(vault) as server:
-        # Read lines from stdin using binary buffer for exact byte counts
-        while True:
-            raw_line = sys.stdin.buffer.readline()
-            if not raw_line:
-                break
-
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            if not line:
-                continue
-
-            # Check for Content-Length header framing
-            if line.lower().startswith("content-length:"):
-                framing = content_length
-                try:
-                    length = int(line.split(":", 1)[1].strip())
-                except ValueError:
-                    length = -1
-                if length < 0:
-                    # The payload length is unknown, so the following bytes
-                    # cannot be consumed and the stream cannot be resynchronized;
-                    # reply and stop rather than reading payload as headers.
-                    write_error(-32700, "Parse error: malformed Content-Length header", framing)
-                    break
-                # Read through any remaining header lines until empty line
-                while True:
-                    hdr_bytes = sys.stdin.buffer.readline()
-                    if hdr_bytes in (b"\r\n", b"\n", b""):
-                        break
-                payload_bytes = sys.stdin.buffer.read(length)
-                try:
-                    req = json.loads(payload_bytes.decode("utf-8", errors="replace"))
-                except json.JSONDecodeError:
-                    write_error(-32700, "Parse error: request body is not valid JSON", framing)
-                    continue
-            else:
-                framing = ndjson
-                try:
-                    req = json.loads(line)
-                except json.JSONDecodeError:
-                    write_error(-32700, "Parse error: request body is not valid JSON", framing)
-                    continue
-
-            if not isinstance(req, dict):
-                # Batches and scalar payloads are unsupported. A batch holding
-                # only notifications must draw no reply at all (JSON-RPC 2.0 §6);
-                # anything else gets an error so a client waiting on a reply
-                # fails fast instead of blocking.
-                if (
-                    isinstance(req, list)
-                    and req
-                    and all(isinstance(item, dict) and item.get("id") is None for item in req)
-                ):
-                    continue
-                write_error(
-                    -32600,
-                    "Invalid Request: batch and non-object payloads are not supported",
-                    framing,
-                )
-                continue
-
-            req_id = req.get("id")
-            method = req.get("method")
-            # params may be absent, explicitly null, or (per JSON-RPC) positional
-            params = req.get("params")
-            if not isinstance(params, dict):
-                params = {}
-
-            # Handle notifications (no response needed)
-            if req_id is None:
-                continue
-
-            resp: dict[str, Any] = {"jsonrpc": "2.0", "id": req_id}
-
-            if method == "initialize":
-                try:
-                    resp["result"] = server.handle_initialize(params)
-                except Exception as e:  # noqa: BLE001
-                    resp["error"] = {"code": -32603, "message": f"Internal error during initialize: {e!s}"}
-            elif method == "tools/list":
-                try:
-                    resp["result"] = server.handle_tools_list()
-                except Exception as e:  # noqa: BLE001
-                    resp["error"] = {"code": -32603, "message": f"Internal error during tools/list: {e!s}"}
-            elif method == "tools/call":
-                try:
-                    resp["result"] = server.handle_tools_call(
-                        params.get("name", ""), params.get("arguments")
-                    )
-                except Exception as e:  # noqa: BLE001
-                    resp["error"] = {"code": -32603, "message": f"Internal error during tools/call: {e!s}"}
-            elif method == "resources/list":
-                try:
-                    resp["result"] = server.handle_resources_list()
-                except Exception as e:  # noqa: BLE001
-                    resp["error"] = {"code": -32603, "message": f"Internal error during resources/list: {e!s}"}
-            elif method == "resources/read":
-                try:
-                    resp["result"] = server.handle_resources_read(params.get("uri", ""))
-                except Exception as e:  # noqa: BLE001
-                    resp["error"] = {"code": -32602, "message": f"Resource error: {e!s}"}
-            elif method == "ping":
-                resp["result"] = {}
-            else:
-                resp["error"] = {
-                    "code": -32601,
-                    "message": f"Method not found: {method}",
-                }
-
-            write_response(resp, framing)
-
+        for req, framing in _iter_framed_messages():
+            resp = server.dispatch_request(req)
+            if resp is not None:
+                _write_framed(resp, framing)
     return 0
+

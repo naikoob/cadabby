@@ -93,6 +93,22 @@ class TestFsutil(unittest.TestCase):
 
         self.assertFalse(lock_file.exists())
 
+    def test_unbreakable_stale_lock_times_out(self):
+        """C32: a stale lock we cannot remove raises LockTimeoutError, never spins."""
+        from unittest import mock
+
+        lock_file = self.dir / ".cadabby" / "vault.lock"
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+        lock_file.write_text(f"99999999:{time.time() - 3600:.3f}\n", "utf-8")
+
+        started = time.monotonic()
+        with mock.patch.object(Path, "unlink", side_effect=PermissionError("read-only")):
+            with self.assertRaises(LockTimeoutError):
+                with advisory_lock(lock_file, stale_age=1.0, timeout=0.3, poll_interval=0.01):
+                    self.fail("acquired a lock that could not be broken")
+        self.assertLess(time.monotonic() - started, 3.0)
+        self.assertTrue(lock_file.exists())
+
     def test_lock_release_preserves_foreign_lock(self):
         lock_file = self.dir / ".cadabby" / "vault.lock"
         with advisory_lock(lock_file):

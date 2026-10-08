@@ -82,6 +82,26 @@ class TestVault(unittest.TestCase):
                     load_vault_config(self.dir)
                 self.assertIn(f"'{key}'", str(ctx.exception))
 
+    def test_config_values_are_validated(self):
+        """C36: right JSON type, wrong value, still fails at load and names the key (§2.6)."""
+        cfg_file = self.dir / FILE_CONFIG
+        cases = [
+            ('{"integrity": "sha1"}', "integrity"),
+            ('{"ranking": {"trust": {"human-reviewed": NaN}}}', "ranking.trust.human-reviewed"),
+            ('{"ranking": {"status": {"active": Infinity}}}', "ranking.status.active"),
+            ('{"raw_text_extensions": [".md", 3]}', "raw_text_extensions"),
+            ('{"identities": {"human:alice": "alice@example.com"}}', "identities.human:alice"),
+            ('{"identities": {"human:alice": [null]}}', "identities.human:alice"),
+        ]
+        for content, key in cases:
+            with self.subTest(key=key, content=content):
+                cfg_file.write_text(content, "utf-8")
+                with self.assertRaises(VaultConfigError) as ctx:
+                    load_vault_config(self.dir)
+                self.assertIn(f"'{key}'", str(ctx.exception))
+        cfg_file.write_text('{"integrity": "hash", "identities": {"human:alice": ["a@x.com"]}}', "utf-8")
+        self.assertEqual(load_vault_config(self.dir)["integrity"], "hash")
+
     def test_load_vault_config_passes_through_unknown_keys(self):
         # Type checking is scoped to keys with defaults, so forward-compatible
         # additions are not rejected by an older build.
@@ -115,9 +135,8 @@ class TestVault(unittest.TestCase):
             if key in exempt:
                 continue
             with self.subTest(key=key):
-                self.assertIn(
-                    f'config.get("{key}"',
-                    sources,
+                self.assertTrue(
+                    f'config["{key}"]' in sources or f"config['{key}']" in sources,
                     f"'{key}' is shipped in .cadabby.json defaults but nothing reads it",
                 )
 
@@ -183,6 +202,24 @@ class TestVault(unittest.TestCase):
             # When explicit path is None, CADABBY_VAULT is used
             found_env = find_vault_root(None)
             self.assertEqual(found_env, env_vault.resolve())
+
+    def test_note_path_violation_normalizes_slashes_and_rejects_leading_slash(self):
+        from cadabby.vault import note_path_violation
+
+        self.assertIsNotNone(note_path_violation("/wiki/Note.md"))
+        self.assertIsNotNone(note_path_violation("\\wiki\\Note.md"))
+        self.assertIn("template", note_path_violation("templates\\Concept.md", "templates") or "")
+        self.assertIn("relative", note_path_violation("/templates/Concept.md", "templates") or "")
+
+    def test_log_rotate_bytes_rejects_float_nan_and_non_positive(self):
+        from cadabby.errors import VaultConfigError
+
+        vdir = self.dir / "bad_rotate"
+        vdir.mkdir(parents=True, exist_ok=True)
+        for bad_raw in ('{"log_rotate_bytes": 1.5}', '{"log_rotate_bytes": NaN}', '{"log_rotate_bytes": 0}', '{"log_rotate_bytes": -10}'):
+            (vdir / FILE_CONFIG).write_text(bad_raw, "utf-8")
+            with self.subTest(bad_raw=bad_raw), self.assertRaises(VaultConfigError):
+                load_vault_config(vdir)
 
 
 if __name__ == "__main__":

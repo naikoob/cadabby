@@ -311,6 +311,8 @@ The config file doubles as the vault root marker. Root discovery walks up from t
 
 `identities` maps OKF actor strings to Git author emails and is consumed only by `cadabby audit` (§3.5).
 
+Known keys are checked at load, by JSON type and then by value: `integrity` must be one of the two modes above, every ranking multiplier a finite number (`NaN` and `Infinity` are rejected, though `json` would accept them), `raw_text_extensions` an array of strings, and each `identities` value an array of strings. A violation is `CONFIG_INVALID` naming the key path (`ranking.trust.human-reviewed`). Nothing downstream repairs a bad value: a silently neutralized multiplier is a setting the user believes is in force.
+
 Unrecognized keys are carried through the merge untouched rather than rejected, so a config written for a newer or older Cadabby still loads. The cost is that a misspelled key is silently inert, and the engine must therefore never ship a key it does not read — see §7.5 for the one time it did.
 
 ### 2.7. Vault Resolution (normative)
@@ -370,12 +372,12 @@ A hand-rolled "robust YAML parser" is an unbounded project, and a lossy round-tr
 
 **Accepted grammar.** The frontmatter block is delimited by `---` on its own line at byte 0 and a closing `---`. Within it:
 
-* **Block mappings** at indent 0: `key: value`.
+* **Block mappings** at indent 0: `key: value`. A colon is a mapping indicator only when followed by a space or the end of the line, so `title:Foo` is rejected rather than read as a key, and a sequence item `- https://example.com` stays one string.
 * **Block mappings of scalars nested one level**: a key whose value is itself a mapping, its members indented 2 spaces — the shape `generated:` uses (§3.1). Members must be scalars; nesting stops here.
 * **Block sequences** of scalars: `- value`, indented 2 spaces under their key.
 * **Block sequences of flat mappings**: `- key: value` followed by sibling `key: value` lines at the dash's content indent. Nesting depth stops here.
-* **Scalars**: bare (`active`), single-quoted, or double-quoted. Escapes recognized inside double quotes: `\\ \" \n \t`. Bare scalars are never implicitly typed — everything is a string except the literals `true`, `false`, and `null`.
-* **Comments**: a `#` beginning a line, or preceded by whitespace outside a quoted scalar. Comments and blank lines are preserved on round-trip where the surrounding structure is unchanged.
+* **Scalars**: bare (`active`), single-quoted, or double-quoted. Escapes recognized inside double quotes: `\\ \" \n \t`. Bare scalars are never implicitly typed — everything is a string except the literals `true`, `false`, and `null`. `~` is a string, not YAML's alternative spelling of null.
+* **Comments**: a `#` beginning a line, or preceded by whitespace outside a quoted scalar. Comments and blank lines inside the frontmatter are accepted on read and **discarded by any write**: the canonicalizing writer below emits one form, and a comment has no key to travel with once keys are reordered. Frontmatter is engine-owned; prose belongs in the body, which every write preserves byte for byte outside the edited section.
 
 **Explicitly rejected**: flow style (`[a, b]`, `{k: v}`), anchors and aliases (`&`, `*`), tags (`!!str`), multi-line scalars (`|`, `>`), multi-document markers, mappings nested more than two levels, and sequences of sequences.
 
@@ -418,7 +420,7 @@ Cadabby's identity model is a **convention with an audit trail**, not a security
 
   The TTY check alone stopped nothing that mattered: agents run shell commands inside pseudo-terminals, so a flagless `cadabby verify` issued by an agent used to stamp a human endorsement silently, and `printf 'y\n' | script -qec 'cadabby verify <cid> --human' /dev/null` did the same in one line. The token turns an accidental endorsement into one that has to be engineered on purpose, which is the line this section draws.
 * **What it does not guarantee.** Agents that speak MCP in practice also hold filesystem and shell access; such an agent can edit the markdown directly or invoke the CLI. `clientInfo` is self-reported and unauthenticated, so `agent:<client_id>` is a claim, not an identity. The mechanism prevents *accidental* forgery — the overwhelmingly common case — and nothing more.
-* **What is actually verifiable.** Git already records authenticated-ish authorship. `cadabby audit` locates the line introducing each `human:*` verification entry, runs `git blame --porcelain` on it, and compares the commit author email against the `identities` map in `.cadabby.json`. A mismatch — most importantly a human endorsement introduced by a commit authored by an agent — is reported as `PROVENANCE_MISMATCH`. With `--require-signed`, unsigned commits touching `human:*` lines are also flagged (`git log --show-signature`). This turns an unenforceable claim into a detectable one at the cost of one `subprocess` call per note.
+* **What is actually verifiable.** Git already records authenticated-ish authorship. `cadabby audit` locates the line introducing each `human:*` verification entry, runs `git blame --porcelain` on it, and compares the commit author email against the `identities` map in `.cadabby.json`. A mismatch — most importantly a human endorsement introduced by a commit authored by an agent — is reported as `PROVENANCE_MISMATCH`. With `--require-signed`, the commit is also flagged as `UNSIGNED_ENDORSEMENT` unless Git reports a good signature (`git log --format=%G?` is `G`, or `U` for a good signature from an untrusted key). An endorsement not yet committed has no author to check: it is a `PROVENANCE_MISMATCH` saying so, and no signature is sought for a commit that does not exist. An empty author email never matches an identity. This turns an unenforceable claim into a detectable one at the cost of one `subprocess` call per note.
 
 `audit` is a no-op with a clear notice when the vault is not a Git repository.
 
@@ -470,7 +472,8 @@ CREATE TABLE IF NOT EXISTS notes (
 CREATE INDEX IF NOT EXISTS idx_notes_layer_type ON notes(layer, type);
 CREATE INDEX IF NOT EXISTS idx_notes_trust ON notes(trust_tier);
 
--- Wikilink graph. target_cid is NULL for dead links, which is what lint reads.
+-- Link graph: wikilinks and relative Markdown note links (§4.4). target_cid is NULL for
+-- dead links, which is what lint reads.
 CREATE TABLE IF NOT EXISTS links (
     id          INTEGER PRIMARY KEY,
     source_cid  TEXT NOT NULL,
@@ -478,10 +481,11 @@ CREATE TABLE IF NOT EXISTS links (
     target_cid  TEXT,                          -- resolved; NULL = broken link
     alias       TEXT,                          -- "[[Note|alias]]" -> "alias"
     anchor      TEXT,                          -- "[[Note#heading]]" -> "heading"
-    occurrences INTEGER NOT NULL DEFAULT 1
+    occurrences INTEGER NOT NULL DEFAULT 1,
+    kind        TEXT NOT NULL DEFAULT 'wiki'   -- 'wiki' for [[...]], 'markdown' for [label](path.md)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_links_edge
-    ON links(source_cid, target_raw);
+    ON links(source_cid, kind, target_raw);
 CREATE INDEX IF NOT EXISTS idx_links_target ON links(target_cid);
 CREATE INDEX IF NOT EXISTS idx_links_source ON links(source_cid);
 
@@ -489,10 +493,12 @@ CREATE INDEX IF NOT EXISTS idx_links_source ON links(source_cid);
 CREATE TABLE IF NOT EXISTS sources (
     source_cid  TEXT NOT NULL,                 -- the wiki note
     raw_path    TEXT NOT NULL,                 -- as written in frontmatter
-    resolved    INTEGER NOT NULL,              -- 1 if the file exists in raw/
+    resolved    INTEGER NOT NULL,              -- 1 if raw_path names an indexed raw/ file
+    resolved_path TEXT,                        -- that file's rel_path once normalized ('./raw/x' -> 'raw/x'), else NULL
     PRIMARY KEY (source_cid, raw_path)
 );
 CREATE INDEX IF NOT EXISTS idx_sources_raw ON sources(raw_path);
+CREATE INDEX IF NOT EXISTS idx_sources_resolved ON sources(resolved_path);
 
 -- Contentless-external FTS5: the index is built, the text is not duplicated.
 -- Two tables over the same content table, one per corpus: curated notes in
@@ -537,7 +543,7 @@ With two indexes the retraction has a second way to go wrong: it must target **t
 
 The integrity check runs against **both** tables. A mismatched retraction damages one index while leaving the other clean, so checking only the curated one would report health while raw search returned wrong rows.
 
-`cache_meta` holds `schema_version`. **There are no migrations**: a version mismatch deletes `cache.db` and rebuilds. This is a disposable cache, and that freedom is worth more than incremental upgrade paths.
+`cache_meta` holds `schema_version` and the `raw_text_extensions` list the raw index was built with (§4.3). **There are no migrations**: a version mismatch deletes `cache.db` and rebuilds. This is a disposable cache, and that freedom is worth more than incremental upgrade paths.
 
 ### 4.3. Synchronization
 
@@ -546,9 +552,9 @@ Sync is **implicit**. Every read command (`search`, `ground`, `status`, `graph`,
 The scan walks `raw/` and all discovered cognitive domains (`wiki/`, `customers/`, `projects/`, etc.), skipping `DEFAULT_IGNORED_DIRS` and domain manifest files (`{domain}/AGENTS.md`). It `stat`s every file, and:
 
 1. **Inserts** paths absent from `notes`.
-2. **Reparses** paths whose `(mtime, file_size)` pair differs — or whose SHA-256 differs, under `integrity: "hash"`.
+2. **Reparses** paths whose `(mtime, file_size)` pair differs — or whose SHA-256 differs, under `integrity: "hash"` — and every `raw/` path, whatever its stat, when `raw_text_extensions` differs from the list recorded in `cache_meta`. Which raw files have indexed text is a function of the config as well as the file, so changing the list takes effect on the next scan with no file touched and no `--rebuild`.
 3. **Deletes** rows whose `rel_path` no longer exists on disk, including their `links`, `sources`, and FTS rows — retracted from whichever of the two indexes the row's layer selects, never from both and never from the wrong one (§4.2). *(Deletion reconciliation is not optional; without it, a renamed note haunts search results indefinitely.)*
-4. Re-resolves `links.target_cid` for every edge whose target set changed.
+4. Re-resolves `links.target_cid` and `sources.resolved` / `sources.resolved_path` against the files the cache now holds, whenever any file changed. Citations resolve against the indexed raw set rather than a separate disk probe, so a raw file arriving after the note that cites it clears `SOURCE_MISSING` without the note being edited. A raw file is *unprocessed* exactly when no `sources.resolved_path` names it; `index.md` and `vault_status` share that one definition.
 
 `(mtime, file_size)` misses the pathological case of a same-second, same-length edit; `integrity: "hash"` exists for vaults where that matters. A full stat sweep of a few thousand notes costs single-digit milliseconds, so there is no staleness heuristic to get wrong.
 
@@ -584,7 +590,10 @@ LIMIT :limit;
 Higher is better, unconditionally.
 
 * **Domain-Filtered Search**: If `:domain` is provided (e.g. `domain="projects"`), search queries are constrained strictly to that cognitive domain. If omitted (`:domain IS NULL`), search spans all non-raw cognitive domains (`layer != 'raw'`). `domain="raw"` is accepted and is the only way to reach unprocessed sources (§2.4); it switches the query to `raw_fts`, so raw results are ranked against other raw sources rather than against curated notes.
+* **Multi-Term `OR` Fallback on Zero Hits**: A sanitized query is evaluated first under FTS5's default implicit `AND`, so documents containing every term always win when at least one exists. When an implicit-`AND` query of two or more terms (with no explicit `AND`, `OR`, or `NOT` operators) matches zero rows, `search` re-runs the same query with the sanitized terms joined by `OR`; FTS5's `bm25()` sums across every matched term, so documents matching more of the query's terms naturally outrank single-term matches before epistemic multipliers apply.
 * **Canonical Stem Resolution Priority**: In the link graph (`LinkTargetIndex`), known note CIDs are registered with `wiki/` stems first. A bare wikilink (`[[Architecture]]`) will always resolve to the canonical note in `wiki/Architecture` rather than an arbitrary domain note. Notes in custom domains can be linked unambiguously via qualified CID (e.g. `[[customers/acme/Account]]`) or scoped stem (`[[acme/Account]]`).
+* **Qualified Targets Never Fall Back to a Stem**: A wikilink target containing `/` (`[[apollo/Architecture]]`) resolves by exact CID or path suffix only. A typo in the path (`[[customers/acmee/README]]`) is `LINK_DEAD`, never silently resolved to some other note sharing the final stem.
+* **Markdown Note Links**: A relative inline Markdown link whose path ends in `.md` (`[Arch](../../wiki/Architecture.md#Storage)`, percent-encoded or `<angle-bracketed>` paths included) is a graph edge with `kind = 'markdown'`, carrying backlinks, gate 3 and gate 5 checks, and `index.md` reachability exactly as a wikilink does. It resolves by **exact path from the citing note's folder only** — never by stem, because a stem fallback would silently absorb the one-`../`-too-many mistakes the dead-link check exists to catch. Images, URLs, vault-absolute paths, same-note `#heading` jumps, code spans, paths with a `raw` segment (gate 4's citations), and targets that cannot be notes (root files such as `STYLE.md`, reserved or dot folders, `AGENTS.md` manifests, the declared template folder) are not edges. `[[Wikilinks]]` remain the form agents write, since they need no `../` depth; Markdown note links exist so vaults authored with Obsidian's Markdown link format, or published to renderers that do not understand wikilinks, stay checked.
 
 Two properties of FTS5's `bm25()` make this multiplication safe, both verified against SQLite 3.53.2 and both easy to "fix" into a bug later:
 
@@ -602,7 +611,10 @@ The column weights (`title` 4.0, `description` 2.0, `body` 1.0, `tags` 1.5) and 
 * `total_notes`: Count of all tracked notes across all cognitive domains.
 * `total_wiki`: Count of notes in canonical `wiki/`.
 * `domains`: Per-domain breakdown mapping `{domain_name: count}` (e.g. `{"wiki": 4, "customers": 1, "projects": 1}`).
-* Epistemic verification debt, unverified counts, and broken links across the vault.
+* `total_raw`, `unprocessed_raw`, and `filename_only_raw`: raw files, those no citation resolves to (§4.3), and a `{extension: count}` breakdown of raw files whose extension is outside `raw_text_extensions` and that are therefore indexed by filename stem only (§2.4).
+* `verification_debt`, `trust_tiers`, `types`, `statuses`: epistemic counts.
+* `broken_links`: link rows whose target does not resolve, the same set gate 3 reports as `LINK_DEAD` (§6.3).
+* `vault_name`, `root`, `integrity`: identification and the active integrity mode.
 
 ---
 
@@ -618,7 +630,7 @@ To prevent cognitive tool dilution and LLM routing degradation, Cadabby preserve
 | :--- | :--- | :--- |
 | **`vault_search`** | Optional `domain` filter | FTS5 BM25 search across all cognitive domains (or filtered by `domain`), with trust boosting and filters (`type`, `status`, `trust`, `tag`, `domain`, `limit`). Returns cid, domain, title, description, trust tier, score, and snippet. |
 | **`vault_ground`** | Directives & domain injection | Retrieves full or budget-truncated markdown for cids, **plus each note's domain, localized agent directives (`directives`), forward links, backlinks, and sources**. Grounding automatically equips agents with domain-specific behavioral rules. |
-| **`vault_status`** | Domain counts breakdown | Epistemic health summary: note counts by tier, type, and domain (`domains: {...}`), verification debt (stale count), unprocessed `raw/` files, and broken links. |
+| **`vault_status`** | Domain counts breakdown | Epistemic health summary: note counts by tier, type, and domain (`domains: {...}`), verification debt (stale count), unprocessed and filename-only (`filename_only_raw`) `raw/` files, and broken links. |
 | **`vault_scaffold_note`** | `domain` and `path` parameters | Creates a note in `wiki/` or within a target cognitive domain (`domain`, optional `path`), with valid OKF frontmatter and `generated:` attribution. Validates against domain `allowed_types` if defined. Refuses to overwrite. |
 | **`vault_update_note`** | `edits` parameter | Non-destructive frontmatter patches and body edits across any domain note. `append_section` / `replace_section` address `##` headings; `edits` is an ordered list of `replace_text` (exact, unique match anywhere in the body, including the H1 and preamble above the first `##`; never the frontmatter), `replace_section`, and `append_section` operations applied atomically in one write with one ledger entry. If any operation fails, nothing is written. Never truncates unparseable files. |
 | **`vault_verify_note`** | Unchanged | Appends a verification entry stamped `by: agent:<client_id>`, `at:` now, and `of:` the current body hash. Writing `human:*` over MCP is refused unconditionally. |
@@ -641,12 +653,12 @@ Standard MCP clients (including Antigravity, Claude Code, and Inspector) query M
 
 | Command | Description |
 | :--- | :--- |
-| `cadabby init [path]` | Scaffolds a vault at `path` (default: current directory). Creates `.cadabby.json`, `.gitignore`, `.mcp.json`, `AGENTS.md`, pointer files, `.agents/skills/`, directory tree, seed `index.md`. Refuses to overwrite existing files without `--force`. |
+| `cadabby init [path]` | Scaffolds a vault at `path` (default: current directory). Creates `.cadabby.json`, `.gitignore`, `.mcp.json`, `AGENTS.md`, pointer files, `.agents/skills/`, directory tree, seed `index.md`; `--obsidian`, `--obsidian-templates`. Refuses to overwrite existing files without `--force`. |
 | `cadabby search <query>` | As `vault_search`; `--domain`, `--type`, `--trust`, `--status`, `--tag`, `--limit`, `--json`. |
 | `cadabby ground <cids...>` | As `vault_ground`; `--budget <tokens>`, `--json`. |
-| `cadabby status` | As `vault_status`. |
-| `cadabby scaffold <title>` | As `vault_scaffold_note`; `--domain <domain>`, `--path <path>`, `--type <type>`, `--desc <desc>`. |
-| `cadabby update <path>` | As `vault_update_note`. |
+| `cadabby status` | As `vault_status`; `--json`. |
+| `cadabby scaffold <title>` | As `vault_scaffold_note`; `--domain <domain>`, `--path <path>`, `--type <type>`, `--desc <desc>`, `--template <name>`. |
+| `cadabby update <path>` | As `vault_update_note`; `--patch-frontmatter`, `--append-section`, `--replace-section`, `--edits`, `--expected-hash`. Like `scaffold` and `log`, records `--actor` if given and `process:cli` otherwise; a terminal is never taken as evidence of a person. |
 | `cadabby verify <path>` | Appends a verification entry. `--human` requires a TTY and stamps `human:<username>`; otherwise stamps `process:cli`. |
 | `cadabby lint` | Dynamic six gates across all domains; non-zero exit on error-severity findings, for CI. |
 | `cadabby sync` | Forces an incremental scan across all domains and unconditionally regenerates `index.md` (§4.3). `--rebuild` discards `cache.db` first. |
@@ -679,6 +691,8 @@ A failure is useless to a caller that cannot tell what kind of failure it was. E
 **`retryable` is the field that matters.** It is the one an agent branches on, and the one prose structurally cannot carry. Exactly two codes set it, and both mean the request was well-formed and lost a race. `HUMAN_ATTESTATION_REFUSED` is deliberately distinct from `INVALID_ARGUMENT` for the same reason: an agent reading "invalid argument" may reasonably try another spelling of the actor, and this refusal is categorical.
 
 **MCP.** Tool failures return `isError: true` with the content being a JSON object `{"error": {"code", "message", "retryable", "tool"}}`. The payload rides in the text content because MCP's tool-result channel has no typed error field — `isError` is a single boolean — so the structure has to go somewhere the caller can still parse. This is separate from the JSON-RPC protocol errors (`-32700` through `-32603`), which govern malformed envelopes rather than failed operations and are unchanged.
+
+One tool sets `isError` without failing: `vault_lint` returns `isError: true` when the vault has error-severity findings, mirroring the CLI's exit 1, and its content is then the findings list rather than an error object. An agent that branches on `isError` alone sees a red vault as a failed call, which is the intent; one that needs to tell the two apart checks for the `error` key.
 
 **CLI.** Six exit statuses, because each calls for a different reaction from a script: `0` success, `1` the command ran and the vault has findings, `2` the command was invoked wrongly, `3` fix the input or the environment, `4` transient, retry, `5` unexpected. `1` keeps its existing meaning because pre-commit hooks already depend on it, and `2` is not reused for anything else because argparse owns it.
 
@@ -741,11 +755,12 @@ Ingestion enforces closed-world source grounding: every factual claim in a note 
    - For `wiki/`, `type` supports open dynamic typing (`allowed_types: None` by default).
    - For custom cognitive domains, `type` is validated against `domain_def.allowed_types` if configured in `{domain}/AGENTS.md` (§2.2). If unconfigured (`allowed_types: None`), any non-empty string type is permitted.
    - Codes: `FRONTMATTER_UNPARSEABLE`, `FIELD_MISSING`, `ENUM_INVALID`, `TIMESTAMP_INVALID`, `TAG_MALFORMED` (error for whitespace, warning for non-canonical case).
+   - A `{domain}/AGENTS.md` whose frontmatter does not parse, whose `allowed_types` is not a list of strings, whose `require_sources` is not a boolean, or whose `domain` differs from its folder name is `DOMAIN_MANIFEST_INVALID` (error), reported at the manifest. The domain stays searchable but open, and `scaffold_note` into it is refused until the manifest is fixed.
 2. **Flat Wiki & Layout Consistency** — enforces structural discipline across domains.
    - In `wiki/`, all notes must reside directly under `wiki/` with no subdirectories (`WIKI_NESTING_DISALLOWED`).
    - In custom cognitive domains (e.g. `customers/`, `projects/`), arbitrary nested subdirectories (e.g. `customers/acme-corp/README.md`) are permitted and encouraged.
-3. **Link Consistency** — every `[[Wikilink]]` resolves across all domains (`links.target_cid IS NOT NULL`). Alias and anchor forms are resolved against note CIDs and stems; anchors additionally checked against target markdown headings. Codes: `LINK_DEAD` (error), `ANCHOR_MISSING` (warning — the target resolves, so the note is reachable and only the jump is wrong).
-4. **Provenance Check** — every `sources:` entry must exist under `raw/` (`sources.resolved = 1`). Furthermore, if the note's domain manifest specifies `require_sources: true`, an empty or omitted `sources:` list is flagged as an error. Reports unprocessed raw files as the inverse. Code: `SOURCE_MISSING`. In-body citations get the same check: a relative Markdown link outside a code span whose path contains a `raw` segment must resolve, from the citing note's folder, to a file under `raw/`. Wikilinks never reach it and URLs are skipped. When the last `raw` segment onward names a real file, the message suggests the correct relative path, since the usual fault is one `../` too many or too few. Code: `RAW_LINK_BROKEN` (error — the citation a reader follows is dead).
+3. **Link Consistency** — every `[[Wikilink]]` and every relative Markdown note link (§4.4) resolves across all domains (`links.target_cid IS NOT NULL`). Wikilink alias and anchor forms are resolved against note CIDs and stems; Markdown note links by exact path, and a dead one names the relative path that would resolve when its stem identifies a note. Anchors of both kinds are additionally checked against target markdown headings, matching the heading text, its space/hyphen-normalized form, or its GitHub-style slug (`#b-tree-indexes-v2` for `## B-Tree Indexes (v2)`). Codes: `LINK_DEAD` (error), `ANCHOR_MISSING` (warning — the target resolves, so the note is reachable and only the jump is wrong).
+4. **Provenance Check** — every `sources:` entry must exist under `raw/` (`sources.resolved = 1`). Furthermore, if the note's domain manifest specifies `require_sources: true`, an empty or omitted `sources:` list is flagged as an error. Code: `SOURCE_MISSING`. In-body citations get the same check: a relative Markdown link outside a code span whose path contains a `raw` segment must resolve, from the citing note's folder, to a file under `raw/`. Wikilinks never reach it, URLs are skipped, and a `raw/` link is never a graph edge. When the last `raw` segment onward names a real file, the message suggests the correct relative path, since the usual fault is one `../` too many or too few. Code: `RAW_LINK_BROKEN` (error — the citation a reader follows is dead).
 5. **Graph Connectivity** — flags orphan notes (zero inbound and zero outbound links). Evaluated for canonical `wiki/` notes (`WHERE n.layer = 'wiki'`), recognizing cross-domain links from external domains (e.g. a customer note linking to a wiki concept prevents that concept from being flagged as an orphan). Severity `warning`. Code: `NOTE_ORPHAN`. MOC coverage is a distinct concern and is deliberately not a gate: a note that links outward but appears in no Map of Content has edges and is therefore not an orphan, so it is surfaced by `index.md` instead (§2.5).
 6. **Verification Integrity** — actor strings match the §3.4 pattern; `of:` present on every entry; stale verifications enumerated as verification debt. Because `verified:` is an append-only audit trail (§3.4), an entry whose `of:` differs from `body_hash` is silent when superseded by a valid current entry of equal or higher authority (`human-reviewed` supersedes all prior entries; `machine-confirmed` supersedes prior machine entries while still warning if a prior `human:*` entry drifted). Codes: `ACTOR_MALFORMED` (error), `VERIFICATION_UNBOUND` (error — missing `of:`, so the attestation binds to nothing), `VERIFICATION_STALE` (warning).
 
@@ -789,7 +804,7 @@ cadabby/assets/plugins/cadabby/
 
 **Capabilities.** The `cadabby-wiki` skill injects high-level wiki operations into context without consuming prompt tokens up front. The root agent delegates reading, drafting, and cross-linking to **librarian**, and cache maintenance, diagnostics, and linting to **technician**. Slash commands `/ingest`, `/vault-status`, and `/vault-lint` are available in the chat UI.
 
-> **Verified Architecture (v0.3.1).** The manifest layout conforms to the single-definition invariant (§7.1): entry-point progressive disclosure skill at `skills/cadabby-wiki/SKILL.md` and thin subagent manifests in `agents/` delegating runbook execution directly to `.agents/skills/<persona>/SKILL.md` in the active vault. `cadabby init` scaffolds this plugin directly into `.agents/plugins/cadabby/` to guarantee zero-configuration, vault-scoped MCP auto-mount for Antigravity, symmetric with `.mcp.json` for Claude Code.
+> **Verified Architecture (v0.3.2).** The manifest layout conforms to the single-definition invariant (§7.1): entry-point progressive disclosure skill at `skills/cadabby-wiki/SKILL.md` and thin subagent manifests in `agents/` delegating runbook execution directly to `.agents/skills/<persona>/SKILL.md` in the active vault. `cadabby init` scaffolds this plugin directly into `.agents/plugins/cadabby/` to guarantee zero-configuration, vault-scoped MCP auto-mount for Antigravity, symmetric with `.mcp.json` for Claude Code.
 
 ### 7.3. Claude Code Integration
 
@@ -806,7 +821,7 @@ cadabby/assets/plugins/cadabby/
    }
    ```
 
-   The command is `python3 -m cadabby`, **not** a bare `cadabby` console script. Agent subprocesses frequently inherit a different `PATH` than the user's shell — which is precisely the environment-divergence problem the zero-dependency tenet exists to solve — and a console script only exists after an install step that running from source skips. `init` writes `sys.executable` as an absolute path when it can resolve one, falling back to `"python3"`.
+   `init` and `install` prefer the installed `cadabby` console script (`sys.executable` sibling) when present and runnable, falling back to `[sys.executable, "-m", "cadabby", "mcp"]` when running from an editable checkout or when no sibling binary exists, and finally `"python3"`. Recording the absolute path ensures agent subprocesses that inherit a minimal `PATH` still resolve the exact environment.
 
 2. **Harness delegation via `CLAUDE.md`.** A ~15-line non-normative pointer instructing Claude Code to read `AGENTS.md` as the single constitution, to prefer native MCP tools over subshell commands, and never to override actor identity when stamping `verified:`. **`init` writes it once and no command ever rewrites it** — users customize `CLAUDE.md` heavily, and an engine that regenerates it will eventually destroy their work. `init --force` is the only path that overwrites, and it says so.
 
@@ -833,7 +848,7 @@ Behavior lives in `.agents/skills/` and `AGENTS.md`, both of which are vault con
 | | files | written by |
 |---|---|---|
 | **Engine-owned** | `.mcp.json`, `.claude/commands/*`, `.agents/skills/*`, `.agents/plugins/cadabby/*` | `init`, and `install` on every run |
-| **User-owned** | `.cadabby.json`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `STYLE.md` | `init` once; never by `install` |
+| **User-owned** | `.cadabby.json`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `STYLE.md`, `.obsidian/*`, `templates/*` | `init` once; never by `install` |
 | **Generated** | `index.md`, `log.md`, `log/*.md`, `.cadabby/*` | `init` seeds; thereafter any scan or write that changes the vault (§2.1, §4.3) |
 
 The third row is not a kind of ownership but its absence: these files have no authored content to protect, so hand-edits to them are not preserved and `--force` has nothing to do with them. The distinction that matters for `install` is the first two rows, since generated files are regenerated regardless of what `install` does.
@@ -885,7 +900,7 @@ Bare `--global` must **not** adopt a vault discovered from the working directory
 
 The two modes are exclusive by construction rather than by policy: `mcp_config.json` lives *inside* the plugin directory, so a bound install has nowhere to write it unless that directory is a real copy. **Binding costs the symlink**, which is why it is opt-in and why the bare form is the default.
 
-On a freshly scaffolded vault `install` is a no-op — `init` already registered both harnesses. **`install` is the re-run verb**, and it exists because two things go stale that `init` will not repair: the recorded interpreter path, which is absolute (§7.2) and therefore dies when a venv is rebuilt or Python is upgraded, and the engine-owned shims, which were copied at the version that scaffolded the vault. In the default vault-bound mode it re-syncs every engine-owned file in the table in §7.4.
+On a freshly scaffolded vault `install` is a no-op — `init` already registered both harnesses. **`install` is the re-run verb**, and it exists because two things go stale that `init` will not repair: the recorded interpreter path, which is absolute (§7.3) and therefore dies when a venv is rebuilt or Python is upgraded, and the engine-owned shims, which were copied at the version that scaffolded the vault. In the default vault-bound mode it re-syncs every engine-owned file in the table in §7.4.
 
 ```bash
 cadabby install --all              # configure local vault workspace for all harnesses (default)
@@ -944,7 +959,7 @@ cadabby/
 │       ├── okf.py              # Schema validation, body hashing, trust tier derivation (3.3-3.4)
 │       ├── fsutil.py           # Atomic replace, advisory lock, O_APPEND ledger writes
 │       ├── cache.py            # SQLite connection, FTS5 probe, scan/upsert/delete, search
-│       ├── graph.py            # Wikilink extraction, resolution, backlink queries
+│       ├── graph.py            # Wikilink and Markdown note-link extraction, resolution, backlink queries
 │       ├── indexer.py          # index.md gap report (2.5) and log.md append/rotate
 │       ├── lint.py             # The dynamic six gates across all domains (6.3)
 │       ├── audit.py            # Git blame provenance audit (3.5)
@@ -967,7 +982,12 @@ cadabby/
 │           │   ├── GEMINI.md
 │           │   ├── STYLE.md
 │           │   ├── index.md
-│           │   └── obsidian/app.json
+│           │   ├── obsidian/
+│           │   │   ├── app.json
+│           │   │   └── templates.json
+│           │   └── templates/
+│           │       ├── Concept.md
+│           │       └── MOC.md
 │           ├── skills/         # CANONICAL persona runbooks (7.1)
 │           │   ├── librarian/SKILL.md
 │           │   └── technician/SKILL.md
@@ -994,7 +1014,7 @@ cadabby/
     ├── test_frontmatter.py     # Subset parse/write boundary, round-trip fidelity (3.2)
     ├── test_okf.py             # Body hashing, actor/timestamp validation, tier derivation (3.1, 3.3-3.4)
     ├── test_cache.py           # Scan, deletion reconciliation, FTS5 ranking sign & integrity
-    ├── test_graph.py           # Alias/anchor/path wikilink resolution, dead links, target index
+    ├── test_graph.py           # Alias/anchor/path wikilink + Markdown note-link resolution, target index
     ├── test_indexer.py         # index.md gap report, MOC reachability, log rotation
     ├── test_lint.py            # Each gate's codes and severities
     ├── test_errors.py          # Code taxonomy, retryability, MCP payload, exit codes (5.4)
@@ -1044,29 +1064,42 @@ A note on scope: the five-phase build order that used to open this section was r
 * **C3.** Point `vault_update_note` at a note whose frontmatter uses flow style: the call fails, the file's bytes are unchanged, and `lint` names it `FRONTMATTER_UNPARSEABLE` with the offending line.
 * **C4.** `lint` exits non-zero on a demo vault seeded with one instance of each error code, and zero on the clean demo vault.
 * **C5.** Create `customers/` with a note in it and nothing else: it is searchable on the next command, with no registration step. Add `customers/AGENTS.md` declaring `allowed_types` and `require_sources: true` and both begin to bind in that domain and in no other.
-* **C6.** Scaffold `type: account` into a domain whose manifest allows it and the note appears at the requested path; scaffold the same type into one that does not and the call is refused, naming the permitted set.
+* **C6.** Scaffold `type: account` into a domain whose manifest allows it and the note appears at the requested path; scaffold the same type into one that does not and the call is refused, naming the permitted set. Scaffold with a `path` under `raw/`, a dot-folder, or a nested `wiki/` folder and the call is refused with nothing written.
 * **C7.** Ground one `customers/` note and one `wiki/` note in a single call: the payload carries the customers directives verbatim against the first entry and not against the second.
 * **C8.** A term appearing only in an uncited `raw/` file returns nothing until `domain: "raw"` is passed. A term appearing in two cognitive domains returns both when `domain` is omitted, and only one when it is given.
-* **C9.** With `wiki/Architecture` and `projects/apollo/Architecture` both present, `[[Architecture]]` resolves to the wiki note, and `[[apollo/Architecture]]` is the form that reaches the other. Neither is reported as a dead link.
+* **C9.** With `wiki/Architecture` and `projects/apollo/Architecture` both present, `[[Architecture]]` resolves to the wiki note, and `[[apollo/Architecture]]` is the form that reaches the other. Neither is reported as a dead link. A qualified target with a typo (`[[apollo/Architcture]]`) is `LINK_DEAD`, not resolved to the wiki note by its stem.
 * **C10.** Count the entries `tools/list` returns: seven, and the same seven the plugin's frozen `cadabby-wiki/SKILL.md` names. `initialize` advertises `"resources": {}`, and `resources/list` then `resources/read` serve `vault://domains` and a `domain://{domain}/directives` for each discovered domain.
-* **C11.** `wiki/sub/Note.md` raises `WIKI_NESTING_DISALLOWED`; `customers/acme/Q3/Note.md` at the same depth raises nothing. A customer note linking to an otherwise-isolated wiki concept keeps that concept off gate 5's orphan list.
-* **C12.** Call `vault_verify_note` with any argument shaped to produce `by: human:*`: it fails with `HUMAN_ATTESTATION_REFUSED` and the note's bytes are unchanged. No MCP argument reaches the human tier. Run `cadabby verify` on a TTY with no flag: the entry is `process:cli`. Add `--human` and answer the prompt with anything but the printed token: the command exits 2 and the bytes are unchanged.
+* **C11.** `wiki/sub/Note.md` raises `WIKI_NESTING_DISALLOWED`; `customers/acme/Q3/Note.md` at the same depth raises nothing. A customer note linking to an otherwise-isolated wiki concept keeps that concept off gate 5's orphan list. Both hold when the nested note's frontmatter does not parse: it reports `FRONTMATTER_UNPARSEABLE` and `WIKI_NESTING_DISALLOWED` together.
+* **C12.** Call `vault_verify_note` with any argument shaped to produce `by: human:*`: it fails with `HUMAN_ATTESTATION_REFUSED` and the note's bytes are unchanged. No MCP argument reaches the human tier. Run `cadabby verify` on a TTY with no flag: the entry is `process:cli`. Add `--human` and answer the prompt with anything but the printed token: the command exits 3 (`INVALID_ARGUMENT`) and the bytes are unchanged. No surface, MCP or use case, reports the refusal as `PERMISSION_DENIED`.
 * **C13.** `cadabby audit` detects a `human:owner` entry introduced by a commit authored by an unmapped email.
 * **C14.** A note renamed on disk leaves no stale row in `notes`, `links`, `sources`, or either FTS index, and `INSERT INTO <index>(<index>) VALUES('integrity-check')` passes afterward for both `notes_fts` and `raw_fts` (§4.2).
 * **C15.** A `human-reviewed` note outranks an identically-matching `unverified` note, and a `deprecated` one is pushed below both.
 * **C16.** `cadabby sync` run twice in a row produces no Git diff on the second run.
-* **C17.** On the clean demo vault, `index.md` names every MOC and no filed note. Add one unfiled note, one uncited `raw/` file, and one note edited since its attestation: exactly three sections appear. Resolve all three and the file returns to entry points alone.
+* **C17.** On the clean demo vault, `index.md` names every MOC and no filed note. Add one unfiled note, one uncited `raw/` file, and one note edited since its attestation: exactly three sections appear. Resolve all three and the file returns to entry points alone. A vault with MOCs and no gaps renders its entry points followed by the "Nothing outstanding" line.
 * **C18.** Link a note listed under Unfiled from any MOC: the next scan drops it, including when the link runs through two intermediate notes. A note that links outward but sits under no MOC stays listed while `lint` reports no `NOTE_ORPHAN` for it.
 * **C19.** After `init`, a full ingestion cycle, and `sync`, list every file under `customers/` and `projects/`: each one was written by an agent or a human. No `{domain}/index.md`, and nothing else engine-owned.
 * **C20.** Drop a file into `raw/` and run any command that scans — CLI, MCP tool, or `sync`: `index.md` lists it afterward, with no explicit sync call. Run the same command again with nothing changed and `index.md`'s bytes and mtime are untouched, the report never having been built.
 * **C21.** `cadabby init` into a directory with an existing `CLAUDE.md` leaves that file untouched and says so.
-* **C22.** `cadabby install --all` run twice changes no bytes on the second run; `--uninstall` restores the pre-install config exactly.
+* **C22.** `cadabby install --all` run twice changes no bytes on the second run; `--uninstall` restores the pre-install config exactly. Corrupt an installed `mcp_config.json` and re-run with `--force`: the install is refused and the file's bytes are unchanged.
 * **C23.** Grep any distinctive sentence from a persona runbook across the repository: it occurs once. The plugin's subagent manifests name `.agents/skills/<persona>/SKILL.md` instead of repeating it.
 * **C24.** Call an MCP tool with a required argument omitted, then with a stale `expected_hash`: the first reports `INVALID_ARGUMENT` naming the field, the second `VAULT_CONFLICT` with `retryable: true`. No failure in either surface produces a code absent from §5.4's table, and only the two race codes say retry.
 * **C25.** Point `.obsidian/templates.json` at a folder and put a stock Obsidian template in it: `lint` stays clean and no domain is reported for that folder. Delete the settings file and the same folder becomes an ordinary cognitive domain again. Nest it one level down and its parent keeps every note but the templates. Scaffold with `template:` and the note carries the template's headings with `{{title}}` substituted, engine-generated frontmatter, and nothing from the template's own.
 * **C26.** Run `init --obsidian`: no `templates/` and no `templates.json` appear. Run `init --obsidian-templates` instead and both do, the folder it declares is the folder discovery skips, and `lint` is clean. Copy a starter into `wiki/` with `{{title}}` substituted and the only error is `FIELD_MISSING` for `description`. Re-run the flag over an edited starter and the edit survives; re-run it against a vault that already declares another folder, with or without `--force`, and the starters land there while the settings file is untouched; run it where `templates/` already holds a note and the command refuses, writing no settings file.
 * **C27.** Send `initialize` to `cadabby mcp` as one JSON line: the reply is exactly one JSON line with no header. Send it `Content-Length`-framed: the reply is framed the same way.
 * **C28.** Call `vault_update_note` with three `edits` whose third `replace_text` matches nothing: the file's bytes and `log.md` are unchanged. Fix the third and repeat: one write, one ledger line. Aim a `replace_text` at a string that occurs only in the frontmatter and it is refused.
+* **C29.** In `customers/acme/Deal.md` write `[Arch](../../wiki/Architecture.md)`: grounding `wiki/Architecture` lists the deal as a backlink of kind `markdown`, and `wiki/Architecture` is not `NOTE_ORPHAN`. Change the link to `../wiki/Architecture.md` and `lint` reports `LINK_DEAD` suggesting `../../wiki/Architecture.md`; a link to `../STYLE.md` or a domain's `AGENTS.md` is reported as nothing.
+* **C30.** Write a note whose `title` and `sources` contain `[`, `{`, `: `, ` #`, quotes, U+2028 or a form feed: it parses back to the same values. A bare `- https://example.com` sequence item stays a string, and a top-level `title:Foo` is `FRONTMATTER_UNPARSEABLE`.
+* **C31.** Save a note with CRLF line endings: `verify` and `update` both succeed without `VAULT_CONFLICT`.
+* **C32.** Leave a stale lock that the engine cannot remove: the next write raises `LOCK_TIMEOUT` within its timeout rather than waiting forever.
+* **C33.** Cite `raw/later.md` before the file exists: `lint` reports `SOURCE_MISSING`. Drop the file in and, with the citing note untouched, the finding clears. A note citing `./raw/x.md` counts `raw/x.md` as processed in both `index.md` and `vault_status`.
+* **C34.** `vault_status.broken_links` equals the number of `LINK_DEAD` findings `lint` reports for the same vault.
+* **C35.** Write `customers/AGENTS.md` with a flow-style `allowed_types`: `lint` reports `DOMAIN_MANIFEST_INVALID` at that file, and scaffolding into `customers` is refused until it is fixed.
+* **C36.** Set a ranking multiplier to `NaN`, `Infinity`, `"2.0"`, or `true` in `.cadabby.json`: every command fails with `CONFIG_INVALID` naming that multiplier. A `search` whose database is locked fails as a lock, never as zero results.
+* **C37.** On a TTY, run `scaffold`, `update`, and `log` without `--actor`: the note's `generated.by` and each ledger entry record `process:cli`, never `human:*`.
+* **C38.** Run `install` with no target, or with `--path` and two targets: it exits 3 and writes nothing. Point `--claude --path` at an unparseable config: it exits 3 with the bytes unchanged. `verify --human --agent x` is rejected by the parser (exit 2); `verify --human` with no TTY exits 3.
+* **C39.** Audit a `human:*` endorsement that is not yet committed: one `PROVENANCE_MISMATCH` saying so, and no `UNSIGNED_ENDORSEMENT` under `--require-signed`.
+* **C40.** Ground a note whose frontmatter omits `type` and `status`: both are reported empty, never as invented defaults.
+* **C41.** Put `raw/run.log` in a vault and run any command: `status` reports `{".log": 1}` under `filename_only_raw` and a term from its body is not found with `domain: "raw"`. Add `.log` to `raw_text_extensions` and, with the file untouched, `filename_only_raw` is empty and the same search finds it; remove it again and the hit is gone.
 
 ### Traceability
 
@@ -1079,29 +1112,42 @@ A criterion nobody can point to a test for is a wish. This table is the map, and
 | C3 | §3.2, §6.3 | `test_ac3_restricted_yaml_grammar`, `test_gate1_schema_integrity_errors`, `test_parser_rejects_out_of_subset_shapes`, `test_update_note_rejects_out_of_subset_patch_without_touching_the_file` |
 | C4 | §6.3 | `test_clean_demo_vault_has_zero_errors` and the per-gate cases, extended by `test_gate1_invalid_timestamps_in_both_blocks`, `test_gate3_anchor_missing_only_when_the_target_resolves`, `test_gate3_anchor_that_exists_is_silent`, `test_gate6_stale_verification_is_debt_not_an_error`, `test_gate6_superseded_history_is_silent_when_reverified`, `test_raw_link_wrong_depth_is_reported_with_suggestion`, `test_correct_raw_links_code_spans_and_urls_are_ignored`; the taxonomy itself is held by `test_the_fixture_seeds_one_of_every_code`, `test_the_spec_names_exactly_the_codes_lint_emits` and `test_only_connectivity_and_debt_are_warnings`, which keep this document's list, `lint.py`'s emissions, and one all-codes fixture at the same set |
 | C5 | §2.2 | `test_discover_domains_ignores_reserved_and_ignored_directories`, `test_domain_with_agents_md`, `test_lint_require_sources_enforcement`, `test_lint_custom_types_and_allowed_types` |
-| C6 | §2.2, §5.1 | `test_scaffold_note_in_custom_domain`, `test_scaffold_note_enforces_domain_allowed_types` |
+| C6 | §2.2, §5.1 | `test_scaffold_note_in_custom_domain`, `test_scaffold_note_enforces_domain_allowed_types`, `test_scaffold_path_outside_note_locations_is_refused` |
 | C7 | §5.1 | `test_ground_notes_enriches_domain_and_directives` |
 | C8 | §2.4, §4.4 | `test_multi_domain_cache_scan_and_fts_search`, `test_raw_full_text_is_reachable_only_through_the_raw_domain` |
-| C9 | §4.2 | `test_cross_domain_links_and_stem_priority`, `test_link_target_index` |
+| C9 | §4.2 | `test_cross_domain_links_and_stem_priority`, `test_link_target_index`, `test_qualified_link_never_falls_back_to_stem`, `test_qualified_target_has_no_stem_fallback` |
 | C10 | §5.1, §5.2 | `test_ac10_mcp_capabilities_and_human_refusal`, `test_initialize_and_tools_list`, `test_mcp_server_resources_list_and_read`, `test_plugin_skill_enumerates_exactly_the_tools_the_server_exposes` |
-| C11 | §2.2, §6.3 | `test_lint_layout_bypass_for_flexible_domains`, `test_gate2_layout_consistency_error`, `test_lint_cross_domain_orphan_prevention` |
-| C12 | §3.5, §5.1, §5.3 | `test_verify_note_human_refusal_and_machine_attestation`, `test_ac10_mcp_capabilities_and_human_refusal`, `test_flagless_verify_in_a_tty_stamps_process_cli`, `test_human_verify_requires_typed_token`, `test_human_verify_wrong_token_writes_nothing` |
+| C11 | §2.2, §6.3 | `test_lint_layout_bypass_for_flexible_domains`, `test_gate2_layout_consistency_error`, `test_lint_cross_domain_orphan_prevention`, `test_gate2_reported_alongside_unparseable_frontmatter` |
+| C12 | §3.5, §5.1, §5.3 | `test_verify_note_human_refusal_and_machine_attestation`, `test_ac10_mcp_capabilities_and_human_refusal`, `test_flagless_verify_in_a_tty_stamps_process_cli`, `test_human_verify_requires_typed_token`, `test_human_verify_wrong_token_writes_nothing`, `test_use_case_human_refusal_code` |
 | C13 | §3.5 | `test_ac11_audit_provenance_mismatch` |
 | C14 | §4.2, §4.3 | `test_ac6_rename_leaves_no_stale_records`, `test_deletion_reconciliation_and_fts_retraction`, `test_moving_a_file_between_layers_retracts_from_the_right_index` |
-| C15 | §4.4 | `test_ac7_epistemic_ranking_ordering`, `test_epistemic_ranking_boosts_and_status_penalty`, `test_small_vault_saturated_term_preserves_field_weight_hierarchy` |
+| C15 | §4.4 | `test_ac7_epistemic_ranking_ordering`, `test_epistemic_ranking_boosts_and_status_penalty`, `test_small_vault_saturated_term_preserves_field_weight_hierarchy`, `test_multi_term_query_falls_back_to_or_when_implicit_and_returns_nothing` |
 | C16 | §4.3, §8 | `test_ac16_sync_zero_git_diff`, `test_sync_vault_index_stays_byte_idempotent` |
 | C17 | §2.5 | `test_entry_points_lists_every_moc`, `test_filed_notes_are_not_enumerated`, `test_unfiled_note_is_reported`, `test_reachability_is_transitive`, `test_deprecated_notes_are_not_unfiled_work`, `test_raw_queue_lists_only_unprocessed_sources`, `test_verification_debt_section_lists_stale_notes`, `test_a_healthy_vault_has_entry_points_and_no_gap_sections` |
 | C18 | §2.5, §6.3 | `test_linking_from_a_moc_clears_the_note`, `test_outward_linking_note_is_unfiled_but_not_an_orphan`, `test_a_domain_note_is_never_unfiled`, `test_gate5_orphan_detection_single_query` |
 | C19 | §2.5 | `test_no_index_is_written_into_a_cognitive_domain` |
 | C20 | §4.3, §8 | `test_a_changed_scan_regenerates_without_an_explicit_sync`, `test_an_unchanged_scan_leaves_bytes_and_mtime_untouched`, `test_an_unchanged_scan_does_not_even_build_the_report`, `test_a_raw_file_a_human_dropped_in_reaches_the_queue` |
 | C21 | §5.3, §7.4 | `test_ac17_init_untouched_claude_notification`, `test_init_without_force_does_not_rewrite_existing_mcp_configs` |
-| C22 | §7.6 | `test_ac18_installer_idempotency_and_uninstall`, `test_run_install_all_and_uninstall`, `test_install_on_a_fresh_vault_is_a_no_op` |
+| C22 | §7.6 | `test_ac18_installer_idempotency_and_uninstall`, `test_run_install_all_and_uninstall`, `test_install_on_a_fresh_vault_is_a_no_op`, `test_antigravity_refuses_unparseable_mcp_config_bytes_unchanged` |
 | C23 | §7.4, §9 | `test_ac19_single_definition_invariant`, `test_shims_point_at_vault_content_rather_than_restating_it`, `test_epistemic_anti_hallucination_guardrails_in_shipped_assets` |
 | C24 | §5.4 | `test_a_missing_required_argument_blames_the_caller`, `test_a_conflict_tells_the_caller_to_retry`, `test_a_failure_is_json_not_prose`, `test_only_races_are_retryable`, `test_spec_table_matches_the_module`, `test_spec_table_agrees_with_the_exit_map`, `test_spec_table_agrees_on_which_codes_retry` |
 | C25 | §2.2, §7.5 | `test_a_template_folder_does_not_turn_lint_red`, `test_a_declared_template_folder_is_not_a_cognitive_domain`, `test_without_the_setting_the_folder_is_an_ordinary_domain`, `test_a_nested_template_folder_is_pruned_but_its_parent_survives`, `test_the_template_body_seeds_the_note_with_the_title_substituted`, `test_the_templates_own_frontmatter_is_discarded`, `test_an_escaping_or_absolute_folder_is_refused` |
 | C26 | §7.4, §7.5 | `test_plain_obsidian_init_writes_no_templates`, `test_the_flag_writes_the_folder_and_declares_it_together`, `test_the_declared_folder_is_the_one_the_engine_skips`, `test_inserting_a_starter_leaves_exactly_the_field_it_cannot_fill`, `test_re_running_leaves_an_edited_starter_untouched`, `test_an_existing_declaration_wins_and_is_left_alone`, `test_force_does_not_redirect_an_existing_declaration`, `test_a_templates_folder_already_holding_notes_is_refused`, `test_shipped_starters_never_carry_epistemic_frontmatter` |
 | C27 | §5.2 | `test_newline_delimited_request_gets_newline_delimited_reply`, `test_content_length_request_keeps_content_length_framing`, `test_mixed_framing_stream_answers_each_message_in_kind` |
 | C28 | §5.1, §8 | `test_batched_edits_are_atomic_and_logged_once`, `test_replace_text_zero_or_multiple_matches_writes_nothing`, `test_replace_text_cannot_reach_frontmatter`, `test_replace_text_edits_the_preamble_above_first_section`, `test_update_note_schema_exposes_edits` |
+| C29 | §4.4, §6.3 | `test_markdown_link_is_a_graph_edge_with_backlink`, `test_markdown_link_prevents_orphan`, `test_dead_markdown_link_suggests_relative_path`, `test_markdown_link_to_non_note_file_is_not_an_edge`, `test_anchor_matches_github_slug`, `test_ground_payload_reports_link_kind`, `test_markdown_link_from_moc_files_the_note`, `test_markdown_note_links_extracted`, `test_resolve_markdown_target_depth_and_escape` |
+| C30 | §3.2 | `test_writer_output_always_reparses`, `test_colon_in_bare_sequence_item_stays_scalar`, `test_top_level_key_without_space_is_rejected`, `test_tilde_is_a_string`, `test_writer_refuses_non_string_scalars`, `test_writer_preserves_top_level_null` |
+| C31 | §3.3, §8 | `test_crlf_note_verifies_and_updates` |
+| C32 | §8 | `test_unbreakable_stale_lock_times_out` |
+| C33 | §4.3 | `test_source_resolution_tracks_raw_arrivals`, `test_dot_slash_citation_counts_as_processed` |
+| C34 | §4.5, §6.3 | `test_status_broken_links_matches_lint` |
+| C35 | §2.2, §6.3 | `test_invalid_manifest_is_reported_and_blocks_scaffold`, `test_manifest_field_shapes_are_checked`, `test_valid_manifest_has_no_error` |
+| C36 | §2.6, §5.4 | `test_vault_cache_search_malformed_ranking_config`, `test_search_propagates_non_syntax_sqlite_errors`, `test_config_values_are_validated` |
+| C37 | §5.3, §3.5 | `test_cli_writes_default_to_process_cli_even_on_a_tty` |
+| C38 | §5.4 | `test_install_usage_errors_and_refusals_never_exit_findings`, `test_verify_mutually_exclusive_flags`, `test_human_verify_without_tty_is_invalid_argument` |
+| C39 | §3.5 | `test_uncommitted_endorsement_is_a_provenance_failure`, `test_empty_author_never_matches` |
+| C40 | §3.1 | `test_missing_type_and_status_read_as_missing` |
+| C41 | §2.4, §4.3, §4.5 | `test_extension_list_change_reaches_untouched_raw_files`, `test_status_filename_only_raw_distinguishes_skipped_extensions_from_empty_text_files`, `test_unchanged_extension_list_rescans_nothing` |
 
 C17-C20 were unmet together for several releases -- all four were the §2.5 gap report, specified and never built, while an older catalog occupied the file. They were closed as a group, since each depended on the same two queries. C2 and C4 followed: C2 needed the `status` payload asserted rather than only the tier behind it, and C4 needed a fixture seeding one instance of every lint code, which turned the taxonomy itself into something a test can hold. C1 was closed by adding `n.cid ASC` as the secondary sort key in §4.4, making equal-scoring search rows across domains deterministic regardless of insertion order. C24 arrived last and in the opposite order from the rest: §5.4 was written because the surface it describes was already shipped and undocumented, with one code living inside a message string and every other failure flattened to prose at the boundary. The criterion exists to keep that from recurring, which is why it checks the shape of a failure rather than any particular one.
 

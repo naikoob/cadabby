@@ -49,7 +49,9 @@ class IndexerFixture(unittest.TestCase):
         return path
 
     def _index(self):
-        return generate_index_markdown(self.vault)
+        with VaultCache(self.vault) as cache:
+            cache.scan(regenerate_index=False)
+            return generate_index_markdown(self.vault, cache)
 
 
 class TestIndexIsAGapReport(IndexerFixture):
@@ -125,6 +127,7 @@ class TestIndexIsAGapReport(IndexerFixture):
         self.assertIn("## Entry Points", md)
         for gap in ("## Unfiled Notes", "## Raw Sources", "## Verification Debt"):
             self.assertNotIn(gap, md, f"{gap} rendered with nothing to report")
+        self.assertIn("Nothing outstanding", md)
 
     def test_an_empty_vault_says_so_rather_than_rendering_nothing(self):
         self.assertIn("Nothing outstanding", self._index())
@@ -161,6 +164,12 @@ class TestUnfiledTracksTheGraph(IndexerFixture):
         self.assertIn("[[Talker]]", self._index())
         codes = {f.code for f in run_vault_lint(self.vault) if "Talker" in f.cid}
         self.assertNotIn("NOTE_ORPHAN", codes)
+
+    def test_markdown_link_from_moc_files_the_note(self):
+        """§4.4, §10 C29. A relative Markdown link is an edge the reachability query walks."""
+        self._note("Hub-MOC", type_="moc", body="Filed by path: [Stray](Stray.md).")
+        self._note("Stray")
+        self.assertNotIn("[[Stray]]", self._index())
 
 
 class TestDomainsGenerateNothing(IndexerFixture):

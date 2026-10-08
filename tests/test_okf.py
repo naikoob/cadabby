@@ -218,7 +218,6 @@ class TestTrustTierDerivation(unittest.TestCase):
             "absent": None,
             "empty list": [],
             "not a list": "human:owner",
-            "no attestation records": ["just a string", 42],
         }.items():
             with self.subTest(label):
                 self.assertEqual(derive_trust_tier(verified, HASH), "unverified")
@@ -255,7 +254,8 @@ class TestTrustTierDerivation(unittest.TestCase):
 
         Reporting 'unverified' here would hide a malformed record behind a tier
         that looks like an ordinary new note; lint reports it as
-        VERIFICATION_UNBOUND / ACTOR_MALFORMED in parallel.
+        VERIFICATION_UNBOUND / ACTOR_MALFORMED in parallel. §3.4: `verified`
+        non-empty with no valid entry is stale, whatever the entries are.
         """
         for label, verified in {
             "empty record": [{}],
@@ -263,6 +263,7 @@ class TestTrustTierDerivation(unittest.TestCase):
             "missing by:": [{"of": HASH}],
             "malformed actor": [{"by": "owner", "of": HASH}],
             "of: is not a hash": [{"by": "human:owner", "of": ""}],
+            "items are not records": ["just a string", 42],
         }.items():
             with self.subTest(label):
                 self.assertEqual(derive_trust_tier(verified, HASH), "stale-verified")

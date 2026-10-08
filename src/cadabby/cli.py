@@ -9,44 +9,24 @@ import argparse
 import getpass
 import json
 import secrets
-import shutil
 import sys
 from pathlib import Path
+from typing import Any
 
 from cadabby.adapters.disk_storage import DiskNoteStorage
 from cadabby.audit import run_vault_audit
-from cadabby.cache import VaultCache
-from cadabby.constants import (
-    DIR_AGENTS,
-    DIR_CLAUDE,
-    DIR_OBSIDIAN,
-    DIR_RAW,
-    DIR_TEMPLATES,
-    DIR_WIKI,
-    FILE_AGENTS,
-    FILE_CLAUDE,
-    FILE_CONFIG,
-    FILE_GEMINI,
-    FILE_INDEX,
-    FILE_LOG,
-    FILE_MCP,
-    FILE_OBSIDIAN_TEMPLATES,
-    FILE_STYLE,
-    NOTE_TYPES,
-    TRUST_TIERS,
-)
+from cadabby.cache import VaultCache, reset_cache_files
+from cadabby.constants import DIR_WIKI, NOTE_TYPES, TRUST_TIERS
 from cadabby.errors import (
     EXIT_ENVIRONMENT,
     EXIT_FINDINGS,
     EXIT_OK,
-    EXIT_USAGE,
     classify,
     exit_code_for,
 )
-from cadabby.fsutil import atomic_write
-from cadabby.graph import get_note_graph, resolve_link_target
+from cadabby.graph import get_note_graph, normalize_link_target
 from cadabby.indexer import append_vault_log, rotate_vault_log, sync_vault_index
-from cadabby.installer import get_assets_dir, make_mcp_server_entry
+from cadabby.installer import InitRefusedError, init_vault
 from cadabby.lint import run_vault_lint
 from cadabby.ops import (
     ground_notes,
@@ -54,7 +34,7 @@ from cadabby.ops import (
     update_note,
     verify_note,
 )
-from cadabby.vault import Vault, obsidian_template_dir
+from cadabby.vault import Vault
 
 
 def resolve_cli_vault(args: argparse.Namespace) -> Vault:
@@ -70,154 +50,37 @@ def resolve_cli_vault(args: argparse.Namespace) -> Vault:
     return Vault.open()
 
 
-# The two persona runbooks shipped in assets/skills (§7.1). Named here rather
-# than globbed so `init` creates the directories before copying into them.
-PERSONAS = ("librarian", "technician")
+CLI_DEFAULT_ACTOR = "process:cli"
+
+
+def _default_cli_actor(args: argparse.Namespace) -> str:
+    """The actor a CLI write records: `--actor` if given, else `process:cli` (§5.3).
+
+    Never inferred from the terminal. Agents run shell commands in
+    pseudo-terminals, so `isatty()` is no evidence of a person, and inferring
+    `human:<user>` from it let an agent's flagless call sign as a human. The
+    only path to a `human:*` attestation is `verify --human`.
+    """
+    return getattr(args, "actor", None) or CLI_DEFAULT_ACTOR
 
 
 def cmd_init(args: argparse.Namespace) -> int:
-    """Scaffold a fresh vault structure conforming to §2.1, §5.3, and §9."""
+    """Scaffold a fresh vault structure conforming to §2.1, §7.6 and §9."""
     raw_target = getattr(args, "target_path", None) or getattr(args, "vault", None)
     target_dir = Path(raw_target).resolve() if raw_target else Path.cwd()
-    vault_name = args.name or target_dir.name or "vault"
-    force = getattr(args, "force", False)
-
-    assets = get_assets_dir()
-    vault_tpl = assets / "vault"
-
-    # Create directories
-    (target_dir / DIR_RAW).mkdir(parents=True, exist_ok=True)
-    (target_dir / DIR_WIKI).mkdir(parents=True, exist_ok=True)
-    (target_dir / DIR_CLAUDE / "commands").mkdir(parents=True, exist_ok=True)
-    for persona in PERSONAS:
-        (target_dir / DIR_AGENTS / "skills" / persona).mkdir(parents=True, exist_ok=True)
-
-    def copy_template_file(src: Path, dst: Path) -> bool:
-        """Copy a template into the vault, honoring --force. True if dst was written."""
-        if not src.exists():
-            return False
-        if dst.exists():
-            if not force:
-                print(f"Existing file left untouched: {dst.name} (use --force to overwrite)")
-                return False
-            shutil.copy(src, dst)
-            print(f"Overwrote existing file: {dst.name}")
-            return True
-        shutil.copy(src, dst)
-        return True
-
-    def bind_mcp_config(dst: Path) -> None:
-        """Point an MCP config at this vault and this interpreter.
-
-        Callers gate this on having actually written the template: rewriting
-        one that --force just declined to touch would contradict the message
-        copy_template_file printed. Use 'cadabby install' to re-bind an
-        existing config.
-        """
-        entry = {"mcpServers": {"cadabby": make_mcp_server_entry(target_dir)}}
-        atomic_write(dst, json.dumps(entry, indent=2) + "\n")
-
-    # 1. Config .cadabby.json
-    cfg_src = vault_tpl / FILE_CONFIG
-    cfg_dst = target_dir / FILE_CONFIG
-    if cfg_dst.exists() and not force:
-        print(f"Existing file left untouched: {FILE_CONFIG} (use --force to overwrite)")
-    elif cfg_src.exists():
-        cfg_data = json.loads(cfg_src.read_text("utf-8"))
-        cfg_data["vault_name"] = vault_name
-        atomic_write(cfg_dst, json.dumps(cfg_data, indent=2) + "\n")
-
-    # 2. Files from vault template
-    wrote_mcp_json = False
-    for filename in (".gitignore", FILE_MCP, FILE_AGENTS, FILE_CLAUDE, FILE_GEMINI, FILE_STYLE, FILE_INDEX):
-        written = copy_template_file(vault_tpl / filename, target_dir / filename)
-        if filename == FILE_MCP:
-            wrote_mcp_json = written
-
-    # Bind so Claude Code can mount the workspace server with no further setup.
-    if wrote_mcp_json:
-        bind_mcp_config(target_dir / FILE_MCP)
-
-    # 3. Touch empty log.md
-    log_file = target_dir / FILE_LOG
-    if not log_file.exists():
-        atomic_write(log_file, "# Activity Ledger\n\n")
-
-    # 4. Copy canonical persona skills to .agents/skills/
-    skills_dir = assets / "skills"
-    if skills_dir.exists():
-        for persona in PERSONAS:
-            copy_template_file(
-                skills_dir / persona / "SKILL.md",
-                target_dir / DIR_AGENTS / "skills" / persona / "SKILL.md",
-            )
-
-    # 5. Copy slash command templates to .claude/commands/
-    cmds_dir = assets / "commands"
-    if cmds_dir.exists():
-        for cmd_file in sorted(cmds_dir.glob("*.md")):
-            copy_template_file(cmd_file, target_dir / DIR_CLAUDE / "commands" / cmd_file.name)
-
-    # 6. Copy Antigravity vault-scoped plugin & MCP configuration to .agents/plugins/cadabby/
-    plugin_src = assets / "plugins" / "cadabby"
-    if plugin_src.exists():
-        dst_plugin = target_dir / DIR_AGENTS / "plugins" / "cadabby"
-        wrote_mcp_cfg = False
-        for p in sorted(plugin_src.rglob("*")):
-            if p.is_file():
-                rel = p.relative_to(plugin_src)
-                target_file = dst_plugin / rel
-                target_file.parent.mkdir(parents=True, exist_ok=True)
-                written = copy_template_file(p, target_file)
-                if rel.as_posix() == "mcp_config.json":
-                    wrote_mcp_cfg = written
-
-        if wrote_mcp_cfg:
-            bind_mcp_config(dst_plugin / "mcp_config.json")
-
-    # 7. Optional Obsidian config. --obsidian-templates implies it: the starter
-    # templates are useless to a vault Obsidian cannot open, and the flag names
-    # the harness it is asking for.
-    obsidian_dir = target_dir / DIR_OBSIDIAN
-    want_templates = getattr(args, "obsidian_templates", False)
-    if args.obsidian or want_templates:
-        obsidian_dir.mkdir(parents=True, exist_ok=True)
-        (target_dir / DIR_RAW / "attachments").mkdir(parents=True, exist_ok=True)
-        copy_template_file(vault_tpl / "obsidian" / "app.json", obsidian_dir / "app.json")
-
-    # 8. Optional starter note templates, opt-in because they reserve a folder.
-    if want_templates:
-        # An existing declaration always wins, so a user who already pointed
-        # Obsidian at `meta/templates` gets the starters there and keeps their
-        # setting. Only a vault with no declaration gets one written, and only
-        # together with the folder it names -- declaring an empty folder would
-        # reserve a name while nothing used it.
-        declared = obsidian_template_dir(target_dir)
-        tpl_dest = declared if declared is not None else target_dir / DIR_TEMPLATES
-
-        # Refuse to reserve a folder that is already carrying notes. Declaring
-        # it would drop a whole cognitive domain out of the vault's view with
-        # no error at all -- the silent loss that reading the setting, rather
-        # than defaulting it, exists to prevent (§7.5).
-        if declared is None and tpl_dest.is_dir() and any(tpl_dest.rglob("*.md")):
-            print(
-                f"Refusing to use {DIR_TEMPLATES}/ for templates: it already holds notes, "
-                f"and declaring it would hide them from the vault. Point Obsidian at "
-                f"another folder in {DIR_OBSIDIAN}/{FILE_OBSIDIAN_TEMPLATES} and re-run.",
-                file=sys.stderr,
-            )
-            return EXIT_ENVIRONMENT
-
-        tpl_dest.mkdir(parents=True, exist_ok=True)
-        for src in sorted((vault_tpl / DIR_TEMPLATES).glob("*.md")):
-            copy_template_file(src, tpl_dest / src.name)
-        if declared is None:
-            copy_template_file(
-                vault_tpl / "obsidian" / FILE_OBSIDIAN_TEMPLATES,
-                obsidian_dir / FILE_OBSIDIAN_TEMPLATES,
-            )
-
-    print(f"Initialized Cadabby vault '{vault_name}' in {target_dir}")
+    try:
+        report = init_vault(
+            target_dir,
+            vault_name=args.name,
+            force=getattr(args, "force", False),
+            obsidian=args.obsidian,
+            obsidian_templates=getattr(args, "obsidian_templates", False),
+        )
+    except InitRefusedError as e:
+        info = classify(e)
+        print(f"Error [{info.code}]: {info.message}", file=sys.stderr)
+        return EXIT_ENVIRONMENT
+    print("\n".join(report))
     return EXIT_OK
 
 
@@ -226,16 +89,11 @@ def cmd_sync(args: argparse.Namespace) -> int:
     vault = resolve_cli_vault(args)
     rebuild = getattr(args, "rebuild", False)
     if rebuild:
-        cache_path = vault.cache_db_path
-        if cache_path.exists():
-            cache_path.unlink()
-        for ext in ("-wal", "-shm"):
-            extra = Path(str(cache_path) + ext)
-            if extra.exists():
-                extra.unlink()
+        reset_cache_files(vault.cache_db_path)
 
     with VaultCache(vault) as cache:
-        ins, upd, deleted, total = cache.scan(force=(args.force or rebuild))
+        # sync regenerates unconditionally (§4.3), so the scan must not do it too.
+        ins, upd, deleted, total = cache.scan(force=(args.force or rebuild), regenerate_index=False)
         sync_vault_index(vault, cache=cache)
         rotated = rotate_vault_log(vault)
 
@@ -250,6 +108,7 @@ def cmd_search(args: argparse.Namespace) -> int:
     """Search vault notes with normalized epistemic BM25 ranking."""
     vault = resolve_cli_vault(args)
     with VaultCache(vault) as cache:
+        cache.scan()
         results = cache.search(
             query=args.query,
             type_=args.type,
@@ -312,26 +171,45 @@ def cmd_scaffold(args: argparse.Namespace) -> int:
     tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else None
     sources = [s.strip() for s in args.sources.split(",") if s.strip()] if args.sources else None
 
-    path = scaffold_note(
-        vault=vault,
-        title=args.title,
-        type_=args.type,
-        description=args.desc,
-        tags=tags,
-        sources=sources,
-        actor=args.actor or f"human:{getpass.getuser()}",
-        domain=getattr(args, "domain", "wiki"),
-        path=getattr(args, "path", None),
-        template=getattr(args, "template", None),
-    )
+    with VaultCache(vault) as cache:
+        path = scaffold_note(
+            vault=vault,
+            title=args.title,
+            type_=args.type,
+            description=args.desc,
+            tags=tags,
+            sources=sources,
+            actor=_default_cli_actor(args),
+            domain=getattr(args, "domain", DIR_WIKI),
+            path=getattr(args, "path", None),
+            template=getattr(args, "template", None),
+            cache=cache,
+        )
     print(f"Scaffolded note: {vault.rel_path(path)}")
     return EXIT_OK
+
+
+def _parse_json_flag(raw: str, flag_name: str, expected_type: type, type_label: str) -> Any:
+    """Parse a JSON CLI flag and validate its top-level type."""
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON for {flag_name}: {exc.msg}") from exc
+    if not isinstance(parsed, expected_type):
+        raise ValueError(
+            f"Expected JSON {type_label} for {flag_name}, got {type(parsed).__name__}"
+        )
+    return parsed
 
 
 def cmd_update(args: argparse.Namespace) -> int:
     """Update note frontmatter or sections non-destructively."""
     vault = resolve_cli_vault(args)
-    patch = json.loads(args.patch_frontmatter) if args.patch_frontmatter else None
+    patch = (
+        _parse_json_flag(args.patch_frontmatter, "--patch-frontmatter", dict, "object")
+        if args.patch_frontmatter
+        else None
+    )
 
     append_sec = None
     if args.append_section:
@@ -343,18 +221,25 @@ def cmd_update(args: argparse.Namespace) -> int:
         parts = args.replace_section.split(":", 1)
         replace_sec = (parts[0], parts[1] if len(parts) > 1 else "")
 
-    edits = json.loads(args.edits) if getattr(args, "edits", None) else None
-
-    path = update_note(
-        vault=vault,
-        cid_or_path=args.cid,
-        frontmatter_patch=patch,
-        append_section=append_sec,
-        replace_section=replace_sec,
-        expected_hash=args.expected_hash,
-        actor=args.actor or f"human:{getpass.getuser()}",
-        edits=edits,
+    raw_edits = getattr(args, "edits", None)
+    edits = (
+        _parse_json_flag(raw_edits, "--edits", list, "array")
+        if raw_edits
+        else None
     )
+
+    with VaultCache(vault) as cache:
+        path = update_note(
+            vault=vault,
+            cid_or_path=args.cid,
+            frontmatter_patch=patch,
+            append_section=append_sec,
+            replace_section=replace_sec,
+            expected_hash=args.expected_hash,
+            actor=_default_cli_actor(args),
+            edits=edits,
+            cache=cache,
+        )
     print(f"Updated note: {vault.rel_path(path)}")
     return EXIT_OK
 
@@ -386,36 +271,34 @@ def cmd_verify(args: argparse.Namespace) -> int:
     """Stamp a content-bound verification attestation."""
     vault = resolve_cli_vault(args)
 
+    # The parser makes these exclusive (argparse owns exit 2, §5.4); this
+    # guard is for programmatic callers that bypass it.
     if args.human and args.agent:
-        print("Error: --human and --agent are mutually exclusive.", file=sys.stderr)
-        return EXIT_USAGE
+        raise ValueError("--human and --agent are mutually exclusive")
 
     if args.human:
         if not sys.stdin.isatty():
-            print("Error: --human requires an interactive TTY.", file=sys.stderr)
-            return EXIT_USAGE
+            raise ValueError("--human requires an interactive TTY")
         if not _confirm_human_attestation(vault, args.cid):
-            print("Aborted: confirmation token did not match; nothing was written.", file=sys.stderr)
-            return EXIT_USAGE
+            raise ValueError("Aborted: confirmation token did not match; nothing was written")
         actor = f"human:{getpass.getuser()}"
         is_human = True
     elif args.agent:
         actor = args.agent if args.agent.startswith(("agent:", "process:")) else f"agent:{args.agent}"
         is_human = False
     else:
-        # §5.3: only an explicit --human ever stamps human:*. Agents run shell
-        # commands in pseudo-terminals, so inferring a human from isatty() let a
-        # flagless call issued by an agent mint a human endorsement silently.
-        actor = "process:cli"
+        actor = CLI_DEFAULT_ACTOR  # see _default_cli_actor
         is_human = False
 
-    res = verify_note(
-        vault=vault,
-        cid_or_path=args.cid,
-        actor=actor,
-        method=args.method or ("manual-review" if is_human else "automated-check"),
-        is_human_authorized=is_human,
-    )
+    with VaultCache(vault) as cache:
+        res = verify_note(
+            vault=vault,
+            cid_or_path=args.cid,
+            actor=actor,
+            method=args.method or ("manual-review" if is_human else "automated-check"),
+            is_human_authorized=is_human,
+            cache=cache,
+        )
     status_label = "already verified" if res.get("already_verified") else "verified"
     print(f"{status_label.capitalize()}: {res['cid']} as '{res['actor']}' -> tier: '{res['trust_tier']}' ({res['of'][:16]}...)")
     return EXIT_OK
@@ -438,7 +321,12 @@ def cmd_status(args: argparse.Namespace) -> int:
         f"Total Notes: {status_data['total_notes']} | Raw Sources: {status_data['total_raw']} "
         f"({status_data['unprocessed_raw']} unprocessed)"
     )
+    fn_only = status_data.get("filename_only_raw", {})
+    if fn_only:
+        ext_list = ", ".join(f"{ext or '<no-ext>'}: {cnt}" for ext, cnt in fn_only.items())
+        print(f"Filename-Only Raw (body not indexed): {sum(fn_only.values())} ({ext_list})")
     print(f"Verification Debt (stale): {status_data['verification_debt']}")
+    print(f"Broken Links: {status_data['broken_links']}")
     print("\nTrust Tiers:")
     for tier in TRUST_TIERS:
         print(f"  - {tier:<20}: {status_data['trust_tiers'].get(tier, 0)}")
@@ -526,13 +414,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
 def cmd_log(args: argparse.Namespace) -> int:
     """Append a timestamped entry to the active log.md ledger (§5.3)."""
     vault = resolve_cli_vault(args)
-    actor = args.actor
-    if not actor:
-        if sys.stdin.isatty():
-            actor = f"human:{getpass.getuser()}"
-        else:
-            actor = "process:cli"
-    append_vault_log(vault, args.message, actor=actor)
+    append_vault_log(vault, args.message, actor=_default_cli_actor(args))
     print(f"Logged entry to {vault.rel_path(vault.log_path)}")
     return EXIT_OK
 
@@ -543,17 +425,14 @@ def cmd_graph(args: argparse.Namespace) -> int:
     with VaultCache(vault) as cache:
         cache.scan()
         conn = cache.get_connection()
-        cid = args.cid
-        # Resolve target stem if not a full CID
-        cids = [r["cid"] for r in conn.execute("SELECT cid FROM notes").fetchall()]
-        resolved = resolve_link_target(cid, cids)
-        if resolved:
-            cid = resolved
+        # Same normalization and resolver as vault_ground; an unresolvable
+        # target (e.g. a raw/ CID) is looked up exactly as given.
+        cid = normalize_link_target(args.cid)
+        cid = cache.get_link_resolver().resolve(cid) or cid
 
         graph_data = get_note_graph(conn, cid)
         if not graph_data:
-            print(f"Error: Note not found: '{args.cid}'", file=sys.stderr)
-            return EXIT_ENVIRONMENT
+            raise FileNotFoundError(f"Note not found: '{args.cid}'")
 
         if args.json:
             print(json.dumps(graph_data, indent=2))
@@ -738,7 +617,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--template",
         help="Obsidian template whose body seeds the note; {{title}} is substituted",
     )
-    p_scaffold.add_argument("--actor", help="Actor identity (default: human:<user>)")
+    p_scaffold.add_argument("--actor", help=f"Actor identity (default: {CLI_DEFAULT_ACTOR})")
     p_scaffold.set_defaults(func=cmd_scaffold)
 
     # update
@@ -752,15 +631,16 @@ def build_parser() -> argparse.ArgumentParser:
         help='JSON list of body edits applied atomically, e.g. \'[{"op":"replace_text","old":"..","new":".."}]\'',
     )
     p_update.add_argument("--expected-hash", help="Expected file hash for concurrency safety")
-    p_update.add_argument("--actor", help="Actor identity")
+    p_update.add_argument("--actor", help=f"Actor identity (default: {CLI_DEFAULT_ACTOR})")
     p_update.set_defaults(func=cmd_update)
 
     # verify
     p_verify = subparsers.add_parser("verify", parents=[vault_parent], help="Stamp content-bound verification")
     p_verify.add_argument("cid", help="Note CID or path")
     p_verify.add_argument("--method", help="Verification method")
-    p_verify.add_argument("--human", action="store_true", help="Stamp as human:<user> (requires TTY)")
-    p_verify.add_argument("--agent", help="Stamp as agent:<name>")
+    who = p_verify.add_mutually_exclusive_group()
+    who.add_argument("--human", action="store_true", help="Stamp as human:<user> (requires TTY)")
+    who.add_argument("--agent", help="Stamp as agent:<name>")
     p_verify.set_defaults(func=cmd_verify)
 
     # status
@@ -782,7 +662,7 @@ def build_parser() -> argparse.ArgumentParser:
     # log
     p_log = subparsers.add_parser("log", parents=[vault_parent], help="Append a timestamped entry to log.md")
     p_log.add_argument("message", help="Log message text")
-    p_log.add_argument("--actor", help="Actor identity (default: human:<user> or process:cli)")
+    p_log.add_argument("--actor", help=f"Actor identity (default: {CLI_DEFAULT_ACTOR})")
     p_log.set_defaults(func=cmd_log)
 
     # graph

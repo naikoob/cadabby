@@ -72,6 +72,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
 
         # Re-run on clean slate
         cache2 = VaultCache(vault)
+        cache2.scan()
         results2 = cache2.search("SQLite")
         cache2.close()
 
@@ -104,12 +105,14 @@ class TestAcceptanceCriteria(unittest.TestCase):
 
         vault = Vault(vault_dir)
         with VaultCache(vault) as cache1:
+            cache1.scan()
             hits1 = [r.cid for r in cache1.search("quasar")]
 
         self.assertEqual(hits1, ["customers/TieNote", "projects/TieNote", "wiki/TieNote"])
 
         shutil.rmtree(vault.dot_cadabby_dir)
         with VaultCache(vault) as cache2:
+            cache2.scan()
             hits2 = [r.cid for r in cache2.search("quasar")]
 
         self.assertEqual(hits1, hits2)
@@ -228,6 +231,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         verify_note(vault, "wiki/Epistemic-Trust-Tiers", actor="human:tester", is_human_authorized=True)
 
         cache = VaultCache(vault)
+        cache.scan()
         results = cache.search("hyperparameter")
 
         self.assertGreaterEqual(len(results), 2)
@@ -731,6 +735,12 @@ class TestHarnessShimsStayThin(unittest.TestCase):
         self.assertIn("Never create, rename, or move files in `raw/`", technician)
         self.assertIn("one call's `edits` list", librarian)
         self.assertIn("No Server, No Trust Claims", plugin_skill)
+        # 5. Student journey simulation findings: mathematical/deductive derivations,
+        #    explicit unverified supplements, and non-destructive LINK_DEAD unlinking.
+        self.assertIn("Formula & Invariant Derivations", agents_md)
+        self.assertIn("Unverified Supplement", agents_md)
+        self.assertIn("User-requested unverified supplements", librarian)
+        self.assertIn("Unlink reminders, TODOs, and prose mentions in place", technician)
 
 
 class TestSpecReadingMap(unittest.TestCase):
@@ -856,6 +866,15 @@ class TestAcceptanceTraceability(unittest.TestCase):
         headings = {m.group(1) for m in re.finditer(r"^#{2,4}\s+(\d+(?:\.\d+)?)\.", spec, re.M)}
         dangling = sorted({r for r in re.findall(r"§(\d+(?:\.\d+)?)", spec) if r not in headings})
         self.assertEqual(dangling, [], f"SPECIFICATION.md cites sections that do not exist: {dangling}")
+
+        # Source docstrings cite the spec too, and AGENTS.md promises any `§`
+        # found in a comment is a safe address. `ops.py` cited §8.1-§8.3 for
+        # a §8 that has no subsections.
+        for path in sorted((self.repo_root / "src").rglob("*.py")):
+            with self.subTest(path=path.name):
+                refs = re.findall(r"§(\d+(?:\.\d+)?)", path.read_text("utf-8"))
+                dangling = sorted({r for r in refs if r not in headings})
+                self.assertEqual(dangling, [], f"{path.relative_to(self.repo_root)} cites missing sections: {dangling}")
 
     def test_known_gaps_are_still_the_only_gaps(self):
         """Pins the set so a regression cannot hide inside the existing debt.

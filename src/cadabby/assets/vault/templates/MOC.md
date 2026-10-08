@@ -12,4 +12,4 @@ status: active
 
 - [[Note-Title]] - one-line gloss
 
-*Every note linked from here counts as filed. `cadabby lint` reports the ones that are not.*
+*Every note linked from here counts as filed. `index.md` lists the ones under "Unfiled notes" that no MOC reaches.*

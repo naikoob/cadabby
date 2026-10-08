@@ -301,5 +301,87 @@ class TestTagGrammar(unittest.TestCase):
         self.assertFalse(matches("learning"))
 
 
+class TestWriterParserRoundTrip(unittest.TestCase):
+    """C30: whatever the canonical writer emits, the parser reads back unchanged."""
+
+    SAMPLES = (
+        "plain",
+        "Notes on [RFC 9110]",
+        "{braces} and [brackets]",
+        "key: value inside",
+        "trailing colon:",
+        "a#b and a # comment-like",
+        "it's \"quoted\" text",
+        "line\u2028separator",
+        "form\ffeed and \vvtab",
+        "https://example.com/a?b=c#frag",
+        "2026-10-07T12:00:00Z",
+        "sha256:abc",
+        "true",
+        "null",
+        "~",
+        "- dash lead",
+        "&anchor-like",
+        "*alias-like",
+        "!tag-like",
+        "| pipe lead",
+        "> angle lead",
+        "multi\nline",
+        "tab\tseparated",
+        "back\\slash",
+        "",
+        " padded ",
+    )
+
+    def test_writer_output_always_reparses(self):
+        for sample in self.SAMPLES:
+            with self.subTest(sample=sample):
+                data = {
+                    "title": sample,
+                    "sources": [sample, "raw/x.md"],
+                    "verified": [{"by": "agent:x", "method": sample}],
+                }
+                parsed, _ = parse_frontmatter(serialize_frontmatter(data))
+                self.assertEqual(parsed["title"], sample)
+                self.assertEqual(parsed["sources"], [sample, "raw/x.md"])
+                self.assertEqual(parsed["verified"], [{"by": "agent:x", "method": sample}])
+
+    def test_colon_in_bare_sequence_item_stays_scalar(self):
+        parsed, _ = parse_frontmatter(
+            "---\nsources:\n  - https://example.com/a\n  - agent:foo\n"
+            "verified:\n  - by: agent:x\n    at: '2026-10-07T12:00:00Z'\n---\n"
+        )
+        self.assertEqual(parsed["sources"], ["https://example.com/a", "agent:foo"])
+        self.assertEqual(parsed["verified"], [{"by": "agent:x", "at": "2026-10-07T12:00:00Z"}])
+
+    def test_top_level_key_without_space_is_rejected(self):
+        with self.assertRaises(FrontmatterParseError):
+            parse_frontmatter("---\ntitle:Foo\n---\n")
+
+    def test_tilde_is_a_string(self):
+        parsed, _ = parse_frontmatter("---\ntitle: ~\n---\n")
+        self.assertEqual(parsed["title"], "~")
+
+    def test_writer_refuses_non_string_scalars(self):
+        from datetime import datetime
+
+        for bad in (3, 1.5, datetime(2026, 1, 1), object()):
+            with self.subTest(value=bad):
+                with self.assertRaises(FrontmatterSerializeError) as ctx:
+                    serialize_frontmatter({"title": "ok", "priority": bad})
+                self.assertIn("priority", str(ctx.exception))
+
+    def test_writer_preserves_top_level_null(self):
+        text = serialize_frontmatter({"title": "x", "superseded_by": None})
+        self.assertIn("superseded_by: null", text)
+        parsed, _ = parse_frontmatter(text)
+        self.assertIn("superseded_by", parsed)
+        self.assertIsNone(parsed["superseded_by"])
+
+    def test_writer_refuses_empty_mapping_item(self):
+        with self.assertRaises(FrontmatterSerializeError):
+            serialize_frontmatter({"verified": [{}]})
+
+
 if __name__ == "__main__":
     unittest.main()

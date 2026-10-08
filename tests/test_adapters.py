@@ -8,9 +8,10 @@ from pathlib import Path
 
 from cadabby.adapters.disk_storage import DiskNoteStorage, FileLedger
 from cadabby.adapters.memory_storage import InMemoryLedger, InMemoryNoteStorage
+from cadabby.cache import VaultCache
 from cadabby.domain import Note
 from cadabby.fsutil import VaultConflictError
-from cadabby.ports import LedgerPort, NoteStoragePort
+from cadabby.ports import IndexCachePort, LedgerPort, NoteStoragePort
 from tests.helpers import create_test_vault
 
 
@@ -32,6 +33,8 @@ class TestAdaptersProtocolConformance(unittest.TestCase):
         self.assertIsInstance(mem_storage, NoteStoragePort)
         self.assertIsInstance(file_ledger, LedgerPort)
         self.assertIsInstance(mem_ledger, LedgerPort)
+        with VaultCache(self.vault) as cache:
+            self.assertIsInstance(cache, IndexCachePort)
 
 
 class TestDiskNoteStorage(unittest.TestCase):
@@ -182,7 +185,7 @@ class TestDiskNoteStorage(unittest.TestCase):
             ],
         )
 
-    def test_list_raw_sources(self):
+    def test_iter_raw_files(self):
         raw_dir = self.vault_dir / "raw"
         (raw_dir / "paper.pdf").write_bytes(b"%PDF-1.4\n")
         (raw_dir / "notes.txt").write_text("notes\n", "utf-8")
@@ -195,17 +198,34 @@ class TestDiskNoteStorage(unittest.TestCase):
         ignored_git.mkdir(parents=True, exist_ok=True)
         (ignored_git / "HEAD").write_text("ref: refs/heads/main\n", "utf-8")
 
-        sources = self.storage.list_raw_sources()
+        sources = [self.vault.rel_path(p) for p in self.vault.iter_raw_files()]
         self.assertIn("raw/paper.pdf", sources)
         self.assertIn("raw/notes.txt", sources)
         self.assertIn("raw/sub/data.csv", sources)
         self.assertNotIn("raw/.git/HEAD", sources)
 
-    def test_list_raw_sources_nonexistent_raw_dir(self):
+    def test_iter_raw_files_nonexistent_raw_dir(self):
         import shutil
 
         shutil.rmtree(self.vault_dir / "raw")
-        self.assertEqual(self.storage.list_raw_sources(), [])
+        self.assertEqual(list(self.vault.iter_raw_files()), [])
+
+    def test_crlf_note_verifies_and_updates(self):
+        """C31: a note saved with CRLF endings verifies and updates without VAULT_CONFLICT."""
+        from cadabby.ops import update_note, verify_note
+
+        note_path = self.vault_dir / "wiki" / "Crlf.md"
+        text = (
+            "---\ntype: concept\ntitle: Crlf\ndescription: Windows line endings\n"
+            "status: active\n---\n\n# Crlf\n\nBody.\n"
+        )
+        note_path.write_bytes(text.replace("\n", "\r\n").encode("utf-8"))
+
+        res = verify_note(self.vault, "wiki/Crlf", actor="agent:test")
+        self.assertEqual(res["trust_tier"], "machine-confirmed")
+        update_note(self.vault, "wiki/Crlf", frontmatter_patch={"description": "Edited"}, actor="agent:test")
+        reread = self.storage.get_note("wiki/Crlf")
+        self.assertEqual(reread.frontmatter["description"], "Edited")
 
 
 class TestFileLedger(unittest.TestCase):
@@ -232,6 +252,42 @@ class TestFileLedger(unittest.TestCase):
         self.assertEqual(len(lines), 2)
         self.assertIn("Action 1", lines[0])
         self.assertIn("agent:bot: Action 2", lines[1])
+
+    def test_in_memory_and_disk_storage_canonicalize_and_guard_paths_identically(self):
+        disk = DiskNoteStorage(self.vault)
+        mem = InMemoryNoteStorage()
+        for bad_rel in ("raw/Spoof.md", "index.md", "wiki/AGENTS.md", "/wiki/Abs.md"):
+            bad_note = Note(
+                cid="wiki/Bad",
+                rel_path=bad_rel,
+                frontmatter={"type": "concept", "title": "Bad", "description": "d", "status": "active"},
+                body="Body\n",
+            )
+            with self.assertRaises(ValueError):
+                disk.save_note(bad_note)
+            with self.assertRaises(ValueError):
+                mem.save_note(bad_note)
+
+        note = Note(
+            cid="wiki/TagParity",
+            rel_path="wiki/TagParity.md",
+            frontmatter={
+                "type": "concept",
+                "title": "Tag Parity",
+                "description": "Desc",
+                "status": "active",
+                "tags": ["Storage", "STORAGE", "B_Tree"],
+            },
+            body="# Tag Parity\n\nBody.\n",
+        )
+        (self.vault_dir / "wiki").mkdir(parents=True, exist_ok=True)
+        disk.save_note(note)
+        mem.save_note(note)
+        from_disk = disk.get_note("wiki/TagParity")
+        from_mem = mem.get_note("wiki/TagParity")
+        assert from_disk is not None and from_mem is not None
+        self.assertEqual(from_mem.frontmatter, from_disk.frontmatter)
+        self.assertEqual(from_mem.tags, ["storage", "b_tree"])
 
 
 if __name__ == "__main__":

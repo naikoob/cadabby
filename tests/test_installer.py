@@ -229,6 +229,22 @@ class TestInstaller(unittest.TestCase):
             [*mcp_launch_argv()[1:], "--vault", str(vault2.resolve())],
         )
 
+    def test_antigravity_refuses_unparseable_mcp_config_bytes_unchanged(self):
+        """C22: an existing mcp_config.json that does not parse is refused, not overwritten."""
+        plugin_dest = self.root / "antigravity" / "plugins" / "cadabby"
+        vault = self.root / "ag-vault"
+        ok, _ = install_antigravity(dest_path=plugin_dest, vault_path=vault)
+        self.assertTrue(ok)
+
+        mcp_file = plugin_dest / "mcp_config.json"
+        for broken in (b'{"mcpServers": {"other": ', b'["not", "an", "object"]'):
+            with self.subTest(content=broken):
+                mcp_file.write_bytes(broken)
+                ok, msg = install_antigravity(dest_path=plugin_dest, vault_path=vault, force=True)
+                self.assertFalse(ok)
+                self.assertIn("Aborting", msg)
+                self.assertEqual(mcp_file.read_bytes(), broken)
+
     def test_antigravity_replace_symlink_with_vault_bound(self):
         plugin_dest = self.root / "antigravity_symlink" / "cadabby"
         # First install unbound (symlink)
@@ -304,6 +320,16 @@ class TestInstaller(unittest.TestCase):
         self.assertFalse(ag_plugin.exists())
         claude_after = json.loads(claude_mcp.read_text("utf-8"))
         self.assertNotIn("cadabby", claude_after.get("mcpServers", {}))
+
+    def test_install_and_uninstall_claude_reject_non_dict_or_binary_configs(self):
+        cfg = self.root / "bad-claude.json"
+        for payload in (b"[1, 2, 3]", b'{"mcpServers": []}', b"\xff\xfe\x00\x00"):
+            cfg.write_bytes(payload)
+            ok_in, _ = install_claude(dest_path=cfg)
+            ok_un, _ = uninstall_claude(dest_path=cfg)
+            self.assertFalse(ok_in)
+            self.assertFalse(ok_un)
+            self.assertEqual(cfg.read_bytes(), payload)
 
 
 if __name__ == "__main__":

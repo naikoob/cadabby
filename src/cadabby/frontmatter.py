@@ -9,15 +9,14 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from cadabby.constants import RFC3339_TIMESTAMP_PATTERN, SCHEMA_KEY_ORDER
+from cadabby.constants import BODY_HASH_PREFIX, SCHEMA_KEY_ORDER
 from cadabby.errors import CadabbyError
 from cadabby.errors import FRONTMATTER_UNPARSEABLE as _CODE_UNPARSEABLE
 from cadabby.errors import FRONTMATTER_UNSERIALIZABLE as _CODE_UNSERIALIZABLE
-from cadabby.okf import canonicalize_tags
+from cadabby.okf import RE_TIMESTAMP, canonicalize_tags, split_lines
 
 RE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 RE_BARE_SAFE = re.compile(r"^[A-Za-z0-9._\-/]+$")
-RE_TIMESTAMP = re.compile(RFC3339_TIMESTAMP_PATTERN)
 
 
 class FrontmatterParseError(CadabbyError, ValueError):
@@ -30,7 +29,7 @@ class FrontmatterParseError(CadabbyError, ValueError):
 
     code = _CODE_UNPARSEABLE
 
-    def __init__(self, message: str, line_number: int):
+    def __init__(self, message: str, line_number: int) -> None:
         self.message = message
         self.line_number = line_number
         super().__init__(f"Line {line_number}: {message}")
@@ -66,18 +65,6 @@ def parse_scalar(raw: str, line_no: int) -> str | bool | None:
     val = raw.strip()
     if not val:
         return ""
-
-    # Rejection checks for forbidden YAML features
-    if val.startswith(("&", "*")):
-        raise FrontmatterParseError("Anchors and aliases are not permitted", line_no)
-    if val.startswith("!"):
-        raise FrontmatterParseError("YAML tags are not permitted", line_no)
-    if val in ("|", ">", "|+", "|-", ">+", ">-") or val.startswith(("|", ">")):
-        raise FrontmatterParseError("Multi-line scalars (| or >) are not permitted", line_no)
-    if val.startswith(("[", "{")) or val.endswith(("]", "}")):
-        raise FrontmatterParseError("Flow style collections are not permitted", line_no)
-    if any(c in val for c in ("[", "]", "{", "}")):
-        raise FrontmatterParseError("Flow style indicators are not permitted", line_no)
 
     # Double-quoted scalar
     if val.startswith('"'):
@@ -118,43 +105,61 @@ def parse_scalar(raw: str, line_no: int) -> str | bool | None:
         # In YAML, '' represents an escaped single quote
         return inner.replace("''", "'")
 
-    # Bare scalars (strictly typed for true/false/null, otherwise strings)
+    # Bare scalars. The forbidden-feature checks apply here and only here: a
+    # quoted string is literal text, so `"Notes on [RFC]"` -- which the writer
+    # emits -- must parse back rather than trip the flow-style check (C30).
+    if val.startswith(("&", "*")):
+        raise FrontmatterParseError("Anchors and aliases are not permitted", line_no)
+    if val.startswith("!"):
+        raise FrontmatterParseError("YAML tags are not permitted", line_no)
+    if val.startswith(("|", ">")):
+        raise FrontmatterParseError("Multi-line scalars (| or >) are not permitted", line_no)
+    if any(c in val for c in ("[", "]", "{", "}")):
+        raise FrontmatterParseError("Flow style indicators are not permitted", line_no)
+
+    # Strictly typed for true/false/null (§3.2), otherwise strings. `~` is a
+    # string: the spec names exactly three non-string literals.
     if val == "true":
         return True
     if val == "false":
         return False
-    if val == "null" or val == "~":
+    if val == "null":
         return None
 
     return val
 
 
-def split_frontmatter(content: str) -> tuple[str | None, str, int]:
+def _split_mapping(text: str) -> tuple[str, str] | None:
+    """Split `key: value` on YAML's key indicator, or return None if absent.
+
+    The indicator is a colon followed by a space or the end of the line, so
+    `https://example.com` and `agent:foo` are scalars, not one-key mappings.
+    Splitting on any colon turned a list of URLs into `[{'https': ...}]`.
+    """
+    key, sep, rest = text.partition(":")
+    if not sep or (rest and not rest.startswith(" ")):
+        return None
+    return key.strip(), rest.strip()
+
+
+def split_frontmatter(content: str) -> tuple[str | None, str]:
     """Split markdown text into raw frontmatter and body.
 
     Returns:
-        (raw_frontmatter_text, body_text, closing_dash_line_number)
-        If no frontmatter is found, returns (None, content, 0).
+        (raw_frontmatter_text, body_text), or (None, content) when the text
+        does not open with a frontmatter fence.
     """
     if not content.startswith("---\n") and not content.startswith("---\r\n") and content != "---":
-        return None, content, 0
+        return None, content
 
-    lines = content.splitlines(keepends=True)
-    if not lines or lines[0].strip() != "---":
-        return None, content, 0
-
-    closing_index = -1
-    for idx in range(1, len(lines)):
-        if lines[idx].strip() == "---":
-            closing_index = idx
-            break
-
+    lines = split_lines(content)
+    closing_index = next((idx for idx in range(1, len(lines)) if lines[idx].strip() == "---"), -1)
     if closing_index == -1:
         raise FrontmatterParseError("Unterminated frontmatter block: missing closing '---'", 1)
 
-    raw_fm = "".join(lines[1:closing_index])
-    body = "".join(lines[closing_index + 1 :])
-    return raw_fm, body, closing_index + 1
+    raw_fm = "\n".join(lines[1:closing_index])
+    body = "\n".join(lines[closing_index + 1 :])
+    return raw_fm, body
 
 
 def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
@@ -165,12 +170,12 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     Raises:
         FrontmatterParseError on any syntax violation.
     """
-    raw_fm, body, _ = split_frontmatter(content)
+    raw_fm, body = split_frontmatter(content)
     if raw_fm is None:
         return {}, content
 
     data: dict[str, Any] = {}
-    lines = raw_fm.splitlines()
+    lines = split_lines(raw_fm)
 
     # Parser state tracking
     current_key: str | None = None
@@ -203,17 +208,16 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
             current_map = None
             current_seq_item_map = None
 
-            if ":" not in stripped:
+            mapping = _split_mapping(stripped)
+            if mapping is None:
                 raise FrontmatterParseError("Expected 'key: value' or 'key:' mapping at indent 0", line_idx)
 
-            k, _, v = stripped.partition(":")
-            k = k.strip()
+            k, v_val = mapping
             if not RE_KEY.match(k):
                 raise FrontmatterParseError(f"Invalid key name '{k}'", line_idx)
             if k in data:
                 raise FrontmatterParseError(f"Duplicate top-level key '{k}'", line_idx)
 
-            v_val = v.strip()
             if not v_val:
                 # Key begins a container (sequence or nested mapping)
                 current_key = k
@@ -232,8 +236,9 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
                 if seq_val.startswith("-"):
                     raise FrontmatterParseError("Sequences of sequences are not permitted", line_idx)
 
-                is_quoted_scalar = seq_val.startswith('"') or seq_val.startswith("'")
-                is_mapping_item = not is_quoted_scalar and ":" in seq_val
+                is_quoted_scalar = seq_val.startswith(('"', "'"))
+                item_mapping = None if is_quoted_scalar else _split_mapping(seq_val)
+                is_mapping_item = item_mapping is not None
 
                 # Initialize list container if not already started
                 if current_container_type is None:
@@ -246,11 +251,11 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
                     if current_container_type == "scalar_seq":
                         raise FrontmatterParseError("Cannot mix scalar and mapping items in sequence", line_idx)
                     current_container_type = "dict_seq"
-                    sub_k, _, sub_v = seq_val.partition(":")
-                    sub_k = sub_k.strip()
+                    assert item_mapping is not None
+                    sub_k, sub_v = item_mapping
                     if not RE_KEY.match(sub_k):
                         raise FrontmatterParseError(f"Invalid mapping key '{sub_k}' in sequence", line_idx)
-                    current_seq_item_map = {sub_k: parse_scalar(sub_v.strip(), line_idx)}
+                    current_seq_item_map = {sub_k: parse_scalar(sub_v, line_idx)}
                     assert current_seq is not None
                     current_seq.append(current_seq_item_map)
                 else:
@@ -264,7 +269,8 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
                 continue
 
             # Nested flat mapping under top-level key: 'key: value'
-            if ":" not in stripped:
+            nested = _split_mapping(stripped)
+            if nested is None:
                 raise FrontmatterParseError("Expected 'key: value' mapping at indent 2", line_idx)
 
             if current_container_type is None:
@@ -275,15 +281,13 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
             if current_container_type != "flat_map":
                 raise FrontmatterParseError("Cannot mix sequence items with mapping items under the same key", line_idx)
 
-            sub_k, _, sub_v = stripped.partition(":")
-            sub_k = sub_k.strip()
+            sub_k, sub_v_val = nested
             if not RE_KEY.match(sub_k):
                 raise FrontmatterParseError(f"Invalid key name '{sub_k}' at indent 2", line_idx)
             assert current_map is not None
             if sub_k in current_map:
                 raise FrontmatterParseError(f"Duplicate nested key '{sub_k}'", line_idx)
 
-            sub_v_val = sub_v.strip()
             if not sub_v_val:
                 raise FrontmatterParseError("Mappings nested more than two levels are not permitted", line_idx)
             current_map[sub_k] = parse_scalar(sub_v_val, line_idx)
@@ -294,17 +298,16 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
             if current_container_type != "dict_seq" or current_seq_item_map is None:
                 raise FrontmatterParseError("Indent 4 is only valid for sibling keys of sequence mappings", line_idx)
 
-            if ":" not in stripped:
+            sibling = _split_mapping(stripped)
+            if sibling is None:
                 raise FrontmatterParseError("Expected 'key: value' at indent 4", line_idx)
 
-            sub_k, _, sub_v = stripped.partition(":")
-            sub_k = sub_k.strip()
+            sub_k, sub_v_val = sibling
             if not RE_KEY.match(sub_k):
                 raise FrontmatterParseError(f"Invalid key name '{sub_k}' at indent 4", line_idx)
             if sub_k in current_seq_item_map:
                 raise FrontmatterParseError(f"Duplicate sibling key '{sub_k}' in sequence mapping", line_idx)
 
-            sub_v_val = sub_v.strip()
             if not sub_v_val:
                 raise FrontmatterParseError("Mappings nested more than two levels are not permitted", line_idx)
             current_seq_item_map[sub_k] = parse_scalar(sub_v_val, line_idx)
@@ -339,10 +342,16 @@ def format_scalar(val: Any) -> str:
         return "null"
     if isinstance(val, bool):
         return "true" if val else "false"
-    if isinstance(val, (int, float)):
-        return str(val)
+    if not isinstance(val, str):
+        # Every scalar in the subset is a string except true/false/null, so
+        # str() would change the type on the next read (3 -> "3") or emit a
+        # repr the parser rejects. Refuse and let the caller quote it (§3.2).
+        raise FrontmatterSerializeError(
+            f"Cannot serialize {type(val).__name__} {val!r}: the restricted YAML subset "
+            "holds only strings, true, false and null (§3.2). Pass it as a string"
+        )
 
-    val_str = str(val).replace("\r\n", "\n").replace("\r", "\n")
+    val_str = val.replace("\r\n", "\n").replace("\r", "\n")
 
     # Empty string
     if not val_str:
@@ -353,7 +362,7 @@ def format_scalar(val: Any) -> str:
         return f"'{val_str}'"
 
     # Hashes and sha256 references
-    if val_str.startswith("sha256:"):
+    if val_str.startswith(BODY_HASH_PREFIX):
         return f"'{val_str}'"
 
     # Keywords that would be ambiguously parsed as booleans or null
@@ -423,8 +432,6 @@ def serialize_frontmatter(data: dict[str, Any], body: str = "") -> str:
 
     for k in all_keys:
         val = data[k]
-        if val is None:
-            continue
 
         # Sequence
         if isinstance(val, list):
@@ -441,7 +448,7 @@ def serialize_frontmatter(data: dict[str, Any], body: str = "") -> str:
                     # First key on '- ' line, remaining keys on indent 4
                     sub_keys = list(item.keys())
                     if not sub_keys:
-                        continue
+                        raise FrontmatterSerializeError(f"'{k}[]': Cannot serialize an empty mapping item")
                     first_k = _check_key(sub_keys[0], f"{k}[].{sub_keys[0]}")
                     lines.append(f"  - {first_k}: {_scalar_at(item[first_k], f'{k}[].{first_k}')}")
                     for other_k in sub_keys[1:]:

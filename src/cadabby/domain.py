@@ -6,60 +6,63 @@ Free from filesystem I/O, SQLite dependencies, and network protocols.
 
 from __future__ import annotations
 
-import hashlib
+import re
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from cadabby.constants import ACTOR_PATTERN
 from cadabby.frontmatter import parse_frontmatter, serialize_frontmatter
-from cadabby.okf import compute_body_hash, derive_trust_tier, is_valid_actor
+from cadabby.okf import compute_body_hash, derive_trust_tier, is_valid_actor, utc_now_iso
+
+
+def iter_fence_states(lines: Iterable[str]) -> Iterator[tuple[str, bool]]:
+    """Yield each line with whether it belongs to a fenced code block (delimiters included).
+
+    The one code-fence model (CommonMark): a fence opens on a line starting
+    with 3+ backticks or tildes and closes on a line of only that character,
+    at least as long. Section splitting, link extraction and lint's heading
+    scan all consume it, so a link inside a four-backtick fence is not an edge
+    while the heading after it still is. An unclosed fence runs to the end.
+    """
+    fence = ""
+    for line in lines:
+        stripped = line.strip()
+        if not fence:
+            if stripped.startswith(("```", "~~~")):
+                run = len(stripped) - len(stripped.lstrip(stripped[0]))
+                if run >= 3:
+                    fence = stripped[0] * run
+                    yield line, True
+                    continue
+            yield line, False
+        else:
+            if stripped.startswith(fence) and not stripped.strip(fence[0]):
+                fence = ""
+            yield line, True
 
 
 def split_markdown_sections(body: str) -> list[tuple[str, str]]:
-    """Split markdown body into sections delineated by top-level headings (## ),
-    strictly ignoring any heading lines inside fenced code blocks (``` or ~~~).
+    """Split a body into `## ` sections, ignoring headings inside fenced code.
 
     Returns:
         List of (heading, full_section_text) tuples.
         The preamble before the first ## heading has heading="".
     """
-    lines = body.splitlines(keepends=True)
     sections: list[tuple[str, str]] = []
-
     current_heading = ""
     current_lines: list[str] = []
 
-    in_fence = False
-    fence_char = ""
-    fence_len = 0
-
-    for line in lines:
-        stripped = line.strip()
-        # Check code fence start/end
-        if not in_fence:
-            if stripped.startswith(("```", "~~~")):
-                f_char = stripped[0]
-                f_len = len(stripped) - len(stripped.lstrip(f_char))
-                if f_len >= 3:
-                    in_fence = True
-                    fence_char = f_char
-                    fence_len = f_len
-        else:
-            if stripped.startswith(fence_char * fence_len):
-                in_fence = False
-                fence_char = ""
-                fence_len = 0
-
-        # Heading detection outside code blocks
+    # Line endings are kept so the sections rejoin to the exact body; only
+    # "\n" splits, matching the body hash (§3.3).
+    for line, in_fence in iter_fence_states(re.findall(r"[^\n]*\n|[^\n]+\Z", body)):
         if not in_fence and line.startswith("## "):
             if current_lines or current_heading:
                 sections.append((current_heading, "".join(current_lines)))
                 current_lines = []
             current_heading = line[3:].strip()
-            current_lines.append(line)
-        else:
-            current_lines.append(line)
+        current_lines.append(line)
 
     if current_lines or current_heading:
         sections.append((current_heading, "".join(current_lines)))
@@ -104,7 +107,9 @@ class Note:
 
     @property
     def type(self) -> str:
-        return str(self.frontmatter.get("type", "concept"))
+        # Missing reads as missing (""), not an invented default: `vault_ground`
+        # must show the same gap lint reports as FIELD_MISSING (§3.1).
+        return str(self.frontmatter.get("type", ""))
 
     @property
     def description(self) -> str:
@@ -112,7 +117,7 @@ class Note:
 
     @property
     def status(self) -> str:
-        return str(self.frontmatter.get("status", "draft"))
+        return str(self.frontmatter.get("status", ""))
 
     @property
     def tags(self) -> list[str]:
@@ -191,7 +196,7 @@ class Note:
             (attestation_dict, derived_trust_tier, already_verified)
         """
         if not is_valid_actor(actor):
-            raise ValueError(f"Invalid actor format '{actor}'. Must match ^(human|agent|process):[A-Za-z0-9._\\-/]+$")
+            raise ValueError(f"Invalid actor format '{actor}'. Must match {ACTOR_PATTERN}")
 
         current_hash = self.body_hash
         verified_list = self.frontmatter.get("verified")
@@ -204,7 +209,7 @@ class Note:
             if isinstance(entry, dict) and entry.get("by") == actor and entry.get("of") == current_hash:
                 return (entry, self.trust_tier, True)
 
-        now_str = at_iso or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        now_str = at_iso or utc_now_iso()
         attestation = {
             "by": actor,
             "at": now_str,
@@ -219,10 +224,13 @@ class Note:
         return serialize_frontmatter(self.frontmatter, self.body)
 
     @classmethod
-    def from_raw(cls, cid: str, rel_path: str, raw_text: str) -> Note:
-        """Construct Note entity by parsing raw OKF markdown."""
+    def from_raw(cls, cid: str, rel_path: str, raw_text: str, source_hash: str | None = None) -> Note:
+        """Construct Note entity by parsing raw OKF markdown.
+
+        `source_hash` is the storage adapter's concurrency token for the
+        content it read; the adapter owns what "unchanged" means (§8).
+        """
         fm, body = parse_frontmatter(raw_text)
-        source_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
         return cls(cid=cid, rel_path=rel_path, frontmatter=fm, body=body, source_hash=source_hash)
 
 
@@ -245,4 +253,12 @@ class DomainDefinition:
     allowed_types: list[str] | None = None  # None = open/permissive
     require_sources: bool = False
     directives_markdown: str = ""
+    # Why `{domain}/AGENTS.md` could not be honored, if it could not (§2.2).
+    # Set, the domain is treated as open but lint reports it and scaffold refuses.
+    manifest_error: str | None = None
+
+    @classmethod
+    def permissive(cls, name: str, path: Path, description: str | None = None) -> DomainDefinition:
+        """An open domain with no manifest: any type, no source requirement (§2.2)."""
+        return cls(name=name, path=path, description=description or f"{name.capitalize()} domain")
 

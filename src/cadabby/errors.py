@@ -98,6 +98,16 @@ class VaultConfigError(CadabbyError, ValueError):
     code = CONFIG_INVALID
 
 
+class HumanAttestationRefusedError(CadabbyError):
+    """A `human:*` attestation was requested through a non-interactive surface (§3.4).
+
+    One exception type for every surface, so the MCP tool and the use case
+    report the same categorical code rather than one of them PERMISSION_DENIED.
+    """
+
+    code = HUMAN_ATTESTATION_REFUSED
+
+
 # Builtins Cadabby raises directly, in resolution order. FileNotFoundError,
 # FileExistsError and PermissionError are all OSError subclasses, so OSError
 # must come last or it swallows them.

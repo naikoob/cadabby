@@ -177,7 +177,7 @@ Cadabby maintains an automated traceability contract between [`SPECIFICATION.md`
    Whenever the package version changes:
    - `src/cadabby/__init__.py` (`__version__ = "X.Y.Z"`)
    - `pyproject.toml` (`version = "X.Y.Z"`)
-   - `src/cadabby/assets/vault/.cadabby.json` (`"schema": ...`)
+   - `SPECIFICATION.md` (`Version: X.Y.Z`)
    - `src/cadabby/assets/plugins/cadabby/plugin.json` (`"version": "X.Y.Z"`)
    - `uv.lock`
    All must stay strictly in sync.
@@ -189,7 +189,7 @@ Cadabby maintains an automated traceability contract between [`SPECIFICATION.md`
 When implementing features, fixing bugs, or refactoring code:
 
 - **Do Not Add Dependencies**: Never modify `pyproject.toml` to add runtime dependencies.
-- **Do Not Break Atomicity**: Never write directly to a note or config file with raw `open(..., "w")`. Use `atomic_write_file()` from [`fsutil.py`](src/cadabby/fsutil.py).
+- **Do Not Break Atomicity**: Never write directly to a note or config file with raw `open(..., "w")`. Use `atomic_write()` or `atomic_replace_checked()` from [`fsutil.py`](src/cadabby/fsutil.py).
 - **Do Not Touch `notes` Directly**: Never execute raw `INSERT`, `UPDATE`, or `DELETE` statements against the `notes` table. Always use `cache.upsert_note()` and `cache.delete_note()` to ensure FTS retraction consistency.
 - **Do Not Expand MCP Tools**: Keep the tool count at exactly 7. New capabilities must fit within the parameters of existing tools or MCP resources.
 - **Do Not Create Domain Index Files**: Never generate `{domain}/index.md` for cognitive domains.

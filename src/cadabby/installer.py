@@ -11,8 +11,27 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from cadabby.constants import DIR_AGENTS, FILE_MCP
+from cadabby.constants import (
+    DIR_AGENTS,
+    DIR_CLAUDE,
+    DIR_OBSIDIAN,
+    DIR_RAW,
+    DIR_TEMPLATES,
+    DIR_WIKI,
+    FILE_AGENTS,
+    FILE_CLAUDE,
+    FILE_CONFIG,
+    FILE_GEMINI,
+    FILE_INDEX,
+    FILE_LOG,
+    FILE_MCP,
+    FILE_OBSIDIAN_TEMPLATES,
+    FILE_STYLE,
+    LEDGER_HEADER,
+)
+from cadabby.errors import EXIT_ENVIRONMENT, EXIT_OK, INVALID_ARGUMENT, CadabbyError
 from cadabby.fsutil import atomic_write
+from cadabby.vault import obsidian_template_dir
 
 
 def mcp_launch_argv() -> list[str]:
@@ -81,8 +100,8 @@ def get_repo_plugin_dir() -> Path:
 # single --force switch is what makes `init --force` a reset rather than a
 # refresh, which is precisely why `install` exists as a separate verb.
 ENGINE_OWNED_SHIMS: tuple[tuple[str, str], ...] = (
-    ("commands", ".claude/commands"),
-    ("skills", ".agents/skills"),
+    ("commands", f"{DIR_CLAUDE}/commands"),
+    ("skills", f"{DIR_AGENTS}/skills"),
 )
 
 
@@ -106,8 +125,14 @@ def _sync_tree(src_root: Path, dest_root: Path, dry_run: bool = False, skip: fro
         changed.append(rel)
         if not dry_run:
             dst.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write(dst, data.decode("utf-8"))
+            atomic_write(dst, data)
     return changed
+
+
+def _write_bound_plugin(repo_plugin: Path, dest: Path, mcp_cfg: dict[str, Any]) -> None:
+    """Copy the bundled plugin tree to dest and write its vault-bound mcp_config.json."""
+    _sync_tree(repo_plugin, dest, skip=frozenset({"mcp_config.json"}))
+    atomic_write(dest / "mcp_config.json", json.dumps(mcp_cfg, indent=2) + "\n")
 
 
 def refresh_vault_shims(vault_path: Path | str, dry_run: bool = False) -> tuple[bool, str]:
@@ -130,6 +155,122 @@ def refresh_vault_shims(vault_path: Path | str, dry_run: bool = False) -> tuple[
         return True, f"Vault shims already up-to-date in {vault} (unchanged)."
     prefix = "[dry-run] Would refresh" if dry_run else "Refreshed"
     return True, f"{prefix} {len(changed)} vault shim(s) in {vault}: {', '.join(changed)}"
+
+
+class InitRefusedError(CadabbyError, ValueError):
+    """`init` declined to proceed because doing so would hide existing notes (§7.5)."""
+
+    code = INVALID_ARGUMENT
+
+
+# User-owned vault documents (§7.6): written once by `init`, overwritten only
+# with --force, never touched by `install`.
+_USER_OWNED_FILES: tuple[str, ...] = (".gitignore", FILE_AGENTS, FILE_CLAUDE, FILE_GEMINI, FILE_STYLE, FILE_INDEX)
+
+
+def init_vault(
+    target: Path | str,
+    *,
+    vault_name: str | None = None,
+    force: bool = False,
+    obsidian: bool = False,
+    obsidian_templates: bool = False,
+) -> list[str]:
+    """Scaffold a vault at `target` (§2.1, §7.6) and return the report lines to show.
+
+    Three ownership tiers, three rules. Engine-owned shims (`.claude/commands`,
+    `.agents/skills`, the Antigravity plugin's files) are synced exactly as
+    `install` syncs them. User-owned documents and the two vault-bound MCP
+    configs are written once and replaced only with `force`: a hand-edited
+    `.mcp.json` must not be silently rebound. Generated files are seeded.
+
+    Raises:
+        InitRefusedError: if `obsidian_templates` would reserve a folder that
+            already holds notes, which would drop a domain out of the vault.
+    """
+    root = Path(target).resolve()
+    name = vault_name or root.name or "vault"
+    assets = get_assets_dir()
+    vault_tpl = assets / "vault"
+    report: list[str] = []
+
+    def write_once(src: Path, dst: Path) -> bool:
+        """Copy a user-owned template, honoring `force`. True if dst was written."""
+        if not src.exists():
+            return False
+        if dst.exists():
+            if not force:
+                report.append(f"Existing file left untouched: {dst.name} (use --force to overwrite)")
+                return False
+            report.append(f"Overwrote existing file: {dst.name}")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(dst, src.read_bytes())
+        return True
+
+    def bind_mcp(dst: Path) -> None:
+        atomic_write(dst, json.dumps({"mcpServers": {"cadabby": make_mcp_server_entry(root)}}, indent=2) + "\n")
+
+    # Refuse before writing anything, so a refused init leaves no half-vault.
+    declared = obsidian_template_dir(root)
+    tpl_dest = declared if declared is not None else root / DIR_TEMPLATES
+    if obsidian_templates and declared is None and tpl_dest.is_dir() and any(tpl_dest.rglob("*.md")):
+        raise InitRefusedError(
+            f"Refusing to use {DIR_TEMPLATES}/ for templates: it already holds notes, and declaring it "
+            f"would hide them from the vault. Point Obsidian at another folder in "
+            f"{DIR_OBSIDIAN}/{FILE_OBSIDIAN_TEMPLATES} and re-run."
+        )
+
+    for folder in (DIR_RAW, DIR_WIKI):
+        (root / folder).mkdir(parents=True, exist_ok=True)
+
+    # User-owned: the config carries the vault name, so it is rendered, not copied.
+    cfg_dst = root / FILE_CONFIG
+    if cfg_dst.exists() and not force:
+        report.append(f"Existing file left untouched: {FILE_CONFIG} (use --force to overwrite)")
+    else:
+        cfg_data = json.loads((vault_tpl / FILE_CONFIG).read_text("utf-8"))
+        cfg_data["vault_name"] = name
+        atomic_write(cfg_dst, json.dumps(cfg_data, indent=2) + "\n")
+    for filename in _USER_OWNED_FILES:
+        write_once(vault_tpl / filename, root / filename)
+
+    # Vault-bound MCP configs: write-once like user files, then bound to this vault.
+    if write_once(vault_tpl / FILE_MCP, root / FILE_MCP):
+        bind_mcp(root / FILE_MCP)
+    plugin_dst = root / DIR_AGENTS / "plugins" / "cadabby"
+    if write_once(get_repo_plugin_dir() / "mcp_config.json", plugin_dst / "mcp_config.json"):
+        bind_mcp(plugin_dst / "mcp_config.json")
+
+    # Engine-owned: identical to what `install` refreshes.
+    for subdir, rel_dest in ENGINE_OWNED_SHIMS:
+        _sync_tree(assets / subdir, root / rel_dest)
+    _sync_tree(get_repo_plugin_dir(), plugin_dst, skip=frozenset({"mcp_config.json"}))
+
+    # Generated: seeded empty, maintained by the engine from here on.
+    if not (root / FILE_LOG).exists():
+        atomic_write(root / FILE_LOG, LEDGER_HEADER)
+
+    # Obsidian. --obsidian-templates implies --obsidian: starter templates are
+    # useless to a vault Obsidian cannot open.
+    if obsidian or obsidian_templates:
+        (root / DIR_OBSIDIAN).mkdir(parents=True, exist_ok=True)
+        (root / DIR_RAW / "attachments").mkdir(parents=True, exist_ok=True)
+        write_once(vault_tpl / "obsidian" / "app.json", root / DIR_OBSIDIAN / "app.json")
+
+    # Starter templates are opt-in because they reserve a folder. An existing
+    # declaration always wins, including under --force (§7.5).
+    if obsidian_templates:
+        tpl_dest.mkdir(parents=True, exist_ok=True)
+        for src in sorted((vault_tpl / DIR_TEMPLATES).glob("*.md")):
+            write_once(src, tpl_dest / src.name)
+        if declared is None:
+            write_once(
+                vault_tpl / "obsidian" / FILE_OBSIDIAN_TEMPLATES,
+                root / DIR_OBSIDIAN / FILE_OBSIDIAN_TEMPLATES,
+            )
+
+    report.append(f"Initialized Cadabby vault '{name}' in {root}")
+    return report
 
 
 def _is_cadabby_entry(entry: Any) -> bool:
@@ -286,8 +427,7 @@ def install_antigravity(
         if dry_run:
             return True, f"[dry-run] Would replace symlink at {dest} with vault-configured plugin (vault: {resolved_vault})"
         dest.unlink()
-        shutil.copytree(repo_plugin, dest)
-        atomic_write(dest / "mcp_config.json", json.dumps(desired_mcp_cfg, indent=2) + "\n")
+        _write_bound_plugin(repo_plugin, dest, desired_mcp_cfg)
         return True, f"Configured Antigravity plugin at {dest} (vault: {resolved_vault})"
 
     if dest.exists():
@@ -295,8 +435,12 @@ def install_antigravity(
         if mcp_file.exists():
             try:
                 cur_cfg = json.loads(mcp_file.read_text("utf-8"))
-            except Exception:
-                cur_cfg = {}
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                # Same refusal as install_claude: rewriting a file we could not
+                # read would silently discard every other server it configures.
+                return False, f"Failed to parse existing JSON at {mcp_file}: {e}. Aborting."
+            if not isinstance(cur_cfg, dict) or not isinstance(cur_cfg.get("mcpServers", {}), dict):
+                return False, f"Unexpected structure in {mcp_file}: expected an object with 'mcpServers'. Aborting."
             existing_entry = cur_cfg.get("mcpServers", {}).get("cadabby")
             entry_stale = existing_entry != desired_entry
             if entry_stale and existing_entry is not None and not _is_stale_self(existing_entry, desired_entry) and not force:
@@ -323,17 +467,14 @@ def install_antigravity(
             if dry_run:
                 return True, f"[dry-run] Would configure Antigravity plugin at {dest} (vault: {resolved_vault})"
             shutil.rmtree(dest)
-            shutil.copytree(repo_plugin, dest)
-            atomic_write(dest / "mcp_config.json", json.dumps(desired_mcp_cfg, indent=2) + "\n")
+            _write_bound_plugin(repo_plugin, dest, desired_mcp_cfg)
             return True, f"Configured Antigravity plugin at {dest} (vault: {resolved_vault})"
 
     # dest does not exist
     if dry_run:
         return True, f"[dry-run] Would copy plugin to {dest} and configure vault: {resolved_vault}"
 
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(repo_plugin, dest)
-    atomic_write(dest / "mcp_config.json", json.dumps(desired_mcp_cfg, indent=2) + "\n")
+    _write_bound_plugin(repo_plugin, dest, desired_mcp_cfg)
     return True, f"Configured Antigravity plugin at {dest} (vault: {resolved_vault})"
 
 
@@ -361,6 +502,20 @@ def uninstall_antigravity(
     return True, f"Removed Antigravity plugin from {dest}"
 
 
+def _read_claude_config(dest: Path) -> tuple[dict[str, Any] | None, str, str | None]:
+    """Read and validate a Claude MCP config file, returning (cfg_data, raw_text, error)."""
+    if not dest.exists():
+        return {}, "", None
+    try:
+        raw = dest.read_text("utf-8")
+        cfg = json.loads(raw) if raw.strip() else {}
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
+        return None, "", f"Failed to parse existing JSON at {dest}: {e}. Aborting."
+    if not isinstance(cfg, dict) or not isinstance(cfg.get("mcpServers", {}), dict):
+        return None, "", f"Unexpected structure in {dest}: expected an object with 'mcpServers'. Aborting."
+    return cfg, raw, None
+
+
 def install_claude(
     dest_path: Path | None = None,
     vault_path: Path | str | None = None,
@@ -372,16 +527,9 @@ def install_claude(
     dest = (dest_path or default_claude_path(vault_path, is_global)).resolve()
     if (problem := _wrong_kind(dest, "file")) is not None:
         return False, problem
-    existing_content = ""
-    cfg_data: dict[str, Any] = {}
-
-    if dest.exists():
-        existing_content = dest.read_text("utf-8")
-        if existing_content.strip():
-            try:
-                cfg_data = json.loads(existing_content)
-            except (json.JSONDecodeError, ValueError) as e:
-                return False, f"Failed to parse existing JSON at {dest}: {e}. Aborting."
+    cfg_data, existing_content, err = _read_claude_config(dest)
+    if err is not None or cfg_data is None:
+        return False, err or ""
 
     mcp_servers = cfg_data.setdefault("mcpServers", {})
     existing_entry = mcp_servers.get("cadabby")
@@ -423,14 +571,11 @@ def uninstall_claude(
     if not dest.exists():
         return True, f"Claude configuration not found at {dest} (nothing to uninstall)."
 
-    existing_content = dest.read_text("utf-8")
+    cfg_data, existing_content, err = _read_claude_config(dest)
+    if err is not None or cfg_data is None:
+        return False, err or ""
     if not existing_content.strip():
         return True, f"Claude configuration at {dest} is empty."
-
-    try:
-        cfg_data = json.loads(existing_content)
-    except (json.JSONDecodeError, ValueError) as e:
-        return False, f"Failed to parse existing JSON at {dest}: {e}. Aborting."
 
     mcp_servers = cfg_data.get("mcpServers", {})
     if "cadabby" not in mcp_servers:
@@ -462,8 +607,7 @@ def run_install(
     target_claude = claude or all_targets
 
     if not target_ag and not target_claude:
-        print("Please specify a target harness: --antigravity, --claude, or --all", file=sys.stderr)
-        return 1
+        raise ValueError("Please specify a target harness: --antigravity, --claude, or --all")
 
     # One --path cannot serve both harnesses: Antigravity wants a plugin
     # directory and Claude wants a JSON config file, so no single value is
@@ -471,13 +615,11 @@ def run_install(
     # the targets are applied in sequence -- Antigravity would create its
     # directory, Claude would then fail on it, and there is no rollback.
     if dest_path is not None and target_ag and target_claude:
-        print(
+        raise ValueError(
             "--path takes a single destination, but this installs to two targets of "
             "different kinds (an Antigravity plugin directory and a Claude JSON config "
-            "file). Run the command once per harness.",
-            file=sys.stderr,
+            "file). Run the command once per harness."
         )
-        return 1
 
     success = True
     messages: list[str] = []
@@ -532,5 +674,8 @@ def run_install(
     for msg in messages:
         print(msg)
 
-    return 0 if success else 1
+    # A refused install (a conflicting entry without --force, an unparseable
+    # config) is "fix the environment", never exit 1, which means the vault
+    # has findings (§5.4).
+    return EXIT_OK if success else EXIT_ENVIRONMENT
 
