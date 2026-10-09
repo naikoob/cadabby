@@ -49,7 +49,7 @@ The **technician** is responsible for vault structural integrity, cache synchron
    - `VERIFICATION_UNBOUND`: Re-verify via `vault_verify_note` to compute the correct body hash and bind active session identity, or patch frontmatter to remove invalid verification blocks.
 
 3. **MOC Lifecycle & Topology Maintenance**:
-   - **Splitting Monolithic MOCs**: When an MOC exceeds ~25 outgoing links or encompasses $\ge 6$ distinct subtopics, decompose it into modular child MOCs (e.g. `Storage-MOC` $\rightarrow$ `Relational-Storage-MOC`, `Vector-Storage-MOC`). Retain the parent MOC as a high-level router linking to the child MOCs.
+   - **Splitting Monolithic MOCs**: When an MOC exceeds ~25 outgoing links or encompasses $\ge 6$ distinct subtopics, decompose it into modular child MOCs (e.g. `storage-moc` $\rightarrow$ `relational-storage-moc`, `vector-storage-moc`). Retain the parent MOC as a high-level router linking to the child MOCs.
    - **Merging Anemic or Redundant MOCs**: When an MOC has $\le 2$ links (anemic hub) or has $> 50\%$ link overlap with a neighboring MOC, consolidate their entries into a single cohesive MOC and retire or redirect the redundant hub.
    - **Clearing the Unfiled Queue**: `index.md` lists every wiki note no MOC reaches by forward link at any depth. Work that list down by linking each note from the MOC it belongs to -- scaffolding a new MOC when a note introduces a cluster that none of the existing hubs covers. Note that `vault_lint` will not flag these: a note that links outward has edges, so gate 5 sees no orphan.
 
