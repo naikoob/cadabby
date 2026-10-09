@@ -18,7 +18,7 @@ The **librarian** is responsible for growing the knowledge base with compounding
    - Call `vault_ground` on top matches to retrieve full text, 1-hop link graph, and domain directives.
 
 2. **Scaffolding & Synthesizing**:
-   - Synthesize key insights from raw sources, adhering to `STYLE.md` for objective voice and capitalized stems.
+   - Synthesize key insights from raw sources, adhering to `STYLE.md` for objective voice and lowercase `kebab-case` stems.
    - **Source-strict synthesis**: Extract only facts present in the `raw/` file(s) being ingested. Never silently embellish with external background facts, metrics, SLAs, or dates from training data under a `raw/` citation; omit unsupported specifics or mark them as open questions. Step-by-step mathematical evaluations or sizing calculations that plug explicit inputs into a formula attested in `raw/` are verifiable derivations and may be included and verified in a `sources:`-cited note.
    - **User-requested unverified supplements**: When the user explicitly asks to fill a gap missing from their `raw/` notes (such as a missed lecture slide or background concept), do not refuse to update or scaffold in `wiki/`. Place the non-source explanation inside an explicit `> [!WARNING] Unverified Supplement (not attested in raw/)` callout and leave the note `unverified` (`verified: []`).
    - When synthesizing from raw evidence in `raw/`, **always** pass `sources: ["raw/<filename>"]` to `vault_scaffold_note` so provenance is linked from creation.
@@ -26,15 +26,15 @@ The **librarian** is responsible for growing the knowledge base with compounding
    - Target domain: By default, scaffold into the canonical `wiki` domain using standard types (`moc`, `concept`, `entity`, `synthesis`, `comparison`, or `guide`) or open types defined for the knowledge base.
    - For custom cognitive domains, pass `domain="<domain>"` and ensure `type` matches the allowed schema in `{domain}/AGENTS.md`. Use `path` when specific folder structures are required.
    - Cross-link existing notes generously using `[[Wikilinks]]` or `[[Wikilinks|Aliases]]`, but **only to notes**. A `[[raw/source.md]]` wikilink is a gate 3 `LINK_DEAD` error: cite raw evidence in frontmatter `sources:`, and when the user wants a clickable in-body link, use a Markdown link relative to the citing note (`[Source](../raw/source.md)` from `wiki/`, `[Source](../../raw/source.md)` from a nested domain folder).
-   - **Flat wiki discipline**: if a user asks for subdirectories under `wiki/`, say why it is flat instead of quietly flattening the path, then offer either `wiki/{Stem}.md` anchored into a topical MOC or a dedicated cognitive domain when the hierarchy is genuinely required.
-   - **Hub naming**: inside cognitive domains, name folder overviews `README.md` or `{Topic}-MOC.md`. `index.md` is the engine's root gap report and a domain file by that name misleads readers.
+   - **Flat wiki discipline**: if a user asks for subdirectories under `wiki/`, say why it is flat instead of quietly flattening the path, then offer either `wiki/{stem}.md` anchored into a topical MOC or a dedicated cognitive domain when the hierarchy is genuinely required.
+   - **Hub naming**: inside cognitive domains, name folder overviews `README.md` or `{topic}-moc.md`. `index.md` is the engine's root gap report and a domain file by that name misleads readers.
    - **Protect `human-reviewed` notes**: Check `trust_tier` before calling `vault_update_note` on related notes or MOCs. Never modify the body of a `human-reviewed` note without asking the user first, as doing so invalidates their `body_hash` signature and demotes the note to `stale-verified`.
    - Update non-`human-reviewed` related notes via `vault_update_note` to reference the new findings and prevent orphaned nodes. Several changes to the same hub or MOC go in one call's `edits` list, not one call per link.
    - **Guarded Q&A stashing & synthesis completeness**: When answering questions, distinguish vault-backed claims (with their `trust_tier`) from ungrounded gaps. Never stash unrequested model lore as if it were source-backed. When a user asks to save a study supplement or compile a synthesis note / cheat sheet spanning both verified and `unverified` notes, include the full user-requested scope (marking unverified sections with `[unverified]` or an `Unverified Supplement` callout) and leave the note `unverified` rather than omitting topics to chase `machine-confirmed`.
    - **MOC Anchoring Protocol**:
      - Check for an existing suitable MOC using `vault_search(query, type_="moc")`.
      - Link the newly scaffolded note into the matching MOC using `vault_update_note` (asking the user first if the MOC itself is `human-reviewed`).
-     - If no relevant MOC exists and the note starts a new topical cluster, scaffold a new MOC (`type: "moc"`, stem: `"{Topic}-MOC"`).
+     - If no relevant MOC exists and the note starts a new topical cluster, scaffold a new MOC (`type: "moc"`, stem: `"{topic}-moc"`).
      - If the target MOC has grown beyond ~25 links or $\ge 6$ subtopics, plan an MOC split into focused child MOCs.
 
 3. **Attestation**:
