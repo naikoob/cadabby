@@ -195,6 +195,34 @@ class TestExtractWikilinks(unittest.TestCase):
         links = extract_wikilinks(text)
         self.assertEqual([l.target_stem for l in links], ["Valid-Target"])
 
+    def test_note_transclusions_are_edges(self):
+        """§4.4: `![[Note]]` transcludes a note and is an edge; `![[file.ext]]` is an attachment."""
+        text = (
+            "![[Sub-Note]] and ![[Storage-Architecture#LSM-Trees]] and ![[wiki/Explicit.md]].\n"
+            "Attachments: ![[flow.canvas]], ![[assets/diagram.PNG|300]], ![[paper.pdf#page=3]].\n"
+        )
+        links = extract_wikilinks(text)
+        self.assertEqual(
+            [(l.target_stem, l.anchor) for l in links],
+            [("Sub-Note", None), ("Storage-Architecture", "LSM-Trees"), ("wiki/Explicit.md", None)],
+        )
+
+    def test_transcluded_note_is_not_orphaned(self):
+        """A note reachable only through `![[...]]` resolves as a backlink target."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "wiki").mkdir()
+            (root / ".cadabby.json").write_text("{}\n", "utf-8")
+            for name, body in (("Hub", "![[Child#Details]]"), ("Child", "## Details\n\nText.")):
+                (root / "wiki" / f"{name}.md").write_text(
+                    f"---\ntitle: {name}\ntype: concept\ndescription: d\nstatus: active\n---\n\n{body}\n",
+                    "utf-8",
+                )
+            with VaultCache(Vault(root)) as cache:
+                cache.scan()
+                graph = get_note_graph(cache.get_connection(), "wiki/Child")
+            self.assertEqual([b["source_cid"] for b in graph["backlinks"]], ["wiki/Hub"])
+
     def test_tilde_fences_and_multi_backtick_spans_ignored(self):
         text = (
             "Double backtick: ``[[InsideDoubleBacktick]]`` and `` `[[StillCode]]` ``.\n"

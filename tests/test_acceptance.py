@@ -629,6 +629,42 @@ class TestSpecRepositoryTree(unittest.TestCase):
         self.assertFalse((self.repo_root / "assets").exists(), "Assets outside the package are excluded from the wheel")
         self.assertFalse((self.repo_root / "plugins").exists(), "The plugin lives at src/cadabby/assets/plugins (§7.2)")
 
+    def test_published_files_carry_no_machine_specific_paths(self):
+        """Dogfooding must not leak a developer's paths or hosts into what ships or is published.
+
+        The patterns are generic on purpose: a denylist naming people or
+        customers would itself be the leak. The running user's home directory
+        is added at runtime, so a maintainer's own paths are caught without
+        ever being written down here.
+        """
+        patterns = [
+            r"/home/[A-Za-z][\w.-]*/",
+            r"/Users/[A-Za-z][\w.-]*/",
+            r"/usr/local/google/",
+            r"/google/src/",
+            r"\.corp\.google\.com",
+            r"googlers\.com",
+        ]
+        home = str(Path.home())
+        if home not in ("/", "/root") and len(home) > 6:
+            patterns.append(re.escape(home))
+        leak_re = re.compile("|".join(patterns))
+
+        published = [self.repo_root / name for name in ("README.md", "AGENTS.md", "SPECIFICATION.md", "pyproject.toml")]
+        for root in ("src", "examples"):
+            published += [p for p in (self.repo_root / root).rglob("*") if p.is_file() and "__pycache__" not in p.parts]
+
+        leaks = []
+        for path in published:
+            try:
+                text = path.read_text("utf-8")
+            except (UnicodeDecodeError, FileNotFoundError):
+                continue
+            for line_no, line in enumerate(text.splitlines(), 1):
+                if leak_re.search(line):
+                    leaks.append(f"{path.relative_to(self.repo_root)}:{line_no}")
+        self.assertEqual(leaks, [], f"Machine-specific paths or hosts in published files: {leaks}")
+
 
 class TestHarnessShimsStayThin(unittest.TestCase):
     """§7.4. Shims are copied into a vault and frozen there forever.

@@ -113,7 +113,7 @@ is inside the package on purpose, because anything outside it is absent from the
 
 ## 4. Development & Testing Commands
 
-Always run commands from the repository root (`/home/bookian/Workspaces/cadabby`).
+Always run commands from the repository root (the directory containing `pyproject.toml`).
 
 ### Running Tests
 Cadabby uses Python's standard `unittest` framework. No third-party test runners are required:

@@ -19,9 +19,20 @@ from cadabby.domain import iter_fence_states
 from cadabby.vault import cid_to_path, normalize_rel, path_to_cid
 
 # Regex matching [[Target#Anchor|Alias]] (including table-escaped \| aliases)
-# ignoring embeds ![[...]], multiline brackets, and code spans
-RE_WIKILINK = re.compile(r"(?<!!)\[\[([^\]|#\n]+?)(?:#([^\]|\n]+?))?(?:\\?\|([^\]\n]+))?\]\]")
+# and note transclusions ![[Target#Anchor]], ignoring multiline brackets and
+# code spans. Group 1 is the embed marker; attachment embeds are filtered below.
+RE_WIKILINK = re.compile(r"(!?)\[\[([^\]|#\n]+?)(?:#([^\]|\n]+?))?(?:\\?\|([^\]\n]+))?\]\]")
 RE_INLINE_CODE = re.compile(r"(`+)(?:(?!\1)[^\n])+\1")
+
+# A final path segment ending in `.ext`, where ext is not `md`. An embed naming
+# such a file (`![[diagram.png]]`, `![[flow.canvas]]`) is an attachment, not a
+# note transclusion, and is never a graph edge (§4.4).
+RE_ATTACHMENT_SUFFIX = re.compile(r"\.(?!md$)[A-Za-z0-9]+$", re.IGNORECASE)
+
+
+def _is_attachment_target(target_stem: str) -> bool:
+    """Whether an embed target names a non-note file by its extension."""
+    return bool(RE_ATTACHMENT_SUFFIX.search(target_stem.rsplit("/", 1)[-1]))
 
 # Inline Markdown link, not an image embed: [label](target "optional title").
 # The angle-bracket form [label](<My Note.md>) is what Obsidian writes for
@@ -60,17 +71,20 @@ def extract_wikilinks(markdown_text: str) -> list[ExtractedLink]:
     links_by_target: dict[str, ExtractedLink] = {}
 
     for match in RE_WIKILINK.finditer(clean_text):
-        alias = match.group(3).strip() if match.group(3) else None
+        is_embed, raw_target, raw_anchor_group, raw_alias = match.groups()
+        alias = raw_alias.strip() if raw_alias else None
         raw_stem = (
-            match.group(1).rstrip("\\")
-            if (alias is not None and not match.group(2))
-            else match.group(1)
+            raw_target.rstrip("\\")
+            if (alias is not None and not raw_anchor_group)
+            else raw_target
         )
         target_stem = raw_stem.strip()
+        if is_embed and _is_attachment_target(target_stem):
+            continue
         raw_anchor = (
-            match.group(2).rstrip("\\")
-            if (alias is not None and match.group(2))
-            else match.group(2)
+            raw_anchor_group.rstrip("\\")
+            if (alias is not None and raw_anchor_group)
+            else raw_anchor_group
         )
         anchor = raw_anchor.strip() if raw_anchor else None
 

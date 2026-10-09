@@ -58,6 +58,12 @@ def atomic_write(target_path: Path | str, content: str | bytes, encoding: str = 
         finally:
             os.close(fd)
 
+        # A replace swaps in a new inode, so the target's permission bits would
+        # otherwise reset to the temp file's: a 0600 private note or a 0664
+        # shared one silently becomes 0644 on every edit.
+        with contextlib.suppress(FileNotFoundError):
+            os.chmod(tmp_path, target.stat().st_mode & 0o7777)
+
         os.replace(tmp_path, target)
     except Exception:
         if tmp_path.exists():

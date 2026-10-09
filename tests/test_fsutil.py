@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import stat
 import tempfile
 import time
 import unittest
@@ -36,6 +38,15 @@ class TestFsutil(unittest.TestCase):
         # Check no temporary files linger
         tmp_files = list(target.parent.glob(".tmp_*"))
         self.assertEqual(len(tmp_files), 0)
+
+    def test_atomic_write_preserves_existing_mode(self):
+        """Replacing a file keeps its permission bits rather than resetting them (§8)."""
+        target = self.dir / "private.md"
+        atomic_write(target, "v1\n")
+        os.chmod(target, 0o600)
+        atomic_write(target, "v2\n")
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
+        self.assertEqual(target.read_text("utf-8"), "v2\n")
 
     def test_atomic_replace_checked_conflict(self):
         target = self.dir / "conflict.md"
