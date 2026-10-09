@@ -540,9 +540,23 @@ def cmd_mcp(args: argparse.Namespace) -> int:
     return run_mcp_server(vault)
 
 
+class _StrictArgumentParser(argparse.ArgumentParser):
+    """An ArgumentParser that never accepts abbreviated long options.
+
+    With abbreviation on, `--for` silently means `--force` and `--exp` means
+    `--expected-hash`, so a typo in an agent's shell call changes behavior
+    instead of failing. `add_subparsers()` builds children with the parent's
+    class, so setting it here covers every subcommand.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs["allow_abbrev"] = False
+        super().__init__(*args, **kwargs)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct CLI argument parser."""
-    vault_parent = argparse.ArgumentParser(add_help=False)
+    vault_parent = _StrictArgumentParser(add_help=False)
     vault_parent.add_argument(
         "--vault",
         type=Path,
@@ -550,7 +564,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to vault root (default: $CADABBY_VAULT, else discovered from cwd)",
     )
 
-    parser = argparse.ArgumentParser(
+    parser = _StrictArgumentParser(
         prog="cadabby",
         description="Epistemically auditable LLM Wiki engine for humans and AI agents.",
     )

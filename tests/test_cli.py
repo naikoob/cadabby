@@ -52,6 +52,16 @@ class TestCli(unittest.TestCase):
     def tearDown(self):
         self.tmp_dir.cleanup()
 
+    def test_abbreviated_flags_are_rejected(self):
+        """`--for` must not silently mean `--force`, on the root or any subcommand."""
+        parser = build_parser()
+        for argv in (["sync", "--for"], ["update", "x", "--exp", "h"], ["--vau", "v", "status"]):
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as ctx:
+                    parser.parse_args(argv)
+                self.assertEqual(ctx.exception.code, EXIT_USAGE)
+        self.assertTrue(parser.parse_args(["sync", "--force"]).force)
+
     def test_init_scaffolding(self):
         vault_path = self.dir / "test-vault"
         args = DummyArgs(vault=str(vault_path), name="test-vault", obsidian=True)
