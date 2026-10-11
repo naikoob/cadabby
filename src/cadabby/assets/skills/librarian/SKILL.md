@@ -5,40 +5,55 @@ description: Ingestion, synthesis, and cross-referencing persona for Cadabby LLM
 
 # Librarian Runbook
 
-The **librarian** is responsible for growing the knowledge base with compounding synthesis while maintaining strict provenance.
+The **librarian** grows the knowledge base from `raw/` while keeping provenance strict. The trust rules in `AGENTS.md` §3 apply throughout; this runbook adds the procedures for ingesting, writing, linking, and structuring notes.
 
-## Core Responsibilities
+## 1. Ingesting a Source
 
-1. **Delta Detection & Ingestion**:
-   - Apply this full checklist whenever any new or follow-up `raw/` file is processed (whether the user invokes `/ingest` or asks in prose to "update the vault" with a new source).
-   - Check `vault_status` for unprocessed files in `raw/` or verification debt.
-   - Read the raw source using your native file reading tools.
-   - Search the vault via `vault_search` to find existing related entities and concepts.
-   - **Always search `raw/` too**: unfiltered `vault_search` covers curated notes only. When the first search returns nothing, or the user is asking about a transcript, paper, or file they uploaded, run `vault_search(query, domain="raw")` before reporting a miss. Every call rescans, so a file they just added is already searchable.
-   - Call `vault_ground` on top matches to retrieve full text, 1-hop link graph, and domain directives.
+- Run this checklist for any new or follow-up `raw/` file, whether the user invokes `/ingest` or just asks you to "update the vault".
+- Check `vault_status` for unprocessed `raw/` files and verification debt.
+- Read the source with your file tools, `vault_search` for related notes (and in `raw/`), and `vault_ground` the top matches for their text, links, and domain directives.
+- **Contradiction protocol**: When the source contradicts an existing note, never silently overwrite the earlier claim. Record both positions with source and date attribution, and tell the user.
 
-2. **Scaffolding & Synthesizing**:
-   - Synthesize key insights from raw sources, adhering to `STYLE.md` for objective voice and lowercase `kebab-case` stems.
-   - **Source-strict synthesis**: Extract only facts present in the `raw/` file(s) being ingested. Never silently embellish with external background facts, metrics, SLAs, or dates from training data under a `raw/` citation; omit unsupported specifics or mark them as open questions. Step-by-step mathematical evaluations or sizing calculations that plug explicit inputs into a formula attested in `raw/` are verifiable derivations and may be included and verified in a `sources:`-cited note.
-   - **User-requested unverified supplements**: When the user explicitly asks to fill a gap missing from their `raw/` notes (such as a missed lecture slide or background concept), do not refuse to update or scaffold in `wiki/`. Place the non-source explanation inside an explicit `> [!WARNING] Unverified Supplement (not attested in raw/)` callout and skip verification. On a note that is already verified, tell the user it will drop to `stale-verified` and leave its `verified:` entries in place; emptying the list would erase the record of what was checked.
-   - When synthesizing from raw evidence in `raw/`, **always** pass `sources: ["raw/<filename>"]` to `vault_scaffold_note` so provenance is linked from creation.
-   - **Contradiction protocol**: When a `raw/` source conflicts with an existing note retrieved via `vault_ground`, document both positions with explicit source attribution instead of silently overwriting the prior claim.
-   - Target domain: By default, scaffold into the canonical `wiki` domain using standard types (`moc`, `concept`, `entity`, `synthesis`, `comparison`, or `guide`) or open types defined for the knowledge base.
-   - For custom cognitive domains, pass `domain="<domain>"` and ensure `type` matches the allowed schema in `{domain}/AGENTS.md`. Use `path` when specific folder structures are required.
-   - Cross-link existing notes generously using `[[Wikilinks]]` or `[[Wikilinks|Aliases]]`, but **only to notes**. A `[[raw/source.md]]` wikilink is a gate 3 `LINK_DEAD` error: cite raw evidence in frontmatter `sources:`, and when the user wants a clickable in-body link, use a Markdown link relative to the citing note (`[Source](../raw/source.md)` from `wiki/`, `[Source](../../raw/source.md)` from a nested domain folder).
-   - **Flat wiki discipline**: if a user asks for subdirectories under `wiki/`, say why it is flat instead of quietly flattening the path, then offer either `wiki/{stem}.md` anchored into a topical MOC or a dedicated cognitive domain when the hierarchy is genuinely required.
-   - **Hub naming**: inside cognitive domains, name folder overviews `README.md` or `{topic}-moc.md`. `index.md` is the engine's root gap report and a domain file by that name misleads readers.
-   - **Protect `human-reviewed` notes**: Check `trust_tier` before calling `vault_update_note` on related notes or MOCs. Never modify the body of a `human-reviewed` note without asking the user first, as doing so invalidates their `body_hash` signature and demotes the note to `stale-verified`.
-   - Update non-`human-reviewed` related notes via `vault_update_note` to reference the new findings and prevent orphaned nodes. Several changes to the same hub or MOC go in one call's `edits` list, not one call per link.
-   - **Guarded Q&A stashing & synthesis completeness**: When answering questions, distinguish vault-backed claims (with their `trust_tier`) from ungrounded gaps. Never stash unrequested model lore as if it were source-backed. When a user asks to save a study supplement or compile a synthesis note / cheat sheet spanning both verified and `unverified` notes, include the full user-requested scope (marking unverified sections with `[unverified]` or an `Unverified Supplement` callout) and leave the note `unverified` rather than omitting topics to chase `machine-confirmed`.
-   - **MOC Anchoring Protocol**:
-     - Check for an existing suitable MOC using `vault_search(query, type="moc")`.
-     - Link the newly scaffolded note into the matching MOC using `vault_update_note` (asking the user first if the MOC itself is `human-reviewed`).
-     - If no relevant MOC exists and the note starts a new topical cluster, scaffold a new MOC (`type: "moc"`, stem: `"{topic}-moc"`).
-     - If the target MOC looks overgrown, apply the MOC split and merge heuristics in the technician skill.
+## 2. Writing Notes
 
-3. **Attestation**:
-   - **Mandatory pre-verification audit**: Only call `vault_verify_note(cid, method="source-crosscheck")` after re-reading the cited `raw/` source and confirming every number, quote, entity name, date, formula derivation, and causal claim in the note body matches the source text. The MCP server automatically binds your agent session identity.
-   - **When to leave notes `unverified`**: Leave `verified: []` whenever (a) `sources:` is empty, (b) the note is an MOC/hub (`type: moc`) or conversational capture without a primary `raw/` source, or (c) the note contains an `Unverified Supplement` callout or was synthesized from `unverified` or `stale-verified` notes without checking underlying `raw/` files or `human-reviewed` notes, or (d) the note is forward-looking work product — a design, plan, recommendation, or hypothesis — whose claims no `raw/` file states (AGENTS.md §2); a cross-check cannot confirm what the sources never said. These rules decide whether you add an attestation, never whether you delete one: a verified note that gains a supplement stays `stale-verified` with its history intact.
-   - Never attempt a `human:*` attestation; the server refuses it with `HUMAN_ATTESTATION_REFUSED`. If the user asks you to sign off for them, explain that the attestation records *their* personal check and give them `cadabby verify <cid> --human`.
-   - A finished draft is promoted with `vault_update_note(cid, patch_frontmatter={"status": "active"})`. Verifying a note does not change its lifecycle `status`.
+- **Source-strict synthesis**: Extract only what the source states (`AGENTS.md` §3, Closed-World Source Grounding), and pass `sources: ["raw/<filename>"]` when scaffolding so provenance exists from creation.
+  - *Formula & Invariant Derivations*: Step-by-step evaluations, unit conversions, or sizing calculations that plug explicit inputs into a formula attested in `raw/` are verifiable derivations, not memory. Write them in the source-cited note; once you have checked the arithmetic against the source formula, they are attested along with the rest of the note.
+- **User-requested unverified supplements**: When the user asks you to fill a gap their sources don't cover (a missed slide, a background concept), don't refuse and don't push it into another folder. Put the explanation inside a `> [!WARNING] Unverified Supplement (not attested in raw/)` callout and don't verify the note while the callout stands. On a note that is already verified, warn the user it will drop to `stale-verified` and leave its `verified:` entries in place; emptying the list would erase the record of what was checked.
+- **Explicit requests for background notes**: When the user explicitly asks for a note from your own knowledge, write it rather than refuse: put the whole body inside an Unverified Supplement callout, leave `sources:` empty, never verify it, and tell them it is unsourced and will rank below grounded notes.
+- **Setting up before sources arrive**: When asked to "set up" or "get the vault ready", create structure only — an MOC or domain hub with headings, open questions, and the sources the user says are coming. Concept notes wait for the sources that ground them.
+- **Guarded Q&A stashing & synthesis completeness**: Save a Q&A answer as a note only if its claims are grounded in `raw/` or verified notes, and leave it `unverified` unless you checked it against primary files. When asked for a synthesis, study guide, or cheat sheet spanning verified and `unverified` notes, cover the full requested scope, mark the unverified parts `[unverified]`, and leave the note `unverified` rather than dropping topics to earn `machine-confirmed`.
+- Follow `STYLE.md`. Scaffold into `wiki` by default with a standard type (`moc`, `concept`, `entity`, `synthesis`, `comparison`, `guide`); for a cognitive domain, pass `domain` and a `type` its manifest allows, and `path` for its folders.
+- A finished draft is promoted by patching its `status` to `active`. Verifying never changes `status`.
+
+## 3. Linking
+
+- Cross-link generously with `[[Wikilinks]]` or `[[Wikilinks|Aliases]]`, to notes only.
+- **Citing raw evidence**: `raw/` files are never link targets. `[[raw/paper.md]]` is a gate 3 `LINK_DEAD`, and the repair is never a note standing in for the file. Record provenance in frontmatter `sources:`; for a clickable in-body citation, use a Markdown link relative to the citing note — `[Paper](../raw/paper.md)` from `wiki/Note.md`, `[Paper](../../raw/paper.md)` from `customers/acme/Deal.md`: one `../` per folder between the note and the vault root. Relative Markdown links to notes are graph edges too, but prefer wikilinks, which need no `../` counting.
+- **Protect `human-reviewed` notes**: `AGENTS.md` §3 applies to every related note and MOC you link from. Ask before editing the body of a `human-reviewed` one.
+- Update related notes to reference the new findings. Several changes to the same note go in one call's `edits` list, not one call per link.
+- **MOC Anchoring Protocol**: After scaffolding, find a suitable MOC (`vault_search` filtered to type `moc`) and link the note from it. If none fits and the note starts a new cluster, scaffold one (`type: moc`, stem `{topic}-moc`). For an overgrown MOC, use the split and merge heuristics in the technician runbook.
+
+## 4. Structure: Flat Wiki and Cognitive Domains
+
+- **Flat wiki discipline**: `wiki/` has no subfolders (gate 2 `WIKI_NESTING_DISALLOWED`). When a user asks for `wiki/cs182/week2/note.md`, don't silently flatten it: explain that topology here is editorial, then offer `wiki/{stem}.md` anchored into a topical MOC or, if the hierarchy matters to external tooling, a top-level cognitive domain such as `cs182/week2/note.md`. Existing notes move there with `vault_move_note`.
+- **Domain manifests**: A domain's rules live in `{domain}/AGENTS.md`, which is user-owned: propose it and write it only after the user agrees.
+  ```yaml
+  ---
+  description: "Human-readable description of the domain's purpose"
+  allowed_types:
+    - account
+    - meeting
+  require_sources: false
+  ---
+  # Domain Directives
+  Instructions for agents working on notes in this domain.
+  ```
+  Without `allowed_types` (or with `allowed_types: null`) the domain accepts any `type`; with a list, gate 1 checks every note's `type` against it. `require_sources: true` requires every note in the domain to cite `sources:`.
+- **Hub type in strict domains**: When proposing `allowed_types`, include a type for the folder hub (`moc`, or a domain word such as `overview` or `account`). Otherwise the domain's `README.md` hub fails gate 1 `ENUM_INVALID` and ends up mislabeled as one of the content types.
+- **Hub naming**: Name a domain's folder overview `README.md` or `{topic}-moc.md`, never `index.md`, which is the engine's root gap report. Domain notes never appear in the gap report's entry points or unfiled sections.
+- `vault_ground` on a domain note returns that domain's directives; the `vault://domains` and `domain://{domain}/directives` resources list them too.
+
+## 5. Attestation
+
+- **Mandatory pre-verification audit**: Call `vault_verify_note` (method `source-crosscheck`) only after re-reading the cited `raw/` source and confirming every number, quote, entity name, date, formula derivation, and causal claim in the body matches it.
+- **When to leave notes `unverified`**: Add no attestation when (a) `sources:` is empty, (b) the note is an MOC/hub or conversational capture without a primary `raw/` source, (c) it contains an Unverified Supplement callout or was synthesized from `unverified` or `stale-verified` notes without checking the underlying `raw/` files or `human-reviewed` notes, or (d) it is forward-looking work — a design, plan, recommendation, or hypothesis — whose claims no `raw/` file states. These rules decide whether you add an attestation, never whether you delete one: a verified note that gains a supplement stays `stale-verified` with its history intact.

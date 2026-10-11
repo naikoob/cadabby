@@ -753,6 +753,22 @@ class TestHarnessShimsStayThin(unittest.TestCase):
         budget = tools["vault_ground"]["inputSchema"]["properties"]["budget_tokens"]["description"]
         self.assertIn("never derive it from a requested output length", budget)
 
+    def test_vault_agents_md_routes_task_procedures_to_the_runbooks(self):
+        """C52, §7.4. The always-loaded constitution routes; the runbooks hold procedures.
+
+        Moving procedures out of AGENTS.md only works if an agent can still
+        reach them, and not every harness discovers .agents/skills/ by itself,
+        so the constitution has to name each runbook's path.
+        """
+        agents_md = (self.ASSETS / "vault" / "AGENTS.md").read_text("utf-8")
+        librarian = (self.ASSETS / "skills" / "librarian" / "SKILL.md").read_text("utf-8")
+        for runbook in (".agents/skills/librarian/SKILL.md", ".agents/skills/technician/SKILL.md"):
+            self.assertIn(runbook, agents_md)
+        for procedure in ("allowed_types:", "one `../` per folder"):
+            with self.subTest(procedure=procedure):
+                self.assertNotIn(procedure, agents_md)
+                self.assertIn(procedure, librarian)
+
     def test_shims_point_at_vault_content_rather_than_restating_it(self):
         """Every command and agent manifest delegates; none carries a runbook."""
         shims = sorted((self.ASSETS / "commands").glob("*.md")) + sorted(self.PLUGIN.glob("agents/*/agent.md"))
@@ -795,7 +811,7 @@ class TestHarnessShimsStayThin(unittest.TestCase):
         # 4. CE pair-work simulation findings: raw-link depth, no pty-forged
         #    human sign-off, tool-only body edits, and an honest offline mode.
         plugin_skill = (self.ASSETS / "plugins" / "cadabby" / "skills" / "cadabby-wiki" / "SKILL.md").read_text("utf-8")
-        self.assertIn("one `../` per folder between the note and the vault root", agents_md)
+        self.assertIn("one `../` per folder between the note and the vault root", librarian)
         self.assertIn("Never run `cadabby verify --human` yourself", agents_md)
         self.assertIn("It is the only way a note body changes", agents_md)
         self.assertIn("When the MCP server is unavailable", agents_md)
@@ -805,17 +821,17 @@ class TestHarnessShimsStayThin(unittest.TestCase):
         self.assertIn("No Server, No Trust Claims", plugin_skill)
         # 5. Student journey simulation findings: mathematical/deductive derivations,
         #    explicit unverified supplements, and non-destructive LINK_DEAD unlinking.
-        self.assertIn("Formula & Invariant Derivations", agents_md)
+        self.assertIn("Formula & Invariant Derivations", librarian)
         self.assertIn("Unverified Supplement", agents_md)
         self.assertIn("User-requested unverified supplements", librarian)
         self.assertIn("Unlink reminders, TODOs, and prose mentions in place", technician)
         # 6. Five-persona simulation findings: explicit background requests are
         #    honored (fenced), supplements never erase attestation history, and
         #    strict domains whitelist a hub type.
-        self.assertIn("Explicit requests for background notes", agents_md)
+        self.assertIn("Explicit requests for background notes", librarian)
         self.assertIn("never clear `verified:`", agents_md)
         self.assertNotIn("leave the note `unverified` (`verified: []`", agents_md)
-        self.assertIn("Hub type in strict domains", agents_md)
+        self.assertIn("Hub type in strict domains", librarian)
         self.assertIn("leave its `verified:` entries in place", librarian)
         self.assertIn("`README.md` is the one exception to lowercase stems", style_md)
         # 7. v0.4.0 review: one rule for supplements everywhere, attestations are never
