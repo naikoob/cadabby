@@ -862,6 +862,8 @@ then run the ingestion workflow for: $ARGUMENTS
 
 Behavior lives in `.agents/skills/` and `AGENTS.md`, both of which are vault content the user can update by pulling.
 
+**How to call a tool lives in the tool's MCP description, never in `AGENTS.md`.** `AGENTS.md` is user-owned (table below), so whatever it says about the tool surface is frozen at the version that wrote it: every 0.3.x vault still tells its agents to call `vault_lint`, and none of them mention `vault_move_note`. Tool descriptions are the one surface every harness shows the model and the running engine always sends, so per-tool guidance — parameters, refusals, the `raw/` search fallback, what `budget_tokens` caps, the move-consent step — goes there. `AGENTS.md` keeps only rules that span tools, and names tools without showing how to call them. MCP's optional `instructions` field in the `initialize` reply was evaluated for this role and rejected: Antigravity accepts it and does not surface it to the model.
+
 **The thin-shim rule earns a refresh command.** Because a shim carries no user content, the engine may rewrite one at any time without asking, and `cadabby install` does exactly that: it re-syncs every engine-owned file in the vault — the slash commands, the persona runbooks, and the plugin tree — writing only the files whose bytes differ (§7.6). This divides vault files into three categories, and the division is normative:
 
 | | files | written by |
@@ -1131,6 +1133,7 @@ A note on scope: the five-phase build order that used to open this section was r
 * **C48.** Give a note a list-valued `title`: `cadabby status` and every MCP tool still work, and lint reports `ENUM_INVALID` for it. `vault_scaffold_note` with a list `description` fails with `INVALID_ARGUMENT` and writes no file.
 * **C49.** With `customers/acme/README.md` and `projects/apollo/README.md` present, `vault_update_note`, `vault_verify_note` and `vault_move_note` on `README` each fail with `INVALID_ARGUMENT` naming both and change nothing, while each full path works. Name `wiki/Flash-Attention.md` as `wiki/flash-attention`: the tool acts on, and reports, `wiki/Flash-Attention`.
 * **C50.** Move a note while a referrer is edited between plan and apply, the referrer having frontmatter comments and CRLF line endings, into a folder that did not exist: every file the move wrote is restored byte for byte and the new folder is gone. Take a dry run's `plan_token`, add a link to the note, and apply with that token: it fails with `VAULT_CONFLICT` and writes nothing.
+* **C51.** Grep the `AGENTS.md` that `init` writes for a `vault_*` tool followed by `(`: there is none. Read the `tools/list` descriptions instead: `vault_search` says matching is lexical and that `raw/` needs `domain='raw'`, and `vault_move_note` says to show the user the plan before applying.
 
 ### Traceability
 
@@ -1188,6 +1191,7 @@ A criterion nobody can point to a test for is a wish. This table is the map, and
 | C48 | §3.1, §5.1 | `test_list_valued_core_fields_never_break_the_scan` |
 | C49 | §5.1, §5.4 | `test_names_resolve_to_one_canonical_note_or_are_refused`, `test_ambiguous_names_and_unknown_approvals_are_refused`, `test_wrong_case_name_resolves_to_the_real_note` |
 | C50 | §5.1, §8 | `test_rollback_restores_exact_bytes_and_removes_new_folders`, `test_stale_plan_token_refuses_apply_and_writes_nothing` |
+| C51 | §7.4, §5.1 | `test_vault_agents_md_names_tools_without_call_syntax`, `test_tool_descriptions_carry_per_tool_guidance` |
 
 C17-C20 were unmet together for several releases -- all four were the §2.5 gap report, specified and never built, while an older catalog occupied the file. They were closed as a group, since each depended on the same two queries. C2 and C4 followed: C2 needed the `status` payload asserted rather than only the tier behind it, and C4 needed a fixture seeding one instance of every lint code, which turned the taxonomy itself into something a test can hold. C1 was closed by adding `n.cid ASC` as the secondary sort key in §4.4, making equal-scoring search rows across domains deterministic regardless of insertion order. C24 arrived last and in the opposite order from the rest: §5.4 was written because the surface it describes was already shipped and undocumented, with one code living inside a message string and every other failure flattened to prose at the boundary. The criterion exists to keep that from recurring, which is why it checks the shape of a failure rather than any particular one.
 

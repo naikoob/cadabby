@@ -50,7 +50,13 @@ def _tool_error(tool: str, code: str, message: str, *, retryable: bool) -> dict[
 TOOLS = [
     {
         "name": "vault_search",
-        "description": "Full-text BM25 search across vault notes boosted by epistemic trust tiers and note status.",
+        "description": (
+            "Keyword search (SQLite FTS5 BM25) over vault notes, ranked up by trust tier and note status. "
+            "Matching is lexical, not semantic: query with words the note would contain, and try synonyms "
+            "before concluding a topic is absent. Results exclude raw/ unless domain='raw'; search raw/ too "
+            "before telling the user the vault has nothing. Every call rescans the vault first, so files "
+            "edited outside this session are already visible."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -86,7 +92,11 @@ TOOLS = [
                 "budget_tokens": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Optional token budget. Truncates cleanly at section boundaries if exceeded.",
+                    "description": (
+                        "Optional cap on how much note text is returned, to protect your context. It is "
+                        "unrelated to how long your answer should be: never derive it from a requested "
+                        "output length. Truncates cleanly at section boundaries."
+                    ),
                 },
             },
             "required": ["cids"],
@@ -97,7 +107,9 @@ TOOLS = [
         "description": (
             "Vault health check: note counts by tier and type, verification debt, unprocessed and "
             "filename-only raw files, broken-link count, and finding_counts from the six lint gates. "
-            "Pass lint=true for the full findings list to repair."
+            "Pass lint=true for the full findings list to repair. Findings describe the vault, not a "
+            "failed call: read finding_counts.error, never the call's error flag. No need to call this "
+            "to refresh before other tools; each one rescans the vault itself."
         ),
         "inputSchema": {
             "type": "object",
@@ -120,7 +132,14 @@ TOOLS = [
                 "type": {"type": "string", "description": "Note type (e.g. 'concept', 'entity', or domain-specific type)"},
                 "description": {"type": "string", "description": "One-line descriptive summary"},
                 "domain": {"type": "string", "default": "wiki", "description": "Cognitive domain (default: 'wiki')"},
-                "path": {"type": "string", "description": "Optional custom relative path within domain or vault"},
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Optional relative path within the domain or vault. wiki/ is flat, so no subfolders "
+                        "there; nested folders belong in a cognitive domain. Paths under raw/ or a dot folder "
+                        "are refused."
+                    ),
+                },
                 "tags": {"type": "array", "items": {"type": "string"}, "description": "List of tags"},
                 "sources": {"type": "array", "items": {"type": "string"}, "description": "Paths to raw sources"},
                 "body": {"type": "string", "description": "Initial markdown body text"},
@@ -143,7 +162,8 @@ TOOLS = [
             "Non-destructive frontmatter patches and body edits. Section operations address '##' "
             "headings only; use edits with replace_text for anything else (a single line, the H1, "
             "text above the first '##'). Batch related changes into one call: edits apply atomically "
-            "in one write with one log entry. Never truncates a file it could not fully parse."
+            "in one write with one log entry. Any body edit makes a verified note stale-verified, so "
+            "check trust_tier first. Never truncates a file it could not fully parse."
         ),
         "inputSchema": {
             "type": "object",
@@ -193,12 +213,20 @@ TOOLS = [
     },
     {
         "name": "vault_verify_note",
-        "description": "Appends a verification entry stamped by: agent:<client_id>, at: now, and of: the current body hash. Writing human:* over MCP is refused unconditionally.",
+        "description": (
+            "Appends a verification entry stamped by: agent:<client_id>, at: now, and of: the current body "
+            "hash. Writing human:* over MCP is refused unconditionally; a human signs with "
+            "`cadabby verify <cid> --human` in their own terminal."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "cid": {"type": "string", "description": "Note CID or relative path"},
-                "method": {"type": "string", "default": "automated-check", "description": "Verification method"},
+                "method": {
+                    "type": "string",
+                    "default": "automated-check",
+                    "description": "Short label for how you checked the claims (e.g. 'source-crosscheck')",
+                },
             },
             "required": ["cid"],
         },
@@ -207,10 +235,12 @@ TOOLS = [
         "name": "vault_move_note",
         "description": (
             "Move or rename a note and repoint every link to it. Dry-run unless apply=true: the result "
-            "lists each note whose links change, its trust tier before and after, and a plan_token. Pass "
-            "that plan_token with apply=true so nothing is written if the vault changed since. Only links "
-            "that would break or open a different note are rewritten. Refused when the move would retarget "
-            "someone else's link, or would stale a human-reviewed note not named in approve_stale."
+            "lists each note whose links change, its trust tier before and after, and a plan_token. Show "
+            "the user that plan and apply only once they agree, passing the plan_token with apply=true so "
+            "nothing is written if the vault changed since. Only links that would break or open a different "
+            "note are rewritten. Refused when the move would retarget someone else's link, or would stale a "
+            "human-reviewed note not named in approve_stale; report any warnings too. Never move note files "
+            "with shell commands: nothing else repoints links or logs the move."
         ),
         "inputSchema": {
             "type": "object",

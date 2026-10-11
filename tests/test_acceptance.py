@@ -730,6 +730,29 @@ class TestHarnessShimsStayThin(unittest.TestCase):
         advertised = set(re.findall(r"\bvault_\w+\b", skill))
         self.assertEqual(advertised, {t["name"] for t in TOOLS})
 
+    def test_vault_agents_md_names_tools_without_call_syntax(self):
+        """C51, §7.4. The vault constitution is user-owned and frozen at init.
+
+        Call syntax is the part of a tool reference that rots: a parameter
+        renamed or a tool retired leaves every existing vault teaching the old
+        call, as 0.3.x vaults still teach `vault_lint`. Naming a tool is fine;
+        showing how to call it belongs in the description the engine serves.
+        """
+        agents_md = (self.ASSETS / "vault" / "AGENTS.md").read_text("utf-8")
+        self.assertEqual(re.findall(r"\bvault_\w+\(", agents_md), [])
+
+    def test_tool_descriptions_carry_per_tool_guidance(self):
+        """C51, §7.4. The guidance moved out of AGENTS.md has to have landed somewhere."""
+        tools = {t["name"]: t for t in TOOLS}
+        search = tools["vault_search"]["description"]
+        self.assertIn("lexical, not semantic", search)
+        self.assertIn("domain='raw'", search)
+        move = tools["vault_move_note"]["description"]
+        self.assertIn("Show the user that plan", move)
+        self.assertIn("Never move note files with shell commands", move)
+        budget = tools["vault_ground"]["inputSchema"]["properties"]["budget_tokens"]["description"]
+        self.assertIn("never derive it from a requested output length", budget)
+
     def test_shims_point_at_vault_content_rather_than_restating_it(self):
         """Every command and agent manifest delegates; none carries a runbook."""
         shims = sorted((self.ASSETS / "commands").glob("*.md")) + sorted(self.PLUGIN.glob("agents/*/agent.md"))
