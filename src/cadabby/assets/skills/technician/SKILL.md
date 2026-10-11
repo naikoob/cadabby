@@ -13,17 +13,17 @@ The **technician** is responsible for vault structural integrity, cache synchron
    - Call `vault_status` to monitor distribution of epistemic trust tiers, unprocessed raw sources, and verification debt.
 
 2. **Linting & Self-Healing Playbook**:
-   - Run `vault_lint` to inspect the vault against all six normative gates. Resolve errors systematically according to their diagnostic codes:
+   - Run `vault_status(lint=true)` to inspect the vault against all six normative gates. Without `lint`, `finding_counts` alone tells you whether there is anything to repair. Resolve errors systematically according to their diagnostic codes:
 
    ### Gate 1: Schema Integrity
    - `FRONTMATTER_UNPARSEABLE`: Repair YAML formatting delimiters or syntax errors.
    - `FIELD_MISSING`: Use `vault_update_note(patch_frontmatter={...})` to supply missing required OKF fields (`type`, `title`, `description`, `status`). Derive a missing `description` strictly from the note's existing body text; if the body is empty or a template stub, report the finding to the user rather than inventing a speculative description.
    - `ENUM_INVALID`: Correct invalid `type` or `status` values via `vault_update_note` to adhere to canonical types or the domain's `{domain}/AGENTS.md` `allowed_types`.
-   - `ACTOR_MALFORMED`: Correct malformed verification `by:` stamps to valid `agent:<id>` format or clear invalid verification blocks.
+   - `ACTOR_MALFORMED`: **Never edit or delete the entry** — the engine refuses `verified` in `patch_frontmatter`, and rewriting `by:` would re-attribute someone's sign-off. Report it to the user. If the note's content still needs attesting, re-audit it against its sources and append a fresh entry with `vault_verify_note`; if the malformed entry looks like a person's sign-off (`by: owner`), ask them to re-sign with `cadabby verify <cid> --human`.
    - `TIMESTAMP_INVALID`: Correct date-time strings in frontmatter to standard ISO-8601 formatting.
 
    ### Gate 2: Layout Consistency
-   - `WIKI_NESTING_DISALLOWED`: Flatten nested notes inside `wiki/` by moving them directly to `wiki/{stem}.md`, then anchor each one into the MOC it belongs to so the structure the folder was carrying survives editorially. The wiki domain must be completely flat; subdirectories are disallowed. If the nesting was deliberate and the user needs it, propose a top-level cognitive domain instead of repeatedly flattening their work.
+   - `WIKI_NESTING_DISALLOWED`: Flatten nested notes inside `wiki/` with `vault_move_note` to `wiki/{stem}.md` (dry-run first; it repoints every link), then anchor each one into the MOC it belongs to so the structure the folder was carrying survives editorially. The wiki domain must be completely flat; subdirectories are disallowed. If the nesting was deliberate and the user needs it, propose a top-level cognitive domain instead of repeatedly flattening their work.
 
    ### Gate 3: Link Integrity
    - `LINK_DEAD`: Use `vault_search` to find renamed stems and repoint the link with a `vault_update_note` `replace_text` edit (one call for every fix in the same note); scaffold the missing target only under the limits below; otherwise unlink or prune as follows:
@@ -46,10 +46,10 @@ The **technician** is responsible for vault structural integrity, cache synchron
      - *Last attestation was `agent:*` or `process:*`*: re-review the modified content against its sources and call `vault_verify_note(cid, method="...")` to rebind the hash and retire the debt.
      - *Last attestation was `human:*`*: **do not call `vault_verify_note`.** Your attestation would append cleanly and the human's record would survive in the file — that is the trap. The note's tier becomes `machine-confirmed`, its verification debt falls to zero, and it drops off `vault_status` and `index.md`, so the human re-review that is genuinely outstanding is visible nowhere. Report the drift instead: *"`<cid>` was human-reviewed by `<actor>`, but the body has changed since. Re-verify with `cadabby verify <cid> --human` in your terminal."*
      - *Never prune the history*: do not rewrite `verified:` through `vault_update_note` to clear this warning. Attestations are append-only by design and `cadabby audit` reads `human:*` entries out of them for git provenance. A superseded entry is a record that the note once stood at that wording, and a residual gate 6 warning is the correct report of an unpaid human re-review.
-   - `VERIFICATION_UNBOUND`: Re-verify via `vault_verify_note` to compute the correct body hash and bind active session identity, or patch frontmatter to remove invalid verification blocks.
+   - `VERIFICATION_UNBOUND`: The entry binds to nothing (no `of:`, or not a `by`/`at`/`of` mapping). Leave it in place and report it — attestation history is append-only, and the engine refuses `verified` in `patch_frontmatter`. If the content needs attesting, re-audit it against its sources and append a fresh, bound entry with `vault_verify_note`; never on a note whose latest attestation is `human:*` (see `VERIFICATION_STALE` above).
 
 3. **MOC Lifecycle & Topology Maintenance**:
    - **Splitting Monolithic MOCs**: When an MOC exceeds ~25 outgoing links or encompasses $\ge 6$ distinct subtopics, decompose it into modular child MOCs (e.g. `storage-moc` $\rightarrow$ `relational-storage-moc`, `vector-storage-moc`). Retain the parent MOC as a high-level router linking to the child MOCs.
    - **Merging Anemic or Redundant MOCs**: When an MOC has $\le 2$ links (anemic hub) or has $> 50\%$ link overlap with a neighboring MOC, consolidate their entries into a single cohesive MOC and retire or redirect the redundant hub.
-   - **Clearing the Unfiled Queue**: `index.md` lists every wiki note no MOC reaches by forward link at any depth. Work that list down by linking each note from the MOC it belongs to -- scaffolding a new MOC when a note introduces a cluster that none of the existing hubs covers. Note that `vault_lint` will not flag these: a note that links outward has edges, so gate 5 sees no orphan.
+   - **Clearing the Unfiled Queue**: `index.md` lists every wiki note no MOC reaches by forward link at any depth. Work that list down by linking each note from the MOC it belongs to -- scaffolding a new MOC when a note introduces a cluster that none of the existing hubs covers. Note that the lint gates will not flag these: a note that links outward has edges, so gate 5 sees no orphan.
 

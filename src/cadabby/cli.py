@@ -27,9 +27,11 @@ from cadabby.errors import (
 from cadabby.graph import get_note_graph, normalize_link_target
 from cadabby.indexer import append_vault_log, rotate_vault_log, sync_vault_index
 from cadabby.installer import InitRefusedError, init_vault
-from cadabby.lint import run_vault_lint
+from cadabby.lint import run_vault_lint, status_report
 from cadabby.ops import (
     ground_notes,
+    move_note,
+    resolve_note_cid,
     scaffold_note,
     update_note,
     verify_note,
@@ -244,6 +246,45 @@ def cmd_update(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_move(args: argparse.Namespace) -> int:
+    """Move or rename a note and repoint its links; prints the plan unless --apply."""
+    vault = resolve_cli_vault(args)
+    with VaultCache(vault) as cache:
+        result = move_note(
+            vault,
+            args.cid,
+            args.to,
+            apply=args.apply,
+            approve_stale=args.approve_stale or [],
+            plan_token=getattr(args, "plan_token", None),
+            actor=_default_cli_actor(args),
+            cache=cache,
+        )
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return EXIT_OK
+
+    verb = "Moved" if result["applied"] else "Would move"
+    print(f"{verb} {result['from']} -> {result['to']}")
+    moved = result["moved_note"]
+    if moved["links_rewritten"] or moved["tier_before"] != moved["tier_after"]:
+        print(f"  {moved['cid']}: {moved['links_rewritten']} own link(s), {moved['tier_before']} -> {moved['tier_after']}")
+    for n in result["notes"]:
+        print(f"  {n['cid']}: {n['links_rewritten']} link(s), {n['tier_before']} -> {n['tier_after']}")
+    for line in result["newly_resolved"]:
+        print(f"  note: {line}")
+    for line in result["warnings"]:
+        print(f"  warning: {line}")
+    for line in result["blocked"]:
+        print(f"  BLOCKED: {line}")
+    if not result["applied"]:
+        if result["blocked"]:
+            print("Dry run: resolve the blockers above first.")
+        else:
+            print(f"Dry run: nothing written. Re-run with --apply --plan-token {result['plan_token']} to move.")
+    return EXIT_OK
+
+
 def _confirm_human_attestation(vault: Vault, cid: str) -> bool:
     """Ask the person at the keyboard to type back a one-time token (§3.5).
 
@@ -252,7 +293,11 @@ def _confirm_human_attestation(vault: Vault, cid: str) -> bool:
     now cannot be answered by a pre-piped `y`, so an endorsement can no longer
     be made by accident.
     """
-    note = DiskNoteStorage(vault).get_note(cid)
+    storage = DiskNoteStorage(vault)
+    try:
+        note = storage.get_note(resolve_note_cid(storage, cid))
+    except FileNotFoundError:
+        note = None
     if note is None:
         # Let verify_note raise its normal NOT_FOUND error with the usual wording.
         return True
@@ -308,8 +353,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     """Print high-level vault status, distribution, and verification debt."""
     vault = resolve_cli_vault(args)
     with VaultCache(vault) as cache:
-        cache.scan()
-        status_data = cache.get_status()
+        status_data = status_report(vault, cache)
 
     if args.json:
         print(json.dumps(status_data, indent=2))
@@ -327,6 +371,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"Filename-Only Raw (body not indexed): {sum(fn_only.values())} ({ext_list})")
     print(f"Verification Debt (stale): {status_data['verification_debt']}")
     print(f"Broken Links: {status_data['broken_links']}")
+    counts = status_data["finding_counts"]
+    print(f"Lint Findings: {counts['error']} error(s), {counts['warning']} warning(s) (details: cadabby lint)")
     print("\nTrust Tiers:")
     for tier in TRUST_TIERS:
         print(f"  - {tier:<20}: {status_data['trust_tiers'].get(tier, 0)}")
@@ -554,6 +600,17 @@ class _StrictArgumentParser(argparse.ArgumentParser):
         super().__init__(*args, **kwargs)
 
 
+def _positive_int(text: str) -> int:
+    """argparse type for counts: 1 or more. `--limit -1` once read as "no limit" by accident of SQLite."""
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"'{text}' is not an integer") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {value}")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct CLI argument parser."""
     vault_parent = _StrictArgumentParser(add_help=False)
@@ -607,14 +664,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("--status", help="Filter by note status")
     p_search.add_argument("--trust", help="Filter by trust tier")
     p_search.add_argument("--tag", help="Filter by tag")
-    p_search.add_argument("--limit", type=int, default=20, help="Maximum results (default: 20)")
+    p_search.add_argument("--limit", type=_positive_int, default=20, help="Maximum results, at least 1 (default: 20)")
     p_search.add_argument("--json", action="store_true", help="Output as JSON")
     p_search.set_defaults(func=cmd_search)
 
     # ground
     p_ground = subparsers.add_parser("ground", parents=[vault_parent], help="Retrieve full content and 1-hop graph")
     p_ground.add_argument("cids", nargs="+", help="One or more note CIDs, note stems, or wikilinks")
-    p_ground.add_argument("--budget-tokens", "--budget", dest="budget_tokens", type=int, default=None, help="Token budget")
+    p_ground.add_argument(
+        "--budget-tokens", "--budget", dest="budget_tokens", type=_positive_int, default=None, help="Token budget"
+    )
     p_ground.add_argument("--json", action="store_true", help="Output as JSON")
     p_ground.set_defaults(func=cmd_ground)
 
@@ -624,7 +683,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_scaffold.add_argument("--type", required=True, help="Note type (e.g. concept, entity, or domain-specific type)")
     p_scaffold.add_argument("--desc", "--description", dest="desc", required=True, help="Note description")
     p_scaffold.add_argument("--domain", default="wiki", help="Cognitive domain (default: wiki)")
-    p_scaffold.add_argument("--path", help="Custom relative path within domain or vault")
+    p_scaffold.add_argument(
+        "--path", help="Custom relative path within domain or vault; ending in '/' names a folder (stem from the title)"
+    )
     p_scaffold.add_argument("--tags", help="Comma-separated tags")
     p_scaffold.add_argument("--sources", help="Comma-separated raw sources")
     p_scaffold.add_argument(
@@ -637,7 +698,7 @@ def build_parser() -> argparse.ArgumentParser:
     # update
     p_update = subparsers.add_parser("update", parents=[vault_parent], help="Update a note")
     p_update.add_argument("cid", help="Note CID or path")
-    p_update.add_argument("--patch-frontmatter", help="JSON frontmatter patch")
+    p_update.add_argument("--patch-frontmatter", help="JSON frontmatter patch (never `verified` or `generated`)")
     p_update.add_argument("--append-section", help="Heading:Body to append")
     p_update.add_argument("--replace-section", help="Heading:Body to replace")
     p_update.add_argument(
@@ -647,6 +708,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_update.add_argument("--expected-hash", help="Expected file hash for concurrency safety")
     p_update.add_argument("--actor", help=f"Actor identity (default: {CLI_DEFAULT_ACTOR})")
     p_update.set_defaults(func=cmd_update)
+
+    # move
+    p_move = subparsers.add_parser("move", parents=[vault_parent], help="Move or rename a note and repoint its links")
+    p_move.add_argument("cid", help="Note CID, path, stem or wikilink to move")
+    p_move.add_argument(
+        "to",
+        help="Destination vault-relative path; a bare name renames in place, and a trailing '/' moves into that folder",
+    )
+    p_move.add_argument("--apply", action="store_true", help="Write the move (default: dry run)")
+    p_move.add_argument(
+        "--approve-stale",
+        action="append",
+        metavar="CID",
+        help="A human-reviewed note allowed to go stale-verified (repeat the flag for each)",
+    )
+    p_move.add_argument("--plan-token", help="The dry run's plan_token: --apply refuses if the plan has changed since")
+    p_move.add_argument("--actor", help=f"Actor identity (default: {CLI_DEFAULT_ACTOR})")
+    p_move.add_argument("--json", action="store_true", help="Output as JSON")
+    p_move.set_defaults(func=cmd_move)
 
     # verify
     p_verify = subparsers.add_parser("verify", parents=[vault_parent], help="Stamp content-bound verification")

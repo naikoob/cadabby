@@ -45,6 +45,17 @@ cadabby --help
 Cadabby has **zero runtime dependencies** (pure CPython >= 3.11 standard
 library), so installation never pulls in a transitive dependency tree.
 
+### Upgrading from 0.3.x
+
+0.4.0 folds `vault_lint` into `vault_status` (`lint: true`) and adds
+`vault_move_note`. The cache rebuilds itself; your vault needs two touches:
+
+1. Run `cadabby install --all` in each vault to refresh the engine-owned skills,
+   command shims and plugin.
+2. In the vault's own `AGENTS.md` / `CLAUDE.md` (user-owned, never overwritten),
+   replace `vault_lint` with `vault_status` with `lint: true`, and mention
+   `vault_move_note` for renames and moves.
+
 ### Contributing
 
 Working on Cadabby itself:
@@ -54,7 +65,7 @@ git clone https://github.com/naikoob/cadabby.git
 cd cadabby
 uv sync                    # or: pip install -e .
 
-# Fast parallel test execution across all CPU cores (~5.5s, 353 tests):
+# Fast parallel test execution across all CPU cores (~25s, 536 tests):
 python3 tests/run_parallel.py
 
 # Canonical sequential test suite:
@@ -142,7 +153,7 @@ my-vault/
    - An MCP sidecar running `cadabby mcp`.
    - Two specialized personas:
      - **`@librarian`**: Researches raw sources, checks prior knowledge, scaffolds notes, and resolves links.
-     - **`@technician`**: Runs `vault_lint`, verifies cache health, and tracks verification debt.
+     - **`@technician`**: Runs `vault_status(lint=true)`, repairs links, moves misplaced notes, and tracks verification debt.
 
 ### Workflow C: Human Reading & Editing (Obsidian & CLI)
 
@@ -262,11 +273,11 @@ Conforming to §5.1-§5.2 of the Technical Specification, Cadabby exposes exactl
 | :--- | :--- |
 | **`vault_search`** | Epistemic BM25 full-text search with trust tier boosts, domain filters, and status multipliers. |
 | **`vault_ground`** | Retrieves full content, localized domain directives, and 1-hop graph neighborhood (links, backlinks, sources). |
-| **`vault_status`** | Epistemic health snapshot: tier counts, domain breakdown, verification debt, and unprocessed `raw/` files. |
+| **`vault_status`** | Vault health check: tier counts, domain breakdown, verification debt, unprocessed `raw/` files, and `finding_counts` from the six lint gates; `lint=true` returns the findings themselves. |
 | **`vault_scaffold_note`** | Scaffolds a new typed note in any domain with valid OKF frontmatter and generated attribution. |
 | **`vault_update_note`** | Non-destructive frontmatter patch, section append, or section replace with optimistic lock. |
+| **`vault_move_note`** | Moves or renames a note and repoints every link to it; dry-run by default, with each affected note's trust tier before and after and a `plan_token` that binds the apply to the plan shown. |
 | **`vault_verify_note`** | Cryptographically binds an `agent:<client_id>` attestation to the body SHA-256 (refuses `human:*`). |
-| **`vault_lint`** | Runs the six normative epistemic lint gates and returns typed diagnostics for self-healing. |
 
 ### Dynamic Resources
 
@@ -288,6 +299,7 @@ Conforming to §5.1-§5.2 of the Technical Specification, Cadabby exposes exactl
 | `cadabby ground` | Retrieve note content and 1-hop neighborhood | `cadabby ground wiki/Attention` |
 | `cadabby scaffold` | Scaffold a new typed note in any domain, optionally from an Obsidian template (`--template`) | `cadabby scaffold "Transformer" --type concept --domain wiki --desc "Attention model"` |
 | `cadabby update` | Patch frontmatter or append/replace sections | `cadabby update wiki/Transformer --replace-section "Overview:New text"` |
+| `cadabby move` | Move or rename a note and repoint its links (dry-run by default; `--apply --plan-token <t>` writes what the dry run showed; a trailing `/` moves into a folder) | `cadabby move wiki/Transformer customers/acme/ --apply --plan-token 3f9c…` |
 | `cadabby verify` | Stamp cryptographic attestation on note | `cadabby verify wiki/Transformer --human` |
 | `cadabby lint` | Run the six normative epistemic linting gates across all domains | `cadabby lint` |
 | `cadabby audit` | Check Git blame provenance of human attestations | `cadabby audit --require-signed` |
@@ -321,7 +333,7 @@ Status multipliers apply on top of trust tiers:
 Cadabby uses standard-library `unittest` with **zero test dependencies**:
 
 ```bash
-# Fast parallel test execution across all CPU cores (~5.5s, 353 tests):
+# Fast parallel test execution across all CPU cores (~25s, 536 tests):
 python3 tests/run_parallel.py
 
 # Parallel execution with verbose output or target filtering:

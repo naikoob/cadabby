@@ -42,6 +42,9 @@ class InMemoryNoteStorage(NoteStoragePort):
         return copied
 
     def save_note(self, note: Note, expected_hash: str | None = None) -> None:
+        raw = str(note.rel_path or note.cid).replace("\\", "/")
+        if raw.startswith("/") or ".." in raw.split("/"):
+            raise ValueError(f"Cannot save note outside vault root: {note.rel_path or note.cid}")
         rel_path = cid_to_path(note.rel_path or note.cid)
         if why := note_path_violation(rel_path):
             raise ValueError(f"Cannot save note at '{rel_path}': {why}")
@@ -73,6 +76,32 @@ class InMemoryNoteStorage(NoteStoragePort):
         if note_path_violation(rel_path):
             return False
         return path_to_cid(rel_path) in self._notes
+
+    def delete_note(self, cid_or_path: str, expected_hash: str | None = None, *, prune_empty_dirs: bool = False) -> None:
+        # `prune_empty_dirs` is accepted for port parity; memory has no folders.
+        rel_path = cid_to_path(cid_or_path)
+        if why := note_path_violation(rel_path):
+            raise ValueError(f"Cannot delete '{rel_path}': {why}")
+        cid = path_to_cid(rel_path)
+        existing = self._notes.get(cid)
+        if existing is None:
+            raise FileNotFoundError(f"Note not found: {rel_path}")
+        if expected_hash is not None:
+            current = _content_hash(existing)
+            expected = expected_hash.removeprefix(BODY_HASH_PREFIX)
+            if current != expected:
+                raise VaultConflictError(
+                    f"VAULT_CONFLICT: {rel_path} was modified concurrently in memory "
+                    f"(expected {expected[:12]}, found {current[:12]})"
+                )
+        del self._notes[cid]
+
+    def read_raw(self, cid_or_path: str) -> str | None:
+        rel_path = cid_to_path(cid_or_path)
+        if note_path_violation(rel_path):
+            return None
+        note = self._notes.get(path_to_cid(rel_path))
+        return note.serialize() if note is not None else None
 
     def list_note_cids(self) -> Sequence[str]:
         return sorted(self._notes.keys())

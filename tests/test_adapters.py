@@ -163,6 +163,53 @@ class TestDiskNoteStorage(unittest.TestCase):
         self.assertFalse(self.storage.note_exists("wiki/concepts"))
         self.assertFalse(self.storage.note_exists("../../outside"))
 
+    def test_delete_note_checks_hash_and_path(self):
+        """Disk and in-memory adapters refuse a stale token, a non-note path, and a missing note alike."""
+        note = Note(cid="wiki/Doomed", rel_path="wiki/Doomed.md", frontmatter={"title": "Doomed"}, body="x\n")
+        for storage in (self.storage, InMemoryNoteStorage()):
+            with self.subTest(adapter=type(storage).__name__):
+                storage.save_note(note)
+                with self.assertRaises(VaultConflictError):
+                    storage.delete_note("wiki/Doomed", expected_hash="sha256:" + "0" * 64)
+                self.assertTrue(storage.note_exists("wiki/Doomed"))
+                with self.assertRaises(ValueError):
+                    storage.delete_note("raw/source.md")
+                token = storage.get_note("wiki/Doomed").source_hash
+                storage.delete_note("wiki/Doomed", expected_hash=token)
+                self.assertFalse(storage.note_exists("wiki/Doomed"))
+                with self.assertRaises(FileNotFoundError):
+                    storage.delete_note("wiki/Doomed")
+
+    def test_delete_never_follows_a_symlink_and_listing_never_duplicates_one(self):
+        """§5.1, §8. Deleting a symlinked note removes the link; the file it points at survives."""
+        real = self.vault_dir / "projects" / "real"
+        real.mkdir(parents=True)
+        (real / "shared.md").write_text("---\ntitle: Shared\n---\nbody\n", "utf-8")
+        link = self.vault_dir / "wiki" / "shared-link.md"
+        link.symlink_to("../projects/real/shared.md")
+        self.assertEqual(self.storage.list_note_cids().count("projects/real/shared"), 1)
+        self.storage.delete_note("wiki/shared-link")
+        self.assertFalse(link.is_symlink())
+        self.assertTrue((real / "shared.md").is_file())
+
+    def test_prune_empty_dirs_removes_only_folders_left_empty(self):
+        note = Note(cid="research/papers/x", rel_path="research/papers/x.md", frontmatter={"title": "X"}, body="x\n")
+        self.storage.save_note(note)
+        (self.vault_dir / "keep").mkdir()
+        (self.vault_dir / "keep" / "other.md").write_text("---\ntitle: O\n---\n", "utf-8")
+        self.storage.delete_note("research/papers/x", prune_empty_dirs=True)
+        self.assertFalse((self.vault_dir / "research").exists())
+        self.assertTrue((self.vault_dir / "keep").exists())
+        self.assertTrue(self.vault_dir.exists())
+
+    def test_read_raw_returns_text_even_when_frontmatter_does_not_parse(self):
+        (self.vault_dir / "wiki" / "Broken.md").write_text("---\ntags: [a, b]\n---\nbody [[x]]\n", "utf-8")
+        self.assertIn("body [[x]]", self.storage.read_raw("wiki/Broken") or "")
+        self.assertIsNone(self.storage.read_raw("wiki/Missing"))
+        mem = InMemoryNoteStorage([Note(cid="wiki/A", rel_path="wiki/A.md", frontmatter={"title": "A"}, body="hi\n")])
+        self.assertIn("hi", mem.read_raw("wiki/A") or "")
+        self.assertIsNone(mem.read_raw("wiki/Missing"))
+
     def test_list_note_cids(self):
         # Create notes in three distinct cognitive domains
         (self.vault_dir / "wiki" / "concepts" / "NoteA.md").write_text(

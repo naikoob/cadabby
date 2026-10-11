@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sqlite3
+from collections import Counter
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -96,6 +97,27 @@ def run_vault_lint(vault: Vault, cache: VaultCache | None = None) -> list[LintFi
         return _run_vault_lint_impl(vault, cache)
     with VaultCache(vault) as local_cache:
         return _run_vault_lint_impl(vault, local_cache)
+
+
+def status_report(vault: Vault, cache: VaultCache, *, lint: bool = False) -> dict[str, Any]:
+    """The one check report behind `vault_status` and `cadabby status` (§4.5, §6.3).
+
+    `finding_counts` always rides along, so every check shows red or green
+    without a second call; the `findings` list itself only on request, since
+    a messy vault produces hundreds. Findings describe the vault, not the
+    call, so nothing here signals failure.
+    """
+    findings = run_vault_lint(vault, cache=cache)  # scans first
+    report = cache.get_status()
+    by_code = Counter(f.code for f in findings)
+    report["finding_counts"] = {
+        "error": sum(1 for f in findings if f.severity == "error"),
+        "warning": sum(1 for f in findings if f.severity == "warning"),
+        "by_code": dict(sorted(by_code.items())),
+    }
+    if lint:
+        report["findings"] = [f.to_dict() for f in findings]
+    return report
 
 
 _INLINE_CODE_RE = re.compile(r"`+([^`\n]+)`+")
@@ -423,14 +445,22 @@ def _verification_findings(
     verified_entries = fm.get("verified", [])
     if not isinstance(verified_entries, list):
         return
-    warned_stale_buckets: set[str] = set()
+    stale: list[tuple[str, str]] = []
     for v_entry in verified_entries:
         if not isinstance(v_entry, dict):
+            # derive_trust_tier counts it as an attestation that never bound,
+            # so the note is stale-verified debt; say why, or the debt has no finding.
+            yield _error(
+                code="VERIFICATION_UNBOUND",
+                rel_path=rel_path,
+                message=f"Verification entry '{v_entry}' is not a by/at/of mapping, so it binds to nothing",
+            )
             continue
         actor = v_entry.get("by")
         of_hash = v_entry.get("of")
 
-        if not actor or not is_valid_actor(actor):
+        actor_valid = bool(actor and is_valid_actor(actor))
+        if not actor_valid:
             yield _error(code="ACTOR_MALFORMED", rel_path=rel_path, message=f"Malformed actor identity: '{actor}'")
 
         if not isinstance(of_hash, str) or not of_hash.strip():
@@ -439,17 +469,24 @@ def _verification_findings(
                 rel_path=rel_path,
                 message=f"Verification entry by '{actor}' missing 'of:' body hash binding",
             )
-        elif of_hash != body_hash:
-            actor_is_human = isinstance(actor, str) and is_actor_human(actor)
+        elif actor_valid and of_hash != body_hash:
+            actor_is_human = is_actor_human(actor)
             superseded = tier == "human-reviewed" or (tier == "machine-confirmed" and not actor_is_human)
-            stale_bucket = "human" if actor_is_human else "machine"
-            if not superseded and stale_bucket not in warned_stale_buckets:
-                warned_stale_buckets.add(stale_bucket)
-                yield _warning(
-                    code="VERIFICATION_STALE",
-                    rel_path=rel_path,
-                    message=f"Verification entry by '{actor}' is stale (hash drifted from {of_hash[:16]}...)",
-                )
+            if not superseded:
+                stale.append((str(actor), of_hash))
+
+    if stale:
+        # One finding per note, naming the most authoritative stale entry (the
+        # latest human one, else the latest): the history is the audit trail,
+        # not a count to minimize.
+        lead_actor, lead_of = ([s for s in stale if is_actor_human(s[0])] or stale)[-1]
+        more = len(stale) - 1
+        suffix = f" (+{more} other stale attestation{'s' if more > 1 else ''})" if more else ""
+        yield _warning(
+            code="VERIFICATION_STALE",
+            rel_path=rel_path,
+            message=f"Verification entry by '{lead_actor}' is stale (hash drifted from {lead_of[:16]}...){suffix}",
+        )
 
 
 def _link_findings(

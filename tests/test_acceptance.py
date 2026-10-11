@@ -388,13 +388,14 @@ class TestAcceptanceCriteria(unittest.TestCase):
         # 4. Attest verification
         verify_out = server.handle_tools_call(
             "vault_verify_note",
-            {"cid": "wiki/Embedded-Vector-Systems", "method": "automated-check"},
+            {"cid": "wiki/embedded-vector-systems", "method": "automated-check"},
         )
         self.assertFalse(verify_out["isError"])
 
         # 5. Run lint to ensure vault remains immaculate
-        lint_out = server.handle_tools_call("vault_lint", {})
+        lint_out = server.handle_tools_call("vault_status", {"lint": True})
         self.assertFalse(lint_out["isError"])
+        self.assertEqual(json.loads(lint_out["content"][0]["text"])["finding_counts"]["error"], 0)
 
     def test_ac16_sync_zero_git_diff(self):
         """§10 C16. sync run twice produces no Git diff on the second run."""
@@ -696,14 +697,22 @@ class TestHarnessShimsStayThin(unittest.TestCase):
         never released is the same defect in prose.
         """
         root = Path(__file__).resolve().parent.parent
+        spec_text = (root / "SPECIFICATION.md").read_text("utf-8")
+        agents_text = (root / "AGENTS.md").read_text("utf-8")
+
+        def marker(label: str, pattern: str, text: str, flags: int = 0) -> str:
+            match = re.search(pattern, text, flags)
+            if match is None:
+                self.fail(f"{label}: version marker /{pattern}/ not found -- reworded? update this test with it")
+            return match.group(1)
+
         found = {
-            "pyproject.toml": re.search(
-                r'^version = "([^"]+)"', (root / "pyproject.toml").read_text("utf-8"), re.M
-            ).group(1),
+            "pyproject.toml": marker("pyproject.toml", r'^version = "([^"]+)"', (root / "pyproject.toml").read_text("utf-8"), re.M),
             "plugin.json": json.loads((self.PLUGIN / "plugin.json").read_text("utf-8"))["version"],
-            "SPECIFICATION.md": re.search(
-                r"^\*\*Version:\*\* (\S+)", (root / "SPECIFICATION.md").read_text("utf-8"), re.M
-            ).group(1),
+            "SPECIFICATION.md": marker("SPECIFICATION.md", r"^\*\*Version:\*\* (\S+)", spec_text, re.M),
+            "SPECIFICATION.md (§7.2)": marker("§7.2", r"Verified Architecture \(v([^)]+)\)", spec_text),
+            "SPECIFICATION.md (§10)": marker("§10", r"^### Criteria for (\S+)", spec_text, re.M),
+            "AGENTS.md": marker("AGENTS.md", r"\`SPECIFICATION\.md\`.*?\(v([^)]+)\)", agents_text),
         }
         disagreeing = {k: v for k, v in found.items() if v != cadabby.__version__}
         self.assertEqual(
@@ -777,6 +786,25 @@ class TestHarnessShimsStayThin(unittest.TestCase):
         self.assertIn("Unverified Supplement", agents_md)
         self.assertIn("User-requested unverified supplements", librarian)
         self.assertIn("Unlink reminders, TODOs, and prose mentions in place", technician)
+        # 6. Five-persona simulation findings: explicit background requests are
+        #    honored (fenced), supplements never erase attestation history, and
+        #    strict domains whitelist a hub type.
+        self.assertIn("Explicit requests for background notes", agents_md)
+        self.assertIn("never clear `verified:`", agents_md)
+        self.assertNotIn("leave the note `unverified` (`verified: []`", agents_md)
+        self.assertIn("Hub type in strict domains", agents_md)
+        self.assertIn("leave its `verified:` entries in place", librarian)
+        self.assertIn("`README.md` is the one exception to lowercase stems", style_md)
+        # 7. v0.4.0 review: one rule for supplements everywhere, attestations are never
+        #    rewritten or removed by an agent, and moves are bound to the plan shown.
+        for name, text in (("cadabby-wiki", plugin_skill), ("AGENTS.md", agents_md), ("librarian", librarian)):
+            with self.subTest(asset=name):
+                self.assertNotIn("may be verified", text)
+        self.assertIn("do not verify a note while such a callout stands", plugin_skill)
+        self.assertNotIn("clear invalid verification blocks", technician)
+        self.assertNotIn("remove invalid verification blocks", technician)
+        self.assertIn("**Never edit or delete the entry**", technician)
+        self.assertIn("plan_token", agents_md)
 
 
 class TestSpecReadingMap(unittest.TestCase):

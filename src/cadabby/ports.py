@@ -29,6 +29,18 @@ class NoteStoragePort(Protocol):
         """Check whether a note exists at the given CID or relative path."""
         ...
 
+    def delete_note(self, cid_or_path: str, expected_hash: str | None = None, *, prune_empty_dirs: bool = False) -> None:
+        """Remove a note; VaultConflictError if its bytes changed since `expected_hash`.
+
+        `prune_empty_dirs` also removes the folders the removal left empty, up
+        to (not including) the vault root -- for undoing a write that made them.
+        """
+        ...
+
+    def read_raw(self, cid_or_path: str) -> str | None:
+        """The note's text without parsing it, or None if absent: for notes whose frontmatter does not parse."""
+        ...
+
     def list_note_cids(self) -> Sequence[str]:
         """List all note CIDs tracked in the storage layer."""
         ...

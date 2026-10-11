@@ -303,6 +303,47 @@ verified:
         self.assertEqual([f.rel_path for f in stale], ["wiki/Human-Superseded-By-Agent.md"])
         self.assertIn("human:owner", stale[0].message)
 
+    def test_gate6_one_stale_warning_per_note(self):
+        """§6.3 gate 6. A note owes one re-review however long its history, so it warns once.
+
+        Per-entry warnings made the count grow with the audit trail, which
+        rewarded pruning `verified:` — the one repair the append-only rule forbids.
+        """
+        (self.vault.wiki_dir / "Long-History.md").write_text(
+            "---\ntype: concept\ntitle: Long History\ndescription: Test\nstatus: active\n"
+            "verified:\n"
+            "  - by: agent:first\n    at: '2026-01-01T00:00:00Z'\n    of: 'sha256:aaaa'\n"
+            "  - by: human:owner\n    at: '2026-01-02T00:00:00Z'\n    of: 'sha256:bbbb'\n"
+            "  - by: agent:second\n    at: '2026-01-03T00:00:00Z'\n    of: 'sha256:cccc'\n"
+            "---\n# Note\n\nBody has moved on. [[SQLite]]\n",
+            "utf-8",
+        )
+        stale = [f for f in run_vault_lint(self.vault) if f.code == "VERIFICATION_STALE"]
+        self.assertEqual([f.rel_path for f in stale], ["wiki/Long-History.md"])
+        self.assertIn("human:owner", stale[0].message)
+        # agent:second is newer than the human lead, so the rest are "other", not "older".
+        self.assertIn("+2 other stale attestations", stale[0].message)
+
+    def test_gate6_malformed_actor_does_not_also_emit_stale_warning(self):
+        """§6.3 gate 6. An entry that fails ACTOR_MALFORMED is not counted a second time as VERIFICATION_STALE."""
+        (self.vault.wiki_dir / "BadActor.md").write_text(
+            "---\ntype: concept\ntitle: BadActor\ndescription: Desc\nstatus: active\n"
+            "verified:\n  - by: invalid-actor\n    at: '2026-01-01T00:00:00Z'\n    of: 'sha256:0000'\n---\n\n[[SQLite]]\n",
+            "utf-8",
+        )
+        codes = [f.code for f in run_vault_lint(self.vault) if f.rel_path == "wiki/BadActor.md"]
+        self.assertEqual(codes, ["ACTOR_MALFORMED"])
+
+    def test_gate6_non_mapping_entry_is_unbound_not_silent(self):
+        """§4.5, §6.3. A scalar `verified:` entry makes the note debt, so gate 6 must say why."""
+        (self.vault.wiki_dir / "Scalar-Entry.md").write_text(
+            "---\ntype: concept\ntitle: Scalar\ndescription: Desc\nstatus: active\nverified:\n  - human:x\n---\n\n[[SQLite]]\n",
+            "utf-8",
+        )
+        findings = [f for f in run_vault_lint(self.vault) if f.rel_path == "wiki/Scalar-Entry.md"]
+        self.assertEqual([f.code for f in findings], ["VERIFICATION_UNBOUND"])
+        self.assertIn("not a by/at/of mapping", findings[0].message)
+
     def test_gate5_orphan_detection_single_query(self):
         # Scaffold an orphan note with no inbound and no outbound links
         orphan = self.vault.wiki_dir / "Lonely-Orphan.md"
@@ -716,6 +757,14 @@ class TestMarkdownNoteLinks(unittest.TestCase):
         )
         codes = [c for c, _ in self._codes_for("wiki/CodeHeading.md")]
         self.assertNotIn("ANCHOR_MISSING", codes)
+
+    def test_blank_wikilink_is_reported_dead(self):
+        """§6.3 gate 3. `[[   ]]` resolves to nothing, so it is LINK_DEAD, as it always was."""
+        (self.vault_root / "wiki" / "Blank.md").write_text(
+            "---\ntype: concept\ntitle: Blank\ndescription: Desc\nstatus: active\n---\n\nBroken [[   ]] and [[Architecture]].\n",
+            "utf-8",
+        )
+        self.assertIn("LINK_DEAD", [c for c, _ in self._codes_for("wiki/Blank.md")])
 
 
 if __name__ == "__main__":

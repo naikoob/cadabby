@@ -8,16 +8,22 @@ from pathlib import Path
 
 from cadabby.cache import VaultCache
 from cadabby.graph import (
+    LINK_KIND_IMAGE,
+    LINK_KIND_MARKDOWN,
+    LINK_KIND_REFDEF,
+    LINK_KIND_WIKI,
     LinkTargetIndex,
     extract_markdown_note_links,
     extract_wikilinks,
     get_note_graph,
+    iter_link_spans,
+    iter_relative_path_spans,
     normalize_link_target,
     relative_note_path,
     resolve_markdown_target,
     strip_code_spans,
 )
-from cadabby.vault import Vault
+from cadabby.vault import Vault, note_path_violation
 
 
 class TestGraphAnalytics(unittest.TestCase):
@@ -326,8 +332,6 @@ class TestMarkdownNoteLinkExtraction(unittest.TestCase):
         self.assertIsNone(resolve_markdown_target(src, "../../../outside.md"))
 
     def test_only_note_capable_paths_qualify(self):
-        from cadabby.vault import note_path_violation
-
         for rel in ("wiki/A.md", "customers/acme/Deal.md", "newdomain/Missing.md", "wiki/sub/Nested.md"):
             with self.subTest(rel=rel):
                 self.assertIsNone(note_path_violation(rel))  # dead if absent, never ignored
@@ -344,6 +348,63 @@ class TestMarkdownNoteLinkExtraction(unittest.TestCase):
     def test_relative_note_path_round_trips(self):
         self.assertEqual(relative_note_path("customers/acme/Deal", "wiki/A"), "../../wiki/A.md")
         self.assertEqual(relative_note_path("wiki/B", "wiki/A"), "A.md")
+
+
+class TestLinkSpans(unittest.TestCase):
+    """`iter_link_spans` reports where each target sits, so a move can rewrite it in place (§5.1)."""
+
+    def test_span_slices_are_exactly_the_target_text(self):
+        body = (
+            "[[a]] [[ b |B]] [[c#H|C]] ![[d#H]] [[dir/e]] | [[f\\|F]] |\n"
+            "[m](../g.md#H) [n](<My Note.md>) ![img](x.png) ![[pic.png]]\n"
+            "`[[code]]` [u](https://x.io/y.md)\n```\n[[fenced]]\n```\n"
+        )
+        spans = list(iter_link_spans(body))
+        wiki = [(body[s.start : s.end], s.target, s.embed) for s in spans if s.kind == LINK_KIND_WIKI]
+        md = [(body[s.start : s.end], s.target, s.angle) for s in spans if s.kind == LINK_KIND_MARKDOWN]
+        self.assertEqual(
+            wiki,
+            [("a", "a", False), ("b", "b", False), ("c", "c", False), ("d", "d", True), ("dir/e", "dir/e", False), ("f", "f", False)],
+        )
+        self.assertEqual(md, [("../g.md", "../g.md", False), ("My Note.md", "My Note.md", True)])
+
+    def test_strip_code_spans_preserves_length(self):
+        body = "a `x` b\n```\nfenced\n```\nc"
+        self.assertEqual(len(strip_code_spans(body)), len(body))
+
+    def test_blank_wikilink_is_a_zero_width_dead_link(self):
+        """§6.3 gate 3. `[[   ]]` is still a link (reported dead), with a span that covers no text."""
+        body = "x [[   ]] y"
+        spans = list(iter_link_spans(body))
+        self.assertEqual([(s.target, s.start, s.end) for s in spans], [("", 4, 4)])
+        self.assertEqual([l.target_stem for l in extract_wikilinks(body)], [""])
+
+    def test_whitespace_only_alias_and_anchor_read_as_absent(self):
+        (anchored,) = iter_link_spans("[[Note#   ]]")
+        (aliased,) = iter_link_spans("[[Note|   ]]")
+        self.assertIsNone(anchored.anchor)
+        self.assertIsNone(aliased.alias)
+        self.assertEqual(anchored.target_raw, "Note")
+
+    def test_relative_path_spans_cover_images_and_reference_definitions_only(self):
+        """§5.1. Images and `[id]: path` are found for moves, and never reach the graph extractors."""
+        body = (
+            "![a](../raw/x.png) ![b](<My Pic.png>) ![u](https://x.io/y.png) [link](note.md)\n"
+            "[ref]: ../wiki/Note.md\n[^1]: a footnote\n`![c](code.png)`\n"
+        )
+        spans = [(s.kind, body[s.start : s.end], s.angle) for s in iter_relative_path_spans(body)]
+        self.assertEqual(
+            spans,
+            [(LINK_KIND_IMAGE, "../raw/x.png", False), (LINK_KIND_IMAGE, "My Pic.png", True), (LINK_KIND_REFDEF, "../wiki/Note.md", False)],
+        )
+        self.assertEqual([l.target_stem for l in extract_markdown_note_links(body)], ["note.md"])
+
+    def test_candidates_lists_every_note_a_name_could_mean(self):
+        idx = LinkTargetIndex(["wiki/SQLite", "customers/acme/README", "projects/apollo/README", "customers/acme/SQLite"])
+        self.assertEqual(idx.candidates("README"), ["customers/acme/README", "projects/apollo/README"])
+        self.assertEqual(idx.candidates("acme/README"), ["customers/acme/README"])
+        self.assertEqual(idx.candidates("SQLite"), ["wiki/SQLite"])  # wiki-relative names are canonical (§4.4)
+        self.assertEqual(idx.candidates("missing"), [])
 
 
 if __name__ == "__main__":
