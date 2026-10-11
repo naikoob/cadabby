@@ -35,7 +35,7 @@ The **librarian** is responsible for growing the knowledge base with compounding
      - Check for an existing suitable MOC using `vault_search(query, type="moc")`.
      - Link the newly scaffolded note into the matching MOC using `vault_update_note` (asking the user first if the MOC itself is `human-reviewed`).
      - If no relevant MOC exists and the note starts a new topical cluster, scaffold a new MOC (`type: "moc"`, stem: `"{topic}-moc"`).
-     - If the target MOC has grown beyond ~25 links or ≥ 6 subtopics, plan an MOC split into focused child MOCs.
+     - If the target MOC looks overgrown, apply the MOC split and merge heuristics in the technician skill.
 
 3. **Attestation**:
    - **Mandatory pre-verification audit**: Only call `vault_verify_note(cid, method="source-crosscheck")` after re-reading the cited `raw/` source and confirming every number, quote, entity name, date, formula derivation, and causal claim in the note body matches the source text. The MCP server automatically binds your agent session identity.
