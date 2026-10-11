@@ -118,7 +118,19 @@ my-vault/
 
 ## 3. How to Use Cadabby
 
-### Workflow A: Using AI Agents (Claude Code, Cursor, Windsurf)
+### Workflow A: Using Google Antigravity
+
+1. **Install the Antigravity plugin**:
+   ```bash
+   cadabby install --antigravity
+   ```
+2. Open the vault in Antigravity. The plugin provides:
+   - An MCP sidecar running `cadabby mcp`.
+   - Two specialized personas:
+     - **`@librarian`**: Researches raw sources, checks prior knowledge, scaffolds notes, and resolves links.
+     - **`@technician`**: Runs `vault_status(lint=true)`, repairs links, moves misplaced notes, and tracks verification debt.
+
+### Workflow B: Using AI Agents (Claude Code, Cursor, Windsurf)
 
 1. **Drop a ground truth document** into `raw/`:
    ```bash
@@ -142,18 +154,6 @@ my-vault/
    - Add `[[wikilinks]]` to existing notes and suitable Maps of Content (`[[AI-Systems-MOC]]`).
    - Call `vault_verify_note` stamping the note with `agent:claude-code`.
    *(The `index.md` gap report and the `log.md` ledger are kept up to date implicitly; no manual sync needed).*
-
-### Workflow B: Using Google Antigravity
-
-1. **Install the Antigravity plugin**:
-   ```bash
-   cadabby install --antigravity
-   ```
-2. Open the vault in Antigravity. The plugin provides:
-   - An MCP sidecar running `cadabby mcp`.
-   - Two specialized personas:
-     - **`@librarian`**: Researches raw sources, checks prior knowledge, scaffolds notes, and resolves links.
-     - **`@technician`**: Runs `vault_status(lint=true)`, repairs links, moves misplaced notes, and tracks verification debt.
 
 ### Workflow C: Human Reading & Editing (Obsidian & CLI)
 
