@@ -36,7 +36,7 @@ The **librarian** grows the knowledge base from `raw/` while keeping provenance 
 ## 4. Structure: Flat Wiki and Cognitive Domains
 
 - **Flat wiki discipline**: `wiki/` has no subfolders (gate 2 `WIKI_NESTING_DISALLOWED`). When a user asks for `wiki/cs182/week2/note.md`, don't silently flatten it: explain that topology here is editorial, then offer `wiki/{stem}.md` anchored into a topical MOC or, if the hierarchy matters to external tooling, a top-level cognitive domain such as `cs182/week2/note.md`. Existing notes move there with `vault_move_note`.
-- **Domain manifests**: A domain's rules live in `{domain}/AGENTS.md`, which is user-owned: propose it and write it only after the user agrees.
+- **Domain manifests**: A domain's rules live in `{domain}/AGENTS.md`, which is user-owned: propose it and write it only after the user agrees. A manifest is a plain file, not a note: write it with a file tool, and if you have none, give the user the contents to save. Write the domain's conventions — layout, types, naming, verification boundaries — not tool calls; how to call a tool lives in its description, and a manifest is never refreshed when the tools change.
   ```yaml
   ---
   description: "Human-readable description of the domain's purpose"
