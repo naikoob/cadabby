@@ -965,6 +965,7 @@ cadabby/
 ├── SPECIFICATION.md            # This document
 ├── .github/workflows/tests.yml    # unittest on Python 3.11 / 3.12 / 3.13; gates publish
 ├── .github/workflows/publish.yml  # Tag push (v*) -> tests -> PyPI trusted publishing
+├── .agents/skills/release/        # Maintainer release runbook (SKILL.md, scripts/gh_run_status.py)
 │
 ├── src/
 │   └── cadabby/

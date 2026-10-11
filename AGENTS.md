@@ -174,14 +174,11 @@ Cadabby maintains an automated traceability contract between [`SPECIFICATION.md`
    - Every test method cited in the table must exist in `tests/`.
    - Every `§` section reference throughout `SPECIFICATION.md` must resolve to an existing heading.
    - All criteria must have verified test citations (zero undeclared gaps).
-3. **Version String Parity**:
-   Whenever the package version changes:
-   - `src/cadabby/__init__.py` (`__version__ = "X.Y.Z"`)
-   - `pyproject.toml` (`version = "X.Y.Z"`)
-   - `SPECIFICATION.md` (`Version: X.Y.Z`)
-   - `src/cadabby/assets/plugins/cadabby/plugin.json` (`"version": "X.Y.Z"`)
-   - `uv.lock`
-   All must stay strictly in sync.
+3. **Version String Parity & Releasing**:
+   The version is held in several files (`__init__.py`, `pyproject.toml`, `plugin.json`, three
+   markers in `SPECIFICATION.md`, one in this file, and `uv.lock`); `test_every_version_string_in_the_repo_agrees`
+   fails on any drift except `uv.lock`. The full marker table and the release procedure (bump, readiness
+   checks, CI gate, annotated tag, PyPI verification) live in [`.agents/skills/release/SKILL.md`](.agents/skills/release/SKILL.md).
 
 ---
 
