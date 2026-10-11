@@ -41,12 +41,12 @@ class TestVaultCache(unittest.TestCase):
         cur = conn.execute("SELECT cid, trust_tier, status FROM notes WHERE layer = 'wiki' ORDER BY cid;")
         rows = {r["cid"]: (r["trust_tier"], r["status"]) for r in cur.fetchall()}
 
-        self.assertEqual(rows["wiki/Epistemic-Trust-Tiers"], ("human-reviewed", "active"))
-        self.assertEqual(rows["wiki/SQLite"], ("machine-confirmed", "evergreen"))
-        self.assertEqual(rows["wiki/Flash-Attention"], ("unverified", "active"))
-        self.assertEqual(rows["wiki/SQLite-vs-DuckDB"], ("unverified", "deprecated"))
-        self.assertEqual(rows["wiki/AI-Systems-MOC"], ("unverified", "active"))
-        self.assertEqual(rows["wiki/Storage-MOC"], ("unverified", "active"))
+        self.assertEqual(rows["wiki/epistemic-trust-tiers"], ("human-reviewed", "active"))
+        self.assertEqual(rows["wiki/sqlite"], ("machine-confirmed", "evergreen"))
+        self.assertEqual(rows["wiki/flash-attention"], ("unverified", "active"))
+        self.assertEqual(rows["wiki/sqlite-vs-duckdb"], ("unverified", "deprecated"))
+        self.assertEqual(rows["wiki/ai-systems-moc"], ("unverified", "active"))
+        self.assertEqual(rows["wiki/storage-moc"], ("unverified", "active"))
 
         # Verify FTS5 integrity
         self.assertTrue(self.cache.check_fts_integrity())
@@ -83,7 +83,7 @@ class TestVaultCache(unittest.TestCase):
         self.assertEqual(cur.fetchone()[0], 1)
 
         # Delete note file from disk
-        note_path = self.vault.wiki_dir / "SQLite-vs-DuckDB.md"
+        note_path = self.vault.wiki_dir / "sqlite-vs-duckdb.md"
         note_path.unlink()
 
         # Next scan must reconcile deletion
@@ -102,18 +102,18 @@ class TestVaultCache(unittest.TestCase):
         conn = self.cache.get_connection()
 
         # Initial state: human-reviewed
-        cur = conn.execute("SELECT trust_tier FROM notes WHERE cid = 'wiki/Epistemic-Trust-Tiers';")
+        cur = conn.execute("SELECT trust_tier FROM notes WHERE cid = 'wiki/epistemic-trust-tiers';")
         self.assertEqual(cur.fetchone()[0], "human-reviewed")
 
         # Edit note body on disk without updating 'of:' hash
-        note_path = self.vault.wiki_dir / "Epistemic-Trust-Tiers.md"
+        note_path = self.vault.wiki_dir / "epistemic-trust-tiers.md"
         content = note_path.read_text("utf-8")
         modified = content + "\n\nExtra drifted paragraph added by an agent."
         note_path.write_text(modified, "utf-8")
 
         # Scan should re-index and detect content drift
         self.cache.scan()
-        cur = conn.execute("SELECT trust_tier FROM notes WHERE cid = 'wiki/Epistemic-Trust-Tiers';")
+        cur = conn.execute("SELECT trust_tier FROM notes WHERE cid = 'wiki/epistemic-trust-tiers';")
         self.assertEqual(cur.fetchone()[0], "stale-verified")
 
     def _drift(self, stem):
@@ -130,11 +130,11 @@ class TestVaultCache(unittest.TestCase):
         self.cache.scan()
         self.assertEqual(self.cache.get_status()["verification_debt"], 0)
 
-        self._drift("Epistemic-Trust-Tiers")
+        self._drift("epistemic-trust-tiers")
         self.cache.scan()
         self.assertEqual(self.cache.get_status()["verification_debt"], 1)
 
-        self._drift("SQLite")
+        self._drift("sqlite")
         self.cache.scan()
         self.assertEqual(self.cache.get_status()["verification_debt"], 2)
 
@@ -148,8 +148,8 @@ class TestVaultCache(unittest.TestCase):
         moves, because a status count that disagrees with the file the user
         is looking at is worse than either number alone.
         """
-        self._drift("Epistemic-Trust-Tiers")
-        self._drift("SQLite")
+        self._drift("epistemic-trust-tiers")
+        self._drift("sqlite")
         self.cache.scan()
 
         reported = generate_index_markdown(self.vault, cache=self.cache)
@@ -163,15 +163,15 @@ class TestVaultCache(unittest.TestCase):
         self.cache.scan()
         results = self.cache.search("SQLite")
 
-        # Both 'wiki/SQLite' and 'wiki/SQLite-vs-DuckDB' match 'SQLite'
-        # 'wiki/SQLite' is machine-confirmed (1.2x) and evergreen (1.0x)
-        # 'wiki/SQLite-vs-DuckDB' is deprecated (0.4x penalty)
+        # Both 'wiki/sqlite' and 'wiki/sqlite-vs-duckdb' match 'SQLite'
+        # 'wiki/sqlite' is machine-confirmed (1.2x) and evergreen (1.0x)
+        # 'wiki/sqlite-vs-duckdb' is deprecated (0.4x penalty)
         cids = [r.cid for r in results]
-        self.assertIn("wiki/SQLite", cids)
-        self.assertIn("wiki/SQLite-vs-DuckDB", cids)
+        self.assertIn("wiki/sqlite", cids)
+        self.assertIn("wiki/sqlite-vs-duckdb", cids)
 
-        sqlite_res = next(r for r in results if r.cid == "wiki/SQLite")
-        duckdb_res = next(r for r in results if r.cid == "wiki/SQLite-vs-DuckDB")
+        sqlite_res = next(r for r in results if r.cid == "wiki/sqlite")
+        duckdb_res = next(r for r in results if r.cid == "wiki/sqlite-vs-duckdb")
 
         # Positive normalized score
         self.assertGreater(sqlite_res.score, 0)
@@ -190,14 +190,14 @@ class TestVaultCache(unittest.TestCase):
         results = self.cache.search("SQLite")
         by_cid = {r.cid: r for r in results}
 
-        self.assertGreaterEqual(by_cid["wiki/SQLite"].score, 0.35)
+        self.assertGreaterEqual(by_cid["wiki/sqlite"].score, 0.35)
         self.assertGreaterEqual(min(r.score for r in results), 0.05)
 
-        # 'Flash' hits 3 of 6 notes (>=50%): wiki/Flash-Attention (title + body,
-        # unverified 1.0x -> 0.25) must outrank wiki/Epistemic-Trust-Tiers
+        # 'Flash' hits 3 of 6 notes (>=50%): wiki/flash-attention (title + body,
+        # unverified 1.0x -> 0.25) must outrank wiki/epistemic-trust-tiers
         # (body-only mention, human-reviewed 2.0x -> 0.10).
         flash_results = self.cache.search("Flash")
-        self.assertEqual(flash_results[0].cid, "wiki/Flash-Attention")
+        self.assertEqual(flash_results[0].cid, "wiki/flash-attention")
         self.assertGreater(flash_results[0].score, flash_results[1].score)
 
     def test_search_tag_filtering(self):
@@ -206,7 +206,7 @@ class TestVaultCache(unittest.TestCase):
         # Search matching tag
         results = self.cache.search("SQLite", tag="database")
         cids = [r.cid for r in results]
-        self.assertIn("wiki/SQLite", cids)
+        self.assertIn("wiki/sqlite", cids)
 
         # Search non-matching tag
         results_none = self.cache.search("SQLite", tag="nonexistent-tag")
@@ -223,11 +223,11 @@ class TestVaultCache(unittest.TestCase):
         self.cache.scan()
 
         # Stored tags are canonically lowercase, so the probe is folded to match.
-        self.assertIn("wiki/SQLite", [r.cid for r in self.cache.search("SQLite", tag="DataBase")])
+        self.assertIn("wiki/sqlite", [r.cid for r in self.cache.search("SQLite", tag="DataBase")])
 
         # A prefix of a hyphenated tag is not a match: the demo note carries
         # 'c-library', and a substring probe must not satisfy the filter.
-        self.assertIn("wiki/SQLite", [r.cid for r in self.cache.search("SQLite", tag="c-library")])
+        self.assertIn("wiki/sqlite", [r.cid for r in self.cache.search("SQLite", tag="c-library")])
         self.assertEqual(self.cache.search("SQLite", tag="library"), [])
 
     def test_sanitize_fts5_query(self):
@@ -284,13 +284,13 @@ class TestVaultCache(unittest.TestCase):
         )
         self.cache.scan()
 
-        # "SQLite" is in wiki/SQLite and wiki/SQLite-vs-DuckDB; "nonexistent_xyz_token"
+        # "SQLite" is in wiki/sqlite and wiki/sqlite-vs-duckdb; "nonexistent_xyz_token"
         # is nowhere in the vault. Implicit AND returns 0 rows, so search() falls back
         # to OR and still surfaces the SQLite notes.
         fallback_hits = self.cache.search("SQLite nonexistent_xyz_token")
         self.assertGreater(len(fallback_hits), 0)
         cids = [r.cid for r in fallback_hits]
-        self.assertIn("wiki/SQLite", cids)
+        self.assertIn("wiki/sqlite", cids)
 
         # When the caller supplies an explicit AND, no OR fallback runs and 0 rows return.
         explicit_and_hits = self.cache.search("SQLite AND nonexistent_xyz_token")
@@ -337,7 +337,7 @@ class TestVaultCache(unittest.TestCase):
         # Hyphenated searches must not throw sqlite3.OperationalError
         results_hyphen = self.cache.search("SQLite-vs-DuckDB")
         self.assertGreater(len(results_hyphen), 0)
-        self.assertEqual(results_hyphen[0].cid, "wiki/SQLite-vs-DuckDB")
+        self.assertEqual(results_hyphen[0].cid, "wiki/sqlite-vs-duckdb")
 
         # Hyphenated phrase queries
         results_btree = self.cache.search("LSM B-tree write heavy")
@@ -352,11 +352,11 @@ class TestVaultCache(unittest.TestCase):
         resolver = self.cache.get_link_resolver()
 
         # Bare stem
-        self.assertEqual(resolver.resolve("SQLite"), "wiki/SQLite")
-        self.assertEqual(resolver.resolve("Flash-Attention"), "wiki/Flash-Attention")
+        self.assertEqual(resolver.resolve("sqlite"), "wiki/sqlite")
+        self.assertEqual(resolver.resolve("flash-attention"), "wiki/flash-attention")
 
         # Exact CID
-        self.assertEqual(resolver.resolve("wiki/Flash-Attention"), "wiki/Flash-Attention")
+        self.assertEqual(resolver.resolve("wiki/flash-attention"), "wiki/flash-attention")
 
         # Nonexistent
         self.assertIsNone(resolver.resolve("NonExistentStem"))

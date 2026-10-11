@@ -261,7 +261,7 @@ class TestCli(unittest.TestCase):
             cmd_verify(args_verify)
 
     def _verify_args(self, vault_root: Path, *, human: bool) -> DummyArgs:
-        return DummyArgs(vault=str(vault_root), cid="wiki/SQLite", human=human, agent=None, method=None)
+        return DummyArgs(vault=str(vault_root), cid="wiki/sqlite", human=human, agent=None, method=None)
 
     def _run_verify_on_tty(self, args: DummyArgs, answer: str) -> tuple[int, str]:
         out = io.StringIO()
@@ -282,7 +282,7 @@ class TestCli(unittest.TestCase):
         # §5.3: agents run shell commands in pseudo-terminals, so a TTY is no
         # evidence of a human. Only the explicit flag reaches the human tier.
         vault_root = copy_demo_vault(self.dir / "flagless-vault")
-        note = vault_root / "wiki" / "SQLite.md"
+        note = vault_root / "wiki" / "sqlite.md"
         humans_before = note.read_text("utf-8").count("human:")
         code, out = self._run_verify_on_tty(self._verify_args(vault_root, human=False), answer="")
         self.assertEqual(code, 0)
@@ -297,12 +297,12 @@ class TestCli(unittest.TestCase):
         code, out = self._run_verify_on_tty(self._verify_args(vault_root, human=True), answer="ab12")
         self.assertEqual(code, 0)
         self.assertEqual(self.last_prompt_count, 1)
-        self.assertIn("wiki/SQLite", out)
+        self.assertIn("wiki/sqlite", out)
         self.assertIn("'human:", out)
 
     def test_human_verify_wrong_token_writes_nothing(self):
         vault_root = copy_demo_vault(self.dir / "wrong-token-vault")
-        note = vault_root / "wiki" / "SQLite.md"
+        note = vault_root / "wiki" / "sqlite.md"
         before = note.read_bytes()
         for answer in ("y", "yes", ""):
             with self.subTest(answer=answer):
@@ -940,7 +940,7 @@ class TestStatusAndMoveCommands(unittest.TestCase):
     def test_status_json_carries_the_same_finding_counts_as_mcp(self):
         """§10 C46. On a vault with one dead link, CLI and MCP report the same non-zero counts."""
         (self.vault_root / "wiki" / "Dead-Linker.md").write_text(
-            "---\ntype: concept\ntitle: Dead Linker\ndescription: d\nstatus: active\n---\n[[Nowhere]] [[SQLite]]\n", "utf-8"
+            "---\ntype: concept\ntitle: Dead Linker\ndescription: d\nstatus: active\n---\n[[Nowhere]] [[sqlite]]\n", "utf-8"
         )
         code, out = self._run(cmd_status, json=True)
         self.assertEqual(code, 0)
@@ -952,33 +952,33 @@ class TestStatusAndMoveCommands(unittest.TestCase):
         self.assertEqual(json.loads(res["content"][0]["text"])["finding_counts"], cli_counts)
 
     def test_move_dry_run_refusal_and_approved_apply(self):
-        common = {"cid": "wiki/Flash-Attention", "to": "flash-attention", "actor": None, "json": False}
+        common = {"cid": "wiki/flash-attention", "to": "fa-tiling", "actor": None, "json": False}
         code, out = self._run(cmd_move, apply=False, approve_stale=None, **common)
         self.assertEqual(code, 0)
         self.assertIn("BLOCKED", out)
-        self.assertTrue((self.vault_root / "wiki" / "Flash-Attention.md").exists())
+        self.assertTrue((self.vault_root / "wiki" / "flash-attention.md").exists())
 
         with self.assertRaises(ValueError) as ctx:
             self._run(cmd_move, apply=True, approve_stale=None, **common)
         self.assertEqual(exit_code_for(classify(ctx.exception).code), EXIT_ENVIRONMENT)
 
-        code, out = self._run(cmd_move, apply=False, approve_stale=["wiki/Epistemic-Trust-Tiers"], **common)
+        code, out = self._run(cmd_move, apply=False, approve_stale=["wiki/epistemic-trust-tiers"], **common)
         token = out.rsplit("--plan-token ", 1)[1].split()[0]
         code, out = self._run(
-            cmd_move, apply=True, approve_stale=["wiki/Epistemic-Trust-Tiers"], plan_token=token, **common
+            cmd_move, apply=True, approve_stale=["wiki/epistemic-trust-tiers"], plan_token=token, **common
         )
         self.assertEqual(code, 0)
-        self.assertIn("Moved wiki/Flash-Attention -> wiki/flash-attention", out)
-        self.assertIn("flash-attention.md", {p.name for p in (self.vault_root / "wiki").glob("*.md")})
+        self.assertIn("Moved wiki/flash-attention -> wiki/fa-tiling", out)
+        self.assertIn("fa-tiling.md", {p.name for p in (self.vault_root / "wiki").glob("*.md")})
 
     def test_move_json_dry_run_reports_blockers_tiers_and_token(self):
-        code, out = self._run(cmd_move, cid="wiki/Flash-Attention", to="fa", apply=False, approve_stale=None, actor=None, json=True)
+        code, out = self._run(cmd_move, cid="wiki/flash-attention", to="fa", apply=False, approve_stale=None, actor=None, json=True)
         self.assertEqual(code, 0)
         plan = json.loads(out)
         self.assertFalse(plan["applied"])
-        self.assertTrue(any("Epistemic-Trust-Tiers" in b for b in plan["blocked"]))
+        self.assertTrue(any("epistemic-trust-tiers" in b for b in plan["blocked"]))
         tiers = {n["cid"]: n["tier_after"] for n in plan["notes"]}
-        self.assertEqual(tiers["wiki/Epistemic-Trust-Tiers"], "stale-verified")
+        self.assertEqual(tiers["wiki/epistemic-trust-tiers"], "stale-verified")
         self.assertEqual(len(plan["plan_token"]), 32)
 
     def test_move_parser_takes_one_approval_per_flag(self):
@@ -998,7 +998,7 @@ class TestStatusAndMoveCommands(unittest.TestCase):
 
     def test_verify_human_resolves_stems_and_wikilinks_before_prompting(self):
         """§5.1. `cadabby verify <name> --human` shows the canonical note before asking for the token."""
-        for cid in ("SQLite", "[[SQLite]]"):
+        for cid in ("sqlite", "[[sqlite]]"):
             with (
                 self.subTest(cid=cid),
                 unittest.mock.patch("sys.stdin.isatty", return_value=True),
@@ -1007,7 +1007,7 @@ class TestStatusAndMoveCommands(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(ValueError, "Aborted: confirmation token did not match"):
                     cmd_verify(DummyArgs(vault=str(self.vault_root), cid=cid, human=True, agent=None, method=None))
-            self.assertIn("cid:  wiki/SQLite", out.getvalue())
+            self.assertIn("cid:  wiki/sqlite", out.getvalue())
 
     def test_verify_human_refuses_an_ambiguous_name_before_prompting(self):
         for rel in ("customers/acme/README.md", "projects/apollo/README.md"):

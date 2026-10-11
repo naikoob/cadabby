@@ -17,4 +17,4 @@ generated:
 
 FlashAttention is an IO-aware exact attention algorithm that uses tiling to reduce the number of memory reads and writes between GPU high bandwidth memory (HBM) and on-chip SRAM.
 
-Related concepts include KV cache optimizations and [[SQLite]] storage for activations.
+Related concepts include KV cache optimizations and [[sqlite]] storage for activations.

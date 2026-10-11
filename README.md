@@ -112,8 +112,8 @@ my-vault/
 ├── raw/                  # Ground truth sources (PDFs, raw text, research papers)
 │
 ├── wiki/                 # Flat canonical knowledge domain (strictly wiki/*.md)
-│   ├── Architecture.md   # Concepts, entities, syntheses (typed via frontmatter)
-│   └── Systems-MOC.md    # Maps of Content (type: moc) governing vault topology
+│   ├── architecture.md   # Concepts, entities, syntheses (typed via frontmatter)
+│   └── systems-moc.md    # Maps of Content (type: moc) governing vault topology
 │
 ├── customers/            # (Optional) Cognitive domain with autonomous AGENTS.md
 │   ├── AGENTS.md         # Domain constitution & schema rules
@@ -162,19 +162,19 @@ my-vault/
    The agent will:
    - Call `vault_search` to check if related concepts already exist.
    - Call `vault_ground` to inspect existing notes and their 1-hop links.
-   - Call `vault_scaffold_note` to draft `wiki/Flash-Attention.md` citing `raw/attention-paper.pdf`.
-   - Add `[[wikilinks]]` to existing notes and suitable Maps of Content (`[[AI-Systems-MOC]]`).
+   - Call `vault_scaffold_note` to draft `wiki/flash-attention.md` citing `raw/attention-paper.pdf`.
+   - Add `[[wikilinks]]` to existing notes and suitable Maps of Content (`[[ai-systems-moc]]`).
    - Call `vault_verify_note` stamping the note with `agent:claude-code`.
    *(The `index.md` gap report and the `log.md` ledger are kept up to date implicitly; no manual sync needed).*
 
 ### Workflow C: Human Reading & Editing (Obsidian & CLI)
 
 1. Open `my-vault/` in **Obsidian**:
-   - Wikilinks `[[Note-Stem]]` resolve automatically across the flat wiki and nested cognitive domains.
+   - Wikilinks `[[note-stem]]` resolve automatically across the flat wiki and nested cognitive domains.
    - `index.md` acts as your gap report, while Maps of Content (`type: moc`) curate navigation topology.
    - The **core Templates plugin** works as-is. Cadabby reads `.obsidian/templates.json`, skips the folder it names so your templates are never mistaken for notes, and can scaffold from them:
      ```bash
-     cadabby scaffold "Flash-Attention" --type concept --desc "IO-aware attention" --template concept
+     cadabby scaffold "Flash Attention" --type concept --desc "IO-aware attention" --template concept
      ```
      The template's body is used with `{{title}}` substituted; its frontmatter is discarded, because OKF frontmatter is engine-owned. Foam's `.foam/templates/` needs no configuration.
    - To start from Cadabby's own note shape, scaffold the starters once:
@@ -185,7 +185,7 @@ my-vault/
 2. **Review and certify notes**:
    When a human inspects a note and certifies its accuracy:
    ```bash
-   cadabby verify wiki/Flash-Attention --human
+   cadabby verify wiki/flash-attention --human
    ```
    *This binds the attestation to the exact `sha256` of the note body and upgrades its trust tier to `human-reviewed` ($2.0\times$ search boost).*
 3. **If anyone edits the note body**:

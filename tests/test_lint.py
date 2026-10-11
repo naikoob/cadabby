@@ -52,12 +52,12 @@ class TestLint(unittest.TestCase):
         """
         (self.vault.wiki_dir / "Spaced-Tag.md").write_text(
             "---\ntype: concept\ntitle: Spaced Tag\ndescription: Has a bad tag\n"
-            "status: active\ntags:\n  - machine learning\n---\n# Spaced\n\n[[SQLite]]\n",
+            "status: active\ntags:\n  - machine learning\n---\n# Spaced\n\n[[sqlite]]\n",
             "utf-8",
         )
         (self.vault.wiki_dir / "Cased-Tag.md").write_text(
             "---\ntype: concept\ntitle: Cased Tag\ndescription: Has a shouty tag\n"
-            "status: active\ntags:\n  - Machine-Learning\n---\n# Cased\n\n[[SQLite]]\n",
+            "status: active\ntags:\n  - Machine-Learning\n---\n# Cased\n\n[[sqlite]]\n",
             "utf-8",
         )
 
@@ -141,7 +141,7 @@ class TestLint(unittest.TestCase):
 
     def test_gate3_dead_link_error(self):
         # Add a dead link to a note
-        note_file = self.vault.wiki_dir / "Epistemic-Trust-Tiers.md"
+        note_file = self.vault.wiki_dir / "epistemic-trust-tiers.md"
         content = note_file.read_text("utf-8") + "\n\nLink to [[Non-Existent-Target]]."
         note_file.write_text(content, "utf-8")
 
@@ -192,13 +192,13 @@ verified:
         """
         (self.vault.wiki_dir / "Bad-Generated-At.md").write_text(
             "---\ntype: concept\ntitle: Bad Generated\ndescription: Test\nstatus: active\n"
-            "generated:\n  at: 'last Tuesday'\n  by: agent:test\n---\n# Note\n\n[[SQLite]]\n",
+            "generated:\n  at: 'last Tuesday'\n  by: agent:test\n---\n# Note\n\n[[sqlite]]\n",
             "utf-8",
         )
         (self.vault.wiki_dir / "Bad-Verified-At.md").write_text(
             "---\ntype: concept\ntitle: Bad Verified\ndescription: Test\nstatus: active\n"
             "verified:\n  - by: agent:test\n    at: '03/10/2026'\n    of: 'sha256:0000'\n"
-            "---\n# Note\n\n[[SQLite]]\n",
+            "---\n# Note\n\n[[sqlite]]\n",
             "utf-8",
         )
 
@@ -215,25 +215,25 @@ verified:
         The gates share a branch, so a fixture that gets the target wrong
         exercises the wrong arm and still passes on the code alone.
         """
-        note = self.vault.wiki_dir / "Epistemic-Trust-Tiers.md"
+        note = self.vault.wiki_dir / "epistemic-trust-tiers.md"
         note.write_text(
-            note.read_text("utf-8") + "\n\nSee [[SQLite#No-Such-Heading]].\n",
+            note.read_text("utf-8") + "\n\nSee [[sqlite#No-Such-Heading]].\n",
             "utf-8",
         )
 
         findings = run_vault_lint(self.vault)
         anchors = [f for f in findings if f.code == "ANCHOR_MISSING"]
         self.assertEqual(len(anchors), 1)
-        self.assertEqual(anchors[0].rel_path, "wiki/Epistemic-Trust-Tiers.md")
+        self.assertEqual(anchors[0].rel_path, "wiki/epistemic-trust-tiers.md")
         self.assertEqual(anchors[0].severity, "warning")
         self.assertNotIn("LINK_DEAD", {f.code for f in findings})
 
     def test_gate3_anchor_that_exists_is_silent(self):
         """Pins the negative arm: otherwise 'always flag' passes the test above."""
-        target = self.vault.wiki_dir / "SQLite.md"
+        target = self.vault.wiki_dir / "sqlite.md"
         target.write_text(target.read_text("utf-8") + "\n\n## Storage Engine\n\nDetail.\n", "utf-8")
-        note = self.vault.wiki_dir / "Epistemic-Trust-Tiers.md"
-        note.write_text(note.read_text("utf-8") + "\n\nSee [[SQLite#Storage Engine]].\n", "utf-8")
+        note = self.vault.wiki_dir / "epistemic-trust-tiers.md"
+        note.write_text(note.read_text("utf-8") + "\n\nSee [[sqlite#Storage Engine]].\n", "utf-8")
 
         findings = run_vault_lint(self.vault)
         self.assertEqual([f for f in findings if f.code == "ANCHOR_MISSING"], [])
@@ -247,7 +247,7 @@ verified:
         (self.vault.wiki_dir / "Stale-Verified.md").write_text(
             "---\ntype: concept\ntitle: Stale Verified\ndescription: Test\nstatus: active\n"
             "verified:\n  - by: human:owner\n    at: '2026-01-01T00:00:00Z'\n"
-            "    of: 'sha256:deadbeef'\n---\n# Note\n\nBody has moved on. [[SQLite]]\n",
+            "    of: 'sha256:deadbeef'\n---\n# Note\n\nBody has moved on. [[sqlite]]\n",
             "utf-8",
         )
 
@@ -268,7 +268,7 @@ verified:
         """
         from cadabby.okf import compute_body_hash
 
-        body = "# Note\n\nUpdated prose. [[SQLite]]\n"
+        body = "# Note\n\nUpdated prose. [[sqlite]]\n"
         live_hash = compute_body_hash(body)
 
         # 1. Superseded agent entry + current human entry -> silent.
@@ -315,7 +315,7 @@ verified:
             "  - by: agent:first\n    at: '2026-01-01T00:00:00Z'\n    of: 'sha256:aaaa'\n"
             "  - by: human:owner\n    at: '2026-01-02T00:00:00Z'\n    of: 'sha256:bbbb'\n"
             "  - by: agent:second\n    at: '2026-01-03T00:00:00Z'\n    of: 'sha256:cccc'\n"
-            "---\n# Note\n\nBody has moved on. [[SQLite]]\n",
+            "---\n# Note\n\nBody has moved on. [[sqlite]]\n",
             "utf-8",
         )
         stale = [f for f in run_vault_lint(self.vault) if f.code == "VERIFICATION_STALE"]
@@ -328,7 +328,7 @@ verified:
         """§6.3 gate 6. An entry that fails ACTOR_MALFORMED is not counted a second time as VERIFICATION_STALE."""
         (self.vault.wiki_dir / "BadActor.md").write_text(
             "---\ntype: concept\ntitle: BadActor\ndescription: Desc\nstatus: active\n"
-            "verified:\n  - by: invalid-actor\n    at: '2026-01-01T00:00:00Z'\n    of: 'sha256:0000'\n---\n\n[[SQLite]]\n",
+            "verified:\n  - by: invalid-actor\n    at: '2026-01-01T00:00:00Z'\n    of: 'sha256:0000'\n---\n\n[[sqlite]]\n",
             "utf-8",
         )
         codes = [f.code for f in run_vault_lint(self.vault) if f.rel_path == "wiki/BadActor.md"]
@@ -337,7 +337,7 @@ verified:
     def test_gate6_non_mapping_entry_is_unbound_not_silent(self):
         """§4.5, §6.3. A scalar `verified:` entry makes the note debt, so gate 6 must say why."""
         (self.vault.wiki_dir / "Scalar-Entry.md").write_text(
-            "---\ntype: concept\ntitle: Scalar\ndescription: Desc\nstatus: active\nverified:\n  - human:x\n---\n\n[[SQLite]]\n",
+            "---\ntype: concept\ntitle: Scalar\ndescription: Desc\nstatus: active\nverified:\n  - human:x\n---\n\n[[sqlite]]\n",
             "utf-8",
         )
         findings = [f for f in run_vault_lint(self.vault) if f.rel_path == "wiki/Scalar-Entry.md"]
@@ -376,7 +376,7 @@ There are no links here.
             "```python\n"
             "# Fake Heading Inside Code\n"
             "```\n"
-            "[[SQLite]]\n",
+            "[[sqlite]]\n",
             "utf-8",
         )
         caller = self.vault.wiki_dir / "Caller-Note.md"
@@ -400,7 +400,7 @@ There are no links here.
             "  - raw\n"
             "  - AGENTS.md\n"
             "  - raw/../AGENTS.md\n"
-            "---\n# Bad Source\n\n[[SQLite]]\n",
+            "---\n# Bad Source\n\n[[sqlite]]\n",
             "utf-8",
         )
         findings = run_vault_lint(self.vault)
@@ -488,39 +488,39 @@ class TestLintTaxonomyIsClosed(unittest.TestCase):
         self._write("wiki/F-Unparseable.md", "---\ntags: [inline, list]\n---\n# Bad\n")
         self._write(
             "wiki/F-Field-Missing.md",
-            "---\ntype: concept\ntitle: No Description\nstatus: active\n---\n# Note\n\n[[SQLite]]\n",
+            "---\ntype: concept\ntitle: No Description\nstatus: active\n---\n# Note\n\n[[sqlite]]\n",
         )
-        self._write("wiki/F-Enum-Invalid.md", self._fm("Enum Invalid", status="nonexistent", body="[[SQLite]]"))
+        self._write("wiki/F-Enum-Invalid.md", self._fm("Enum Invalid", status="nonexistent", body="[[sqlite]]"))
         self._write(
             "wiki/F-Timestamp-Invalid.md",
-            self._fm("Timestamp Invalid", "generated:", "  at: 'last Tuesday'", "  by: agent:test", body="[[SQLite]]"),
+            self._fm("Timestamp Invalid", "generated:", "  at: 'last Tuesday'", "  by: agent:test", body="[[sqlite]]"),
         )
         # TAG_MALFORMED is the one code with two severities, so it needs two
         # notes: whitespace is unrepairable and errors, case is repaired on
         # the next agent write and only warns (§6.3 gate 1).
         self._write(
             "wiki/F-Tag-Malformed.md",
-            self._fm("Tag Malformed", "tags:", "  - machine learning", body="[[SQLite]]"),
+            self._fm("Tag Malformed", "tags:", "  - machine learning", body="[[sqlite]]"),
         )
         self._write(
             "wiki/F-Tag-Cased.md",
-            self._fm("Tag Cased", "tags:", "  - Machine-Learning", body="[[SQLite]]"),
+            self._fm("Tag Cased", "tags:", "  - Machine-Learning", body="[[sqlite]]"),
         )
         # A domain manifest whose contract cannot be honored (flow style).
         self._write("broken/AGENTS.md", "---\nallowed_types: [a, b]\n---\nDirectives.\n")
         # Gate 2 -- flat wiki.
-        self._write("wiki/nested/F-Nested.md", self._fm("Nested", body="[[SQLite]]"))
+        self._write("wiki/nested/F-Nested.md", self._fm("Nested", body="[[sqlite]]"))
         # Gate 3 -- links. Dead target vs live target with a bad anchor.
         self._write("wiki/F-Link-Dead.md", self._fm("Link Dead", body="[[Does-Not-Exist]]"))
-        self._write("wiki/F-Anchor-Missing.md", self._fm("Anchor Missing", body="[[SQLite#No-Such-Heading]]"))
+        self._write("wiki/F-Anchor-Missing.md", self._fm("Anchor Missing", body="[[sqlite#No-Such-Heading]]"))
         # Gate 4 -- provenance.
         self._write(
             "wiki/F-Source-Missing.md",
-            self._fm("Source Missing", "sources:", "  - raw/ghost.pdf", body="[[SQLite]]"),
+            self._fm("Source Missing", "sources:", "  - raw/ghost.pdf", body="[[sqlite]]"),
         )
         self._write(
             "wiki/F-Raw-Link-Broken.md",
-            self._fm("Raw Link Broken", body="[[SQLite]] [src](../../raw/ghost.md)"),
+            self._fm("Raw Link Broken", body="[[sqlite]] [src](../../raw/ghost.md)"),
         )
         # Gate 5 -- connectivity. No links in either direction.
         self._write("wiki/F-Orphan.md", self._fm("Orphan", body="Nothing links here and it links nowhere."))
@@ -533,7 +533,7 @@ class TestLintTaxonomyIsClosed(unittest.TestCase):
                 "  - by: no-prefix-actor",
                 "    at: '2026-01-01T00:00:00Z'",
                 "    of: 'sha256:0000'",
-                body="[[SQLite]]",
+                body="[[sqlite]]",
             ),
         )
         self._write(
@@ -543,7 +543,7 @@ class TestLintTaxonomyIsClosed(unittest.TestCase):
                 "verified:",
                 "  - by: agent:test",
                 "    at: '2026-01-01T00:00:00Z'",
-                body="[[SQLite]]",
+                body="[[sqlite]]",
             ),
         )
         self._write(
@@ -554,7 +554,7 @@ class TestLintTaxonomyIsClosed(unittest.TestCase):
                 "  - by: human:owner",
                 "    at: '2026-01-01T00:00:00Z'",
                 "    of: 'sha256:deadbeef'",
-                body="[[SQLite]]",
+                body="[[sqlite]]",
             ),
         )
 

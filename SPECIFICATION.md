@@ -147,19 +147,19 @@ my-vault/
 │   └── audio-transcript.txt
 │
 ├── wiki/                     # LAYER 2: Canonical Flat Wiki & Maps of Content (LLM Maintained)
-│   ├── Storage-MOC.md        # Maps of Content (MOC) hub notes
-│   ├── AI-Systems-MOC.md
-│   ├── Epistemic-Trust-Tiers.md
-│   ├── Flash-Attention.md
-│   ├── SQLite.md
-│   ├── Anthropic.md
-│   └── SQLite-vs-DuckDB.md
+│   ├── storage-moc.md        # Maps of Content (MOC) hub notes
+│   ├── ai-systems-moc.md
+│   ├── epistemic-trust-tiers.md
+│   ├── flash-attention.md
+│   ├── sqlite.md
+│   ├── anthropic.md
+│   └── sqlite-vs-duckdb.md
 │
 ├── customers/                # COGNITIVE DOMAIN: Self-governing customer accounts
 │   ├── AGENTS.md             # Domain manifest & localized AI agent directives
 │   └── acme-corp/
 │       ├── README.md         # Folder hub by domain convention — not engine-generated (§2.5)
-│       └── Q3-Review.md
+│       └── q3-review.md
 │
 └── projects/                 # COGNITIVE DOMAIN: Self-governing engineering projects
     ├── AGENTS.md             # Domain manifest & localized AI agent directives
@@ -234,7 +234,7 @@ Callers that want a narrower result set pass `domain` to `vault_search` (§5.1),
 Cadabby uses canonical CIDs to uniquely reference notes across all cognitive domains:
 
 * **Cognitive Domain Notes**: `rel_path` without file extension $\rightarrow$ `{domain}/{relative_stem}`.
-  - `wiki/Epistemic-Trust-Tiers.md` $\rightarrow$ `wiki/Epistemic-Trust-Tiers`
+  - `wiki/epistemic-trust-tiers.md` $\rightarrow$ `wiki/epistemic-trust-tiers`
   - `customers/acme-corp/README.md` $\rightarrow$ `customers/acme-corp/README`
   - `projects/apollo/rfc-001.md` $\rightarrow$ `projects/apollo/rfc-001`
 * **Raw Sources**: Retain their filename and extension verbatim.
@@ -442,9 +442,9 @@ FTS5 ships with most but not all CPython SQLite builds. On first connection Cada
 -- One row per tracked file. Covers wiki/ notes and raw/ sources alike.
 CREATE TABLE IF NOT EXISTS notes (
     id           INTEGER PRIMARY KEY,          -- FTS5 external-content rowid
-    cid          TEXT NOT NULL UNIQUE,         -- "wiki/Epistemic-Trust-Tiers"
-    rel_path     TEXT NOT NULL UNIQUE,         -- "wiki/Epistemic-Trust-Tiers.md"
-    stem         TEXT NOT NULL,                -- "Epistemic-Trust-Tiers"
+    cid          TEXT NOT NULL UNIQUE,         -- "wiki/epistemic-trust-tiers"
+    rel_path     TEXT NOT NULL UNIQUE,         -- "wiki/epistemic-trust-tiers.md"
+    stem         TEXT NOT NULL,                -- "epistemic-trust-tiers"
     layer        TEXT NOT NULL,                -- cognitive domain ("wiki", "customers", ...) | "raw"
 
     -- Invalidation
@@ -477,7 +477,7 @@ CREATE INDEX IF NOT EXISTS idx_notes_trust ON notes(trust_tier);
 CREATE TABLE IF NOT EXISTS links (
     id          INTEGER PRIMARY KEY,
     source_cid  TEXT NOT NULL,
-    target_raw  TEXT NOT NULL,                 -- "Flash-Attention#Tiling" exactly as written
+    target_raw  TEXT NOT NULL,                 -- "flash-attention#Tiling" exactly as written
     target_cid  TEXT,                          -- resolved; NULL = broken link
     alias       TEXT,                          -- "[[Note|alias]]" -> "alias"
     anchor      TEXT,                          -- "[[Note#heading]]" -> "heading"
@@ -1133,7 +1133,7 @@ A note on scope: the five-phase build order that used to open this section was r
 * **C46.** In a vault with one dead link, `vault_status` reports `finding_counts.error` of 1 with no `findings` and `isError: false`; with `lint: true` it adds the `LINK_DEAD` finding, still with `isError: false`. `cadabby status --json` reports the same counts, and calling `vault_lint` fails with `UNKNOWN_TOOL` whose message names `vault_status` with `lint: true`.
 * **C47.** Call `vault_update_note` with a `patch_frontmatter` that sets `verified` to a `human:*` entry: it fails with `HUMAN_ATTESTATION_REFUSED` and the file is unchanged. Patch `verified` to an agent entry, to `null`, or patch `generated`: each fails with `INVALID_ARGUMENT` and writes nothing.
 * **C48.** Give a note a list-valued `title`: `cadabby status` and every MCP tool still work, and lint reports `ENUM_INVALID` for it. `vault_scaffold_note` with a list `description` fails with `INVALID_ARGUMENT` and writes no file.
-* **C49.** With `customers/acme/README.md` and `projects/apollo/README.md` present, `vault_update_note`, `vault_verify_note` and `vault_move_note` on `README` each fail with `INVALID_ARGUMENT` naming both and change nothing, while each full path works. Name `wiki/Flash-Attention.md` as `wiki/flash-attention`: the tool acts on, and reports, `wiki/Flash-Attention`.
+* **C49.** With `customers/acme/README.md` and `projects/apollo/README.md` present, `vault_update_note`, `vault_verify_note` and `vault_move_note` on `README` each fail with `INVALID_ARGUMENT` naming both and change nothing, while each full path works. Name `wiki/flash-attention.md` as `wiki/Flash-Attention`: the tool acts on, and reports, `wiki/flash-attention`.
 * **C50.** Move a note while a referrer is edited between plan and apply, the referrer having frontmatter comments and CRLF line endings, into a folder that did not exist: every file the move wrote is restored byte for byte and the new folder is gone. Take a dry run's `plan_token`, add a link to the note, and apply with that token: it fails with `VAULT_CONFLICT` and writes nothing.
 * **C51.** Grep the `AGENTS.md` that `init` writes for a `vault_*` tool followed by `(`: there is none. Read the `tools/list` descriptions instead: `vault_search` says matching is lexical and that `raw/` needs `domain='raw'`, and `vault_move_note` says to show the user the plan before applying.
 * **C52.** Open the `AGENTS.md` that `init` writes: it names `.agents/skills/librarian/SKILL.md` and `.agents/skills/technician/SKILL.md`, and contains no domain-manifest example and no raw-citation `../` recipe. Open the librarian runbook: both are there.

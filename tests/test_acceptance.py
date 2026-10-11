@@ -150,17 +150,17 @@ class TestAcceptanceCriteria(unittest.TestCase):
         conn = cache.get_connection()
 
         # Starts as human-reviewed
-        cur = conn.execute("SELECT trust_tier FROM notes WHERE cid = 'wiki/Epistemic-Trust-Tiers';")
+        cur = conn.execute("SELECT trust_tier FROM notes WHERE cid = 'wiki/epistemic-trust-tiers';")
         self.assertEqual(cur.fetchone()[0], "human-reviewed")
 
         # Edit body
-        note_file = vault.wiki_dir / "Epistemic-Trust-Tiers.md"
+        note_file = vault.wiki_dir / "epistemic-trust-tiers.md"
         content = note_file.read_text("utf-8")
         note_file.write_text(content + "\n\nDrifted prose.", "utf-8")
 
         # Re-scan
         cache.scan()
-        cur = conn.execute("SELECT trust_tier FROM notes WHERE cid = 'wiki/Epistemic-Trust-Tiers';")
+        cur = conn.execute("SELECT trust_tier FROM notes WHERE cid = 'wiki/epistemic-trust-tiers';")
         self.assertEqual(cur.fetchone()[0], "stale-verified")
 
         # Check status verification debt count
@@ -176,14 +176,14 @@ class TestAcceptanceCriteria(unittest.TestCase):
         # Modify frontmatter only (add a tag and update description)
         update_note(
             vault=vault,
-            cid_or_path="wiki/Epistemic-Trust-Tiers",
+            cid_or_path="wiki/epistemic-trust-tiers",
             frontmatter_patch={"description": "Updated description without body touch"},
         )
 
         cache = VaultCache(vault)
         cache.scan()
         conn = cache.get_connection()
-        cur = conn.execute("SELECT trust_tier FROM notes WHERE cid = 'wiki/Epistemic-Trust-Tiers';")
+        cur = conn.execute("SELECT trust_tier FROM notes WHERE cid = 'wiki/epistemic-trust-tiers';")
         self.assertEqual(cur.fetchone()[0], "human-reviewed")
         cache.close()
 
@@ -196,8 +196,8 @@ class TestAcceptanceCriteria(unittest.TestCase):
         cache.scan()
 
         # Rename note on disk
-        old_path = vault.wiki_dir / "SQLite-vs-DuckDB.md"
-        new_path = vault.wiki_dir / "SQLite-Versus-DuckDB.md"
+        old_path = vault.wiki_dir / "sqlite-vs-duckdb.md"
+        new_path = vault.wiki_dir / "sqlite-versus-duckdb.md"
         old_path.rename(new_path)
 
         ins, _, deleted, _ = cache.scan()
@@ -206,9 +206,9 @@ class TestAcceptanceCriteria(unittest.TestCase):
 
         conn = cache.get_connection()
         # Verify old cid is completely gone
-        cur = conn.execute("SELECT COUNT(*) FROM notes WHERE cid = 'wiki/SQLite-vs-DuckDB';")
+        cur = conn.execute("SELECT COUNT(*) FROM notes WHERE cid = 'wiki/sqlite-vs-duckdb';")
         self.assertEqual(cur.fetchone()[0], 0)
-        cur = conn.execute("SELECT COUNT(*) FROM links WHERE source_cid = 'wiki/SQLite-vs-DuckDB';")
+        cur = conn.execute("SELECT COUNT(*) FROM links WHERE source_cid = 'wiki/sqlite-vs-duckdb';")
         self.assertEqual(cur.fetchone()[0], 0)
 
         # Verify FTS5 integrity check passes
@@ -220,15 +220,15 @@ class TestAcceptanceCriteria(unittest.TestCase):
         vault_dir = copy_demo_vault(self.root / "demo-vault")
         vault = Vault(vault_dir)
 
-        # Add identical keyword 'hyperparameter' to Epistemic-Trust-Tiers (human-reviewed) and Flash-Attention (unverified)
-        p1 = vault.wiki_dir / "Epistemic-Trust-Tiers.md"
-        p2 = vault.wiki_dir / "Flash-Attention.md"
+        # Add identical keyword 'hyperparameter' to epistemic-trust-tiers (human-reviewed) and flash-attention (unverified)
+        p1 = vault.wiki_dir / "epistemic-trust-tiers.md"
+        p2 = vault.wiki_dir / "flash-attention.md"
 
         p1.write_text(p1.read_text("utf-8") + "\n\nImportant hyperparameter tuning details.\n", "utf-8")
         p2.write_text(p2.read_text("utf-8") + "\n\nImportant hyperparameter tuning details.\n", "utf-8")
 
         # Re-verify p1 so it is human-reviewed with matching body hash
-        verify_note(vault, "wiki/Epistemic-Trust-Tiers", actor="human:tester", is_human_authorized=True)
+        verify_note(vault, "wiki/epistemic-trust-tiers", actor="human:tester", is_human_authorized=True)
 
         cache = VaultCache(vault)
         cache.scan()
@@ -238,7 +238,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         top = results[0]
         second = results[1]
 
-        self.assertEqual(top.cid, "wiki/Epistemic-Trust-Tiers")
+        self.assertEqual(top.cid, "wiki/epistemic-trust-tiers")
         self.assertEqual(top.trust_tier, "human-reviewed")
         self.assertGreater(top.score, second.score)
         cache.close()
@@ -263,13 +263,13 @@ class TestAcceptanceCriteria(unittest.TestCase):
         vault_dir = copy_demo_vault(self.root / "demo-vault")
         vault = Vault(vault_dir)
 
-        note_file = vault.wiki_dir / "Flash-Attention.md"
+        note_file = vault.wiki_dir / "flash-attention.md"
         original_content = note_file.read_text("utf-8")
 
         with self.assertRaises(VaultConflictError):
             update_note(
                 vault=vault,
-                cid_or_path="wiki/Flash-Attention",
+                cid_or_path="wiki/flash-attention",
                 frontmatter_patch={"status": "deprecated"},
                 expected_hash="sha256:0000000000000000000000000000000000000000000000000000000000000000",
             )
@@ -293,7 +293,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         # 1. Verification over MCP stamps agent:<clientInfo>
         res = server.handle_tools_call(
             "vault_verify_note",
-            {"cid": "wiki/Flash-Attention"},
+            {"cid": "wiki/flash-attention"},
         )
         self.assertFalse(res["isError"])
         self.assertIn("agent:claude-code", res["content"][0]["text"])
@@ -301,7 +301,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         # 2. Rejection of human:* over MCP (AC 12)
         res_actor = server.handle_tools_call(
             "vault_verify_note",
-            {"cid": "wiki/Flash-Attention", "actor": "human:attacker"},
+            {"cid": "wiki/flash-attention", "actor": "human:attacker"},
         )
         self.assertTrue(res_actor["isError"])
         refusal = json.loads(res_actor["content"][0]["text"])["error"]
@@ -313,7 +313,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
 
         res_by = server.handle_tools_call(
             "vault_verify_note",
-            {"cid": "wiki/Flash-Attention", "by": "human:attacker"},
+            {"cid": "wiki/flash-attention", "by": "human:attacker"},
         )
         self.assertTrue(res_by["isError"])
 
@@ -364,7 +364,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         self.assertFalse(search_out["isError"])
 
         # 2. Ground top hit
-        ground_out = server.handle_tools_call("vault_ground", {"cids": ["wiki/SQLite"]})
+        ground_out = server.handle_tools_call("vault_ground", {"cids": ["wiki/sqlite"]})
         self.assertFalse(ground_out["isError"])
 
         # 3. Scaffold new related synthesis
@@ -379,7 +379,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
                 "body": (
                     "# Embedded Vector Systems\n\n"
                     "Integrating local SQLite relational indexes with vector search.\n\n"
-                    "Connects directly with [[SQLite]] and [[Flash-Attention]].\n"
+                    "Connects directly with [[sqlite]] and [[flash-attention]].\n"
                 ),
             },
         )
@@ -579,9 +579,9 @@ class TestSpecVaultTree(unittest.TestCase):
         # Illustrative content the tree shows by example, not by contract.
         promised -= {
             "2026-paper-kv.pdf", "web-clip-article.md", "audio-transcript.txt",
-            "Storage-MOC.md", "AI-Systems-MOC.md", "Epistemic-Trust-Tiers.md",
-            "Flash-Attention.md", "SQLite.md", "Anthropic.md", "SQLite-vs-DuckDB.md",
-            "README.md", "Q3-Review.md", "2025.md", "cache.db",
+            "storage-moc.md", "ai-systems-moc.md", "epistemic-trust-tiers.md",
+            "flash-attention.md", "sqlite.md", "anthropic.md", "sqlite-vs-duckdb.md",
+            "README.md", "q3-review.md", "2025.md", "cache.db",
         }
         actual = {p.name for p in self.vault.rglob("*") if p.is_file()}
         self.assertEqual(promised - actual, set(), "§2's vault tree names files `init` never writes")
