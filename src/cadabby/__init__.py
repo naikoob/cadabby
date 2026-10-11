@@ -1,3 +1,3 @@
 """Cadabby: Zero-dependency engine for Karpathy-style LLM Wiki vaults with OKF trust tiers."""
 
-__version__ = "0.3.2"
+__version__ = "0.4.0"

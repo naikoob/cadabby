@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from cadabby.constants import ACTOR_PATTERN
-from cadabby.frontmatter import parse_frontmatter, serialize_frontmatter
+from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter, serialize_frontmatter
 from cadabby.okf import compute_body_hash, derive_trust_tier, is_valid_actor, utc_now_iso
 
 
@@ -100,6 +100,10 @@ class Note:
     frontmatter: dict[str, Any] = field(default_factory=dict)
     body: str = ""
     source_hash: str | None = field(default=None, repr=False, compare=False)
+    # The text this note was parsed from, if any. While frontmatter and body
+    # still equal what it parses to, serialize() returns it verbatim, so a
+    # rollback or a pure rename keeps comments, CRLF and quoting (§5.1, §8).
+    raw_text: str | None = field(default=None, repr=False, compare=False)
 
     @property
     def title(self) -> str:
@@ -220,7 +224,18 @@ class Note:
         return (attestation, self.trust_tier, False)
 
     def serialize(self) -> str:
-        """Serialize frontmatter and body into canonical OKF markdown text."""
+        """Serialize frontmatter and body into OKF markdown text.
+
+        An unchanged note returns the exact text it was read from; anything
+        else goes through the §3.2 writer.
+        """
+        if self.raw_text is not None:
+            try:
+                fm, body = parse_frontmatter(self.raw_text)
+            except FrontmatterParseError:
+                fm, body = None, None
+            if fm == self.frontmatter and body == self.body:
+                return self.raw_text
         return serialize_frontmatter(self.frontmatter, self.body)
 
     @classmethod
@@ -231,7 +246,7 @@ class Note:
         content it read; the adapter owns what "unchanged" means (§8).
         """
         fm, body = parse_frontmatter(raw_text)
-        return cls(cid=cid, rel_path=rel_path, frontmatter=fm, body=body, source_hash=source_hash)
+        return cls(cid=cid, rel_path=rel_path, frontmatter=fm, body=body, source_hash=source_hash, raw_text=raw_text)
 
 
 @dataclass

@@ -21,6 +21,7 @@ from cadabby.cli import (
     cmd_install,
     cmd_lint,
     cmd_log,
+    cmd_move,
     cmd_scaffold,
     cmd_search,
     cmd_status,
@@ -29,8 +30,8 @@ from cadabby.cli import (
     cmd_verify,
 )
 from cadabby.installer import mcp_launch_argv
-
-
+from cadabby.mcp import McpServer
+from cadabby.vault import Vault
 from tests.helpers import DummyArgs, copy_demo_vault
 
 
@@ -177,12 +178,12 @@ class TestCli(unittest.TestCase):
             actor="agent:cli-test",
         )
         self.assertEqual(cmd_scaffold(args_scaffold), 0)
-        self.assertTrue((vault_root / "wiki" / "Graph-Neural-Networks.md").exists())
+        self.assertTrue((vault_root / "wiki" / "graph-neural-networks.md").exists())
 
         # 6. Verify
         args_verify = DummyArgs(
             vault=str(vault_root),
-            cid="wiki/Graph-Neural-Networks",
+            cid="wiki/graph-neural-networks",
             method="automated-check",
             human=False,
             agent="agent:cli-test",
@@ -331,7 +332,7 @@ class TestCli(unittest.TestCase):
             cmd_update(
                 DummyArgs(
                     vault=str(vault_root),
-                    cid="wiki/Actor-Probe",
+                    cid="wiki/actor-probe",
                     patch_frontmatter=None,
                     append_section="Notes:more",
                     replace_section=None,
@@ -343,11 +344,11 @@ class TestCli(unittest.TestCase):
             cmd_log(DummyArgs(vault=str(vault_root), message="probe", actor=None))
             cmd_log(DummyArgs(vault=str(vault_root), message="explicit", actor="agent:me"))
 
-        note = (vault_root / "wiki" / "Actor-Probe.md").read_text("utf-8")
+        note = (vault_root / "wiki" / "actor-probe.md").read_text("utf-8")
         self.assertIn('by: "process:cli"', note)
         self.assertNotIn("human:", note)
         log = (vault_root / "log.md").read_text("utf-8")
-        for entry in ("Scaffolded wiki/Actor-Probe.md", "Updated wiki/Actor-Probe.md", "probe"):
+        for entry in ("Scaffolded wiki/actor-probe.md", "Updated wiki/actor-probe.md", "probe"):
             line = next(l for l in log.splitlines() if entry in l)
             self.assertIn("process:cli", line)
         self.assertIn("agent:me", next(l for l in log.splitlines() if "explicit" in l))
@@ -918,6 +919,105 @@ class TestGlobalInstallBindsOnlyWhenAsked(unittest.TestCase):
         self.assertEqual(code, 0)
         rendered = out.getvalue()
         self.assertIn("Filename-Only Raw (body not indexed): 2 (.pdf: 1, .pptx: 1)", rendered)
+
+
+class TestStatusAndMoveCommands(unittest.TestCase):
+    """`cadabby status` shares MCP's report builder; `cadabby move` mirrors `vault_move_note`."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.vault_root = copy_demo_vault(Path(self.tmp.name) / "demo-vault")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, fn, **kwargs):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = fn(DummyArgs(vault=str(self.vault_root), **kwargs))
+        return code, out.getvalue()
+
+    def test_status_json_carries_the_same_finding_counts_as_mcp(self):
+        """§10 C46. On a vault with one dead link, CLI and MCP report the same non-zero counts."""
+        (self.vault_root / "wiki" / "Dead-Linker.md").write_text(
+            "---\ntype: concept\ntitle: Dead Linker\ndescription: d\nstatus: active\n---\n[[Nowhere]] [[SQLite]]\n", "utf-8"
+        )
+        code, out = self._run(cmd_status, json=True)
+        self.assertEqual(code, 0)
+        cli_counts = json.loads(out)["finding_counts"]
+        self.assertEqual(cli_counts["error"], 1)
+        self.assertEqual(cli_counts["by_code"]["LINK_DEAD"], 1)
+        with McpServer(Vault(self.vault_root)) as server:
+            res = server.handle_tools_call("vault_status", {})
+        self.assertEqual(json.loads(res["content"][0]["text"])["finding_counts"], cli_counts)
+
+    def test_move_dry_run_refusal_and_approved_apply(self):
+        common = {"cid": "wiki/Flash-Attention", "to": "flash-attention", "actor": None, "json": False}
+        code, out = self._run(cmd_move, apply=False, approve_stale=None, **common)
+        self.assertEqual(code, 0)
+        self.assertIn("BLOCKED", out)
+        self.assertTrue((self.vault_root / "wiki" / "Flash-Attention.md").exists())
+
+        with self.assertRaises(ValueError) as ctx:
+            self._run(cmd_move, apply=True, approve_stale=None, **common)
+        self.assertEqual(exit_code_for(classify(ctx.exception).code), EXIT_ENVIRONMENT)
+
+        code, out = self._run(cmd_move, apply=False, approve_stale=["wiki/Epistemic-Trust-Tiers"], **common)
+        token = out.rsplit("--plan-token ", 1)[1].split()[0]
+        code, out = self._run(
+            cmd_move, apply=True, approve_stale=["wiki/Epistemic-Trust-Tiers"], plan_token=token, **common
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("Moved wiki/Flash-Attention -> wiki/flash-attention", out)
+        self.assertIn("flash-attention.md", {p.name for p in (self.vault_root / "wiki").glob("*.md")})
+
+    def test_move_json_dry_run_reports_blockers_tiers_and_token(self):
+        code, out = self._run(cmd_move, cid="wiki/Flash-Attention", to="fa", apply=False, approve_stale=None, actor=None, json=True)
+        self.assertEqual(code, 0)
+        plan = json.loads(out)
+        self.assertFalse(plan["applied"])
+        self.assertTrue(any("Epistemic-Trust-Tiers" in b for b in plan["blocked"]))
+        tiers = {n["cid"]: n["tier_after"] for n in plan["notes"]}
+        self.assertEqual(tiers["wiki/Epistemic-Trust-Tiers"], "stale-verified")
+        self.assertEqual(len(plan["plan_token"]), 32)
+
+    def test_move_parser_takes_one_approval_per_flag(self):
+        """§5.3. `--approve-stale` repeats; a value after the last one is a positional, never swallowed."""
+        parser = build_parser()
+        parsed = parser.parse_args(["move", "--approve-stale", "wiki/Ref1", "wiki/A", "wiki/B", "--approve-stale", "wiki/Ref2"])
+        self.assertEqual((parsed.cid, parsed.to), ("wiki/A", "wiki/B"))
+        self.assertEqual(parsed.approve_stale, ["wiki/Ref1", "wiki/Ref2"])
+        self.assertEqual(parser.parse_args(["move", "a", "b", "--plan-token", "t0"]).plan_token, "t0")
+
+    def test_counts_must_be_positive(self):
+        """§5.3. `--limit -1` and `--budget 0` are usage errors, not "unlimited"."""
+        for argv in (["search", "q", "--limit", "-1"], ["search", "q", "--limit", "x"], ["ground", "a", "--budget", "0"]):
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as ctx:
+                build_parser().parse_args(argv)
+            self.assertEqual(ctx.exception.code, EXIT_USAGE)
+
+    def test_verify_human_resolves_stems_and_wikilinks_before_prompting(self):
+        """§5.1. `cadabby verify <name> --human` shows the canonical note before asking for the token."""
+        for cid in ("SQLite", "[[SQLite]]"):
+            with (
+                self.subTest(cid=cid),
+                unittest.mock.patch("sys.stdin.isatty", return_value=True),
+                unittest.mock.patch("builtins.input", return_value="wrong-token"),
+                contextlib.redirect_stdout(io.StringIO()) as out,
+            ):
+                with self.assertRaisesRegex(ValueError, "Aborted: confirmation token did not match"):
+                    cmd_verify(DummyArgs(vault=str(self.vault_root), cid=cid, human=True, agent=None, method=None))
+            self.assertIn("cid:  wiki/SQLite", out.getvalue())
+
+    def test_verify_human_refuses_an_ambiguous_name_before_prompting(self):
+        for rel in ("customers/acme/README.md", "projects/apollo/README.md"):
+            (self.vault_root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.vault_root / rel).write_text("---\ntype: moc\ntitle: Hub\ndescription: d\nstatus: active\n---\n# Hub\n", "utf-8")
+        prompt = unittest.mock.Mock(return_value="x")
+        with unittest.mock.patch("sys.stdin.isatty", return_value=True), unittest.mock.patch("builtins.input", prompt):
+            with self.assertRaisesRegex(ValueError, "matches 2 notes"):
+                cmd_verify(DummyArgs(vault=str(self.vault_root), cid="README", human=True, agent=None, method=None))
+        prompt.assert_not_called()
 
 
 if __name__ == "__main__":

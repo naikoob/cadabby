@@ -108,6 +108,20 @@ class HumanAttestationRefusedError(CadabbyError):
     code = HUMAN_ATTESTATION_REFUSED
 
 
+class AmbiguousNoteError(ValueError):
+    """A note name matches more than one note, and a write must not guess (§5.1).
+
+    A ValueError, so it classifies as INVALID_ARGUMENT like any other input the
+    caller has to correct; `candidates` lists what the name could mean.
+    """
+
+    def __init__(self, name: str, candidates: list[str]) -> None:
+        self.candidates = candidates
+        super().__init__(
+            f"'{name}' matches {len(candidates)} notes ({', '.join(candidates)}); name one by its full path"
+        )
+
+
 # Builtins Cadabby raises directly, in resolution order. FileNotFoundError,
 # FileExistsError and PermissionError are all OSError subclasses, so OSError
 # must come last or it swallows them.

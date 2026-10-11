@@ -44,8 +44,8 @@ class TestMcpServer(unittest.TestCase):
             "vault_status",
             "vault_scaffold_note",
             "vault_update_note",
+            "vault_move_note",
             "vault_verify_note",
-            "vault_lint",
         ]
         self.assertEqual(len(tools_res["tools"]), 7)
         self.assertEqual(set(tool_names), set(expected))
@@ -118,20 +118,20 @@ class TestMcpServer(unittest.TestCase):
         res_immediate_search = self.server.handle_tools_call("vault_search", {"query": "Superposition"})
         self.assertFalse(res_immediate_search["isError"])
         search_hits = json.loads(res_immediate_search["content"][0]["text"])
-        self.assertTrue(any(h["cid"] == "wiki/Quantum-Computing" for h in search_hits))
+        self.assertTrue(any(h["cid"] == "wiki/quantum-computing" for h in search_hits))
 
         # Immediate ground must retrieve the newly scaffolded note
-        res_immediate_ground = self.server.handle_tools_call("vault_ground", {"cids": ["wiki/Quantum-Computing"]})
+        res_immediate_ground = self.server.handle_tools_call("vault_ground", {"cids": ["wiki/quantum-computing"]})
         self.assertFalse(res_immediate_ground["isError"])
         ground_hits = json.loads(res_immediate_ground["content"][0]["text"])
         self.assertEqual(len(ground_hits), 1)
-        self.assertEqual(ground_hits[0]["cid"], "wiki/Quantum-Computing")
+        self.assertEqual(ground_hits[0]["cid"], "wiki/quantum-computing")
 
         # Update note
         res_update = self.server.handle_tools_call(
             "vault_update_note",
             {
-                "cid": "wiki/Quantum-Computing",
+                "cid": "wiki/quantum-computing",
                 "append_section": ["Algorithms", "Shor's algorithm and Grover's algorithm."],
             },
         )
@@ -140,7 +140,7 @@ class TestMcpServer(unittest.TestCase):
         # Verify: should stamp agent-smith and bind hash
         res_verify = self.server.handle_tools_call(
             "vault_verify_note",
-            {"cid": "wiki/Quantum-Computing", "method": "automated-check"},
+            {"cid": "wiki/quantum-computing", "method": "automated-check"},
         )
         self.assertFalse(res_verify["isError"])
         self.assertIn("agent:agent-smith", res_verify["content"][0]["text"])
@@ -151,23 +151,51 @@ class TestMcpServer(unittest.TestCase):
         status_data = json.loads(res_status["content"][0]["text"])
         self.assertGreater(status_data["total_notes"], 0)
 
-        # Lint
-        res_lint = self.server.handle_tools_call("vault_lint", {})
+        # Status with lint findings (vault_lint folded in, §5.1)
+        res_lint = self.server.handle_tools_call("vault_status", {"lint": True})
         self.assertFalse(res_lint["isError"])
+        self.assertIn("findings", json.loads(res_lint["content"][0]["text"]))
+
+    def test_status_reports_finding_counts_and_findings_only_on_request(self):
+        """§10 C46. Findings describe the vault, not the call: never isError; vault_lint is gone."""
+        (self.vault_root / "wiki" / "Dead-Linker.md").write_text(
+            "---\ntype: concept\ntitle: Dead Linker\ndescription: d\nstatus: active\n---\n[[Nowhere]] [[SQLite]]\n",
+            "utf-8",
+        )
+        plain = self.server.handle_tools_call("vault_status", {})
+        self.assertFalse(plain["isError"])
+        report = json.loads(plain["content"][0]["text"])
+        self.assertEqual(report["finding_counts"]["error"], 1)
+        self.assertEqual(report["finding_counts"]["by_code"]["LINK_DEAD"], 1)
+        self.assertNotIn("findings", report)
+
+        full = self.server.handle_tools_call("vault_status", {"lint": True})
+        self.assertFalse(full["isError"])
+        codes = [f["code"] for f in json.loads(full["content"][0]["text"])["findings"]]
+        self.assertIn("LINK_DEAD", codes)
+
+        gone = self.server.handle_tools_call("vault_lint", {})
+        self.assertTrue(gone["isError"])
+        error = json.loads(gone["content"][0]["text"])["error"]
+        self.assertEqual(error["code"], "UNKNOWN_TOOL")
+        self.assertIn("vault_status with lint: true", error["message"])
+
+        never = json.loads(self.server.handle_tools_call("vault_nope", {})["content"][0]["text"])["error"]
+        self.assertEqual(never["message"], "Unknown tool: vault_nope")
 
     def test_persistent_cache_reuse_and_context_manager(self):
         # Cache connection is lazily opened or persistent
         conn_before = self.server.cache.get_connection()
         self.assertIsNotNone(conn_before)
 
-        # Invocations of search, status, and lint should reuse this exact connection
+        # Invocations of search and status (with and without lint) reuse this exact connection
         self.server.handle_tools_call("vault_search", {"query": "SQLite"})
         self.assertIs(self.server.cache.get_connection(), conn_before)
 
         self.server.handle_tools_call("vault_status", {})
         self.assertIs(self.server.cache.get_connection(), conn_before)
 
-        self.server.handle_tools_call("vault_lint", {})
+        self.server.handle_tools_call("vault_status", {"lint": True})
         self.assertIs(self.server.cache.get_connection(), conn_before)
 
         # Context manager lifecycle
@@ -399,6 +427,40 @@ class TestMcpServer(unittest.TestCase):
         )
         self.assertTrue(str_append["isError"])
         self.assertEqual(json.loads(str_append["content"][0]["text"])["error"]["code"], "INVALID_ARGUMENT")
+
+        # Every argument is checked against its inputSchema before dispatch (§5.1, §5.4):
+        # nothing is coerced, nothing mistyped reaches the engine or the disk.
+        (self.vault_root / "wiki" / "Movable.md").write_text(
+            "---\ntype: concept\ntitle: Movable\ndescription: d\nstatus: active\n---\n# Movable\n", "utf-8"
+        )
+        for tool, bad_args, message in (
+            ("vault_move_note", {"cid": "wiki/Movable", "to": "movable-x", "apply": "false"}, "'apply' must be a boolean"),
+            ("vault_move_note", {"cid": "wiki/Movable", "to": "movable-x", "approve_stale": ""}, "'approve_stale' must be an array"),
+            ("vault_move_note", {"cid": "wiki/Movable", "to": "movable-x", "approve_stale": [""]}, "'approve_stale[0]' must not be empty"),
+            ("vault_move_note", {"cid": "", "to": "movable-x"}, "'cid' must not be empty"),
+            ("vault_move_note", {"cid": "wiki/Movable", "to": 123}, "'to' must be a string"),
+            ("vault_status", {"lint": "false"}, "'lint' must be a boolean"),
+            ("vault_search", {"query": "x", "limit": True}, "'limit' must be an integer"),
+            ("vault_search", {"query": "x", "limit": 0}, "'limit' must be at least 1"),
+            ("vault_search", {"query": 5}, "'query' must be a string"),
+            ("vault_ground", {"cids": ["SQLite"], "budget_tokens": "50"}, "'budget_tokens' must be an integer"),
+            ("vault_scaffold_note", {"title": "T", "type": "concept", "description": "d", "domain": 5}, "'domain' must be a string"),
+            ("vault_scaffold_note", {"title": "T", "type": "concept", "description": "d", "tags": "a,b"}, "'tags' must be an array"),
+            ("vault_update_note", {"cid": "wiki/SQLite", "patch_frontmatter": "status: active"}, "'patch_frontmatter' must be an object"),
+            ("vault_update_note", {"cid": "wiki/SQLite", "edits": [{"op": "delete"}]}, "'edits[0].op' must be one of"),
+        ):
+            with self.subTest(tool=tool, bad_args=bad_args):
+                res = self.server.handle_tools_call(tool, bad_args)
+                self.assertTrue(res["isError"])
+                error = json.loads(res["content"][0]["text"])["error"]
+                self.assertEqual(error["code"], "INVALID_ARGUMENT")
+                self.assertIn(message, error["message"])
+        self.assertTrue((self.vault_root / "wiki" / "Movable.md").exists())
+        self.assertFalse((self.vault_root / "wiki" / "movable-x.md").exists())
+        self.assertFalse((self.vault_root / "5").exists())
+        # A JSON null means "not given", not a type error.
+        ok = self.server.handle_tools_call("vault_scaffold_note", {"title": "Nulls", "type": "concept", "description": "d", "path": None})
+        self.assertFalse(ok["isError"], ok)
 
 
 if __name__ == "__main__":

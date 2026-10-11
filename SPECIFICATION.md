@@ -1,6 +1,6 @@
 # Cadabby: Technical Specification
 
-**Version:** 0.3.2  
+**Version:** 0.4.0  
 **Status:** Approved Architecture (Multi-Domain Extended)  
 **Author:** Pair programmed with Antigravity  
 **Target Runtime:** CPython >= 3.11, standard library only
@@ -590,7 +590,7 @@ LIMIT :limit;
 Higher is better, unconditionally.
 
 * **Domain-Filtered Search**: If `:domain` is provided (e.g. `domain="projects"`), search queries are constrained strictly to that cognitive domain. If omitted (`:domain IS NULL`), search spans all non-raw cognitive domains (`layer != 'raw'`). `domain="raw"` is accepted and is the only way to reach unprocessed sources (§2.4); it switches the query to `raw_fts`, so raw results are ranked against other raw sources rather than against curated notes.
-* **Multi-Term `OR` Fallback on Zero Hits**: A sanitized query is evaluated first under FTS5's default implicit `AND`, so documents containing every term always win when at least one exists. When an implicit-`AND` query of two or more terms (with no explicit `AND`, `OR`, or `NOT` operators) matches zero rows, `search` re-runs the same query with the sanitized terms joined by `OR`; FTS5's `bm25()` sums across every matched term, so documents matching more of the query's terms naturally outrank single-term matches before epistemic multipliers apply.
+* **Multi-Term `OR` Fill**: A sanitized query is evaluated first under FTS5's default implicit `AND`, so documents containing every term always take the top slots. When an implicit-`AND` query of two or more distinct terms (with no explicit `AND`, `OR`, or `NOT` operators) returns fewer than `limit` rows, `search` re-runs it with the sanitized terms joined by `OR` and appends the new matches, deduplicated, until `limit` is reached. The result is therefore two tiers, each ordered by the same epistemic score: all-terms matches, then partial ones. FTS5's `bm25()` sums across matched terms, so a partial match covering more terms tends to score higher, but trust and status multipliers still apply, and a client must not re-sort the merged list by `score` or it loses the all-terms-first guarantee. Filling rather than only falling back on zero hits matters because one broad note that happens to mention every term (an account brief, a hub) would otherwise hide the focused notes that each explain one of them. `limit` is a count of at least 1; anything else is `INVALID_ARGUMENT`.
 * **Canonical Stem Resolution Priority**: In the link graph (`LinkTargetIndex`), known note CIDs are registered with `wiki/` stems first. A bare wikilink (`[[Architecture]]`) will always resolve to the canonical note in `wiki/Architecture` rather than an arbitrary domain note. Notes in custom domains can be linked unambiguously via qualified CID (e.g. `[[customers/acme/Account]]`) or scoped stem (`[[acme/Account]]`).
 * **Qualified Targets Never Fall Back to a Stem**: A wikilink target containing `/` (`[[apollo/Architecture]]`) resolves by exact CID or path suffix only. A typo in the path (`[[customers/acmee/README]]`) is `LINK_DEAD`, never silently resolved to some other note sharing the final stem.
 * **Markdown Note Links**: A relative inline Markdown link whose path ends in `.md` (`[Arch](../../wiki/Architecture.md#Storage)`, percent-encoded or `<angle-bracketed>` paths included) is a graph edge with `kind = 'markdown'`, carrying backlinks, gate 3 and gate 5 checks, and `index.md` reachability exactly as a wikilink does. It resolves by **exact path from the citing note's folder only** — never by stem, because a stem fallback would silently absorb the one-`../`-too-many mistakes the dead-link check exists to catch. Images, URLs, vault-absolute paths, same-note `#heading` jumps, code spans, paths with a `raw` segment (gate 4's citations), and targets that cannot be notes (root files such as `STYLE.md`, reserved or dot folders, `AGENTS.md` manifests, the declared template folder) are not edges. `[[Wikilinks]]` remain the form agents write, since they need no `../` depth; Markdown note links exist so vaults authored with Obsidian's Markdown link format, or published to renderers that do not understand wikilinks, stay checked.
@@ -617,6 +617,8 @@ The column weights (`title` 4.0, `description` 2.0, `body` 1.0, `tags` 1.5) and 
 * `broken_links`: link rows whose target does not resolve, the same set gate 3 reports as `LINK_DEAD` (§6.3).
 * `vault_name`, `root`, `integrity`: identification and the active integrity mode.
 
+`vault_status` and `cadabby status` both serve this through one builder that adds **`finding_counts`** — `{"error": n, "warning": m, "by_code": {...}}` from the six gates of §6.3 — on every call, and the `findings` list itself with `lint: true`. Every check therefore shows red or green without a second call, while the full list, which runs to hundreds on a neglected vault, is fetched only to repair. `broken_links` and `verification_debt` stay distinct from those counts on purpose: they count link rows and `stale-verified` notes, which need not match gate 6's warnings in either direction. Gate 6 also warns on a human attestation superseded only by an agent's, whose note is `machine-confirmed` and so is not debt; and a `stale-verified` note whose entries cannot bind at all (a malformed actor, a missing `of:`, an entry that is not a mapping) is debt reported as `ACTOR_MALFORMED` or `VERIFICATION_UNBOUND` rather than `VERIFICATION_STALE`. Every unit of debt has at least one gate 6 finding.
+
 ---
 
 ## 5. Cadabby Tool Surface (CLI & MCP)
@@ -631,11 +633,26 @@ To prevent cognitive tool dilution and LLM routing degradation, Cadabby preserve
 | :--- | :--- | :--- |
 | **`vault_search`** | Optional `domain` filter | FTS5 BM25 search across all cognitive domains (or filtered by `domain`), with trust boosting and filters (`type`, `status`, `trust`, `tag`, `domain`, `limit`). Returns cid, domain, title, description, trust tier, score, and snippet. |
 | **`vault_ground`** | Directives & domain injection | Retrieves full or budget-truncated markdown for cids, **plus each note's domain, localized agent directives (`directives`), forward links, backlinks, and sources**. Grounding automatically equips agents with domain-specific behavioral rules. |
-| **`vault_status`** | Domain counts breakdown | Epistemic health summary: note counts by tier, type, and domain (`domains: {...}`), verification debt (stale count), unprocessed and filename-only (`filename_only_raw`) `raw/` files, and broken links. |
-| **`vault_scaffold_note`** | `domain` and `path` parameters | Creates a note in `wiki/` or within a target cognitive domain (`domain`, optional `path`), with valid OKF frontmatter and `generated:` attribution. Validates against domain `allowed_types` if defined. Refuses to overwrite. |
-| **`vault_update_note`** | `edits` parameter | Non-destructive frontmatter patches and body edits across any domain note. `append_section` / `replace_section` address `##` headings; `edits` is an ordered list of `replace_text` (exact, unique match anywhere in the body, including the H1 and preamble above the first `##`; never the frontmatter), `replace_section`, and `append_section` operations applied atomically in one write with one ledger entry. If any operation fails, nothing is written. Never truncates unparseable files. |
+| **`vault_status`** | `lint` parameter | The vault health check (§4.5): note counts by tier, type, and domain, verification debt, unprocessed and filename-only `raw/` files, broken links, and `finding_counts` from the six gates of §6.3. `lint: true` adds every finding. Findings never set `isError` (§5.4). |
+| **`vault_scaffold_note`** | `domain` and `path` parameters | Creates a note in `wiki/` or within a target cognitive domain (`domain`, optional `path`), with valid OKF frontmatter and `generated:` attribution. Without `path` (an empty one counts as none), the file stem is the title in lowercase kebab-case; a `path` ending in `/` names a folder, and the stem again comes from the title. Validates against domain `allowed_types` if defined. Refuses to overwrite, including a note whose path differs only by letter case or that is reached through a symlinked folder, and refuses names links could not carry (below). |
+| **`vault_update_note`** | `edits` parameter | Non-destructive frontmatter patches and body edits across any domain note. `append_section` / `replace_section` address `##` headings; `edits` is an ordered list of `replace_text` (exact, unique match anywhere in the body, including the H1 and preamble above the first `##`; never the frontmatter), `replace_section`, and `append_section` operations applied atomically in one write with one ledger entry. If any operation fails, nothing is written. Never truncates unparseable files. `patch_frontmatter` may not touch the engine-owned `verified` and `generated` (a `human:*` entry is refused as `HUMAN_ATTESTATION_REFUSED`), nor give `title`, `description`, `type`, or `status` a non-string value. |
 | **`vault_verify_note`** | Unchanged | Appends a verification entry stamped `by: agent:<client_id>`, `at:` now, and `of:` the current body hash. Writing `human:*` over MCP is refused unconditionally. |
-| **`vault_lint`** | 6-gate domain evaluation | Runs the dynamic six gates of §6.3 across all cognitive domains and returns structured diagnostics so agents can self-heal output. |
+| **`vault_move_note`** | Any domain to any domain | Moves or renames a note and repoints every link to it, in one logged operation. A dry-run unless `apply: true`; both return the same plan, with a `plan_token` that an apply may pass back. `to` ending in `/` moves the note into that folder; a bare name renames it in place. Refuses what scaffold refuses at the destination. |
+
+**Naming an existing note.** `vault_update_note`, `vault_verify_note`, `vault_move_note` (and its `approve_stale` entries) and `cadabby verify --human` accept a CID, a vault-relative path, a bare stem, or a wikilink, and always act on a note the storage lists under its canonical CID. The exact path is tried first (so a filename containing `#` still resolves), then a unique letter-case-insensitive path, then the name read as a wikilink. A wiki-relative name is canonical as in §4.4; any other name matching more than one note — two domain `README` hubs — is refused as `INVALID_ARGUMENT` listing the candidates, never guessed. On a case-insensitive filesystem the storage would open either spelling, so acting on the caller's spelling instead of the listed one could, for a move, plan nothing and delete the real file.
+
+**Names links can carry.** Scaffold and move refuse a destination whose names contain `#`, `|`, `[`, `]`, `^`, `` ` ``, `<` or `>`, a folder or file name with leading or trailing whitespace, or a `raw` folder below a domain (Markdown links into it would read as gate 4 citations, §4.4). Each of these would leave the note unreachable by at least one link form.
+
+**Why status absorbed lint, and move took the slot.** Across the simulated user journeys, agents called `vault_status` and `vault_lint` back to back as one "check" step, a third of all tool calls between them, and the two read the same freshly scanned rows. A move, by contrast, was the one request every journey raised that no tool could carry out: agents either refused it or renamed files from the shell, which repoints no links and logs nothing.
+
+**Move semantics.** The plan is computed from every note as it is now, not from the cache, so it sees Obsidian edits made since the last scan:
+
+* **Minimal rewrites.** A link that opened the moved note is rewritten only if its text would no longer open it — to the shortest wikilink text that does, or the relative path from the citing note — because each rewrite changes a body and so unbinds that note's attestations (§3.4). A bare `[[stem]]` that still resolves after a move to another folder is left byte-identical. Only the target text changes; embed markers, anchors, aliases and escaped table pipes are preserved. Links in code are never touched. Every rewritten link is parsed back and must still be one link of its kind naming the same file (an embed of a dotted stem gains `.md`, so `![[v1.5]]` does not turn into an attachment); one that would not is a blocker.
+* **The moved note keeps its tier** when its body does not change: attestations bind to content, not to the path, and a pure rename writes its bytes unchanged. Its own relative paths — note links, `raw/` citations, image embeds and reference definitions — are recomputed from the new folder so they name the same files; reference definitions elsewhere that name the moved note follow it too.
+* **Refusals.** A plan is blocked while any other link would open a different note after the move (a note moved into `wiki/` taking over a bare `[[architecture]]` that opens `projects/apollo/architecture` today), while it would rewrite a `human-reviewed` note the caller has not named in `approve_stale` — the agent must ask the user first — or when `to` names an existing folder without a trailing `/`. A note whose frontmatter does not parse is checked from its raw text: it blocks only if it links to the moved note, and is otherwise reported under `warnings`. A dead link the move would bring to life is reported, not blocked.
+* **Apply.** If the dry run's `plan_token` is passed and the recomputed plan differs, nothing is written (`VAULT_CONFLICT`), so what the user approved is what is written. The destination is written first, so a crash leaves a duplicate rather than a lost note (a case-only rename retires the old spelling first, since on a case-insensitive filesystem both are one file). Every rewrite carries the concurrency token of what was read, and on a conflict every file already written is restored, byte for byte, from its own token, and folders the move created are removed, so a concurrent edit is never overwritten. One ledger entry records the move.
+
+**Arguments.** The MCP server checks every argument against the tool's `inputSchema` before running it — types, enums, `minimum`, non-empty strings, and array items — so a mistyped argument is `INVALID_ARGUMENT` and never reaches the vault; a JSON `null` means the argument was not given.
 
 **Deliberately not exposed to agents:** `sync` (implicit — see §4.3), `log` (a side effect of write tools), `graph` 2-hop traversal (folded into `ground` at 1 hop), `audit`, `init`, and `install` (operator actions).
 
@@ -655,13 +672,14 @@ Standard MCP clients (including Antigravity, Claude Code, and Inspector) query M
 | Command | Description |
 | :--- | :--- |
 | `cadabby init [path]` | Scaffolds a vault at `path` (default: current directory). Creates `.cadabby.json`, `.gitignore`, `.mcp.json`, `AGENTS.md`, pointer files, `.agents/skills/`, directory tree, seed `index.md`; `--obsidian`, `--obsidian-templates`. Refuses to overwrite existing files without `--force`. |
-| `cadabby search <query>` | As `vault_search`; `--domain`, `--type`, `--trust`, `--status`, `--tag`, `--limit`, `--json`. |
+| `cadabby search <query>` | As `vault_search`; `--domain`, `--type`, `--trust`, `--status`, `--tag`, `--limit` (at least 1), `--json`. |
 | `cadabby ground <cids...>` | As `vault_ground`; `--budget <tokens>`, `--json`. |
-| `cadabby status` | As `vault_status`; `--json`. |
+| `cadabby status` | As `vault_status` without the findings list; `--json`. |
 | `cadabby scaffold <title>` | As `vault_scaffold_note`; `--domain <domain>`, `--path <path>`, `--type <type>`, `--desc <desc>`, `--template <name>`. |
 | `cadabby update <path>` | As `vault_update_note`; `--patch-frontmatter`, `--append-section`, `--replace-section`, `--edits`, `--expected-hash`. Like `scaffold` and `log`, records `--actor` if given and `process:cli` otherwise; a terminal is never taken as evidence of a person. |
+| `cadabby move <cid> <to>` | As `vault_move_note`; prints the plan (and its `plan_token`) unless `--apply`; `--approve-stale <cid>` once per note, `--plan-token`, `--actor`, `--json`. A blocked `--apply` exits 3. |
 | `cadabby verify <path>` | Appends a verification entry. `--human` requires a TTY and stamps `human:<username>`; otherwise stamps `process:cli`. |
-| `cadabby lint` | Dynamic six gates across all domains; non-zero exit on error-severity findings, for CI. |
+| `cadabby lint` | Dynamic six gates across all domains; exit 1 on error-severity findings, for CI and pre-commit hooks. The MCP surface reaches the same findings through `vault_status` with `lint: true`. |
 | `cadabby sync` | Forces an incremental scan across all domains and unconditionally regenerates `index.md` (§4.3). `--rebuild` discards `cache.db` first. |
 | `cadabby log <msg>` | Appends a timestamped entry to `log.md`. |
 | `cadabby graph <note>` | 1-hop and 2-hop neighbors: backlinks, forward links, co-citations. |
@@ -681,8 +699,8 @@ A failure is useless to a caller that cannot tell what kind of failure it was. E
 | `FRONTMATTER_UNPARSEABLE` | no | A note's frontmatter falls outside the restricted subset (§3.2). | 3 |
 | `FRONTMATTER_UNSERIALIZABLE` | no | A patch value cannot be written inside the restricted subset. | 3 |
 | `NOT_FOUND` | no | A vault, note, or source that was addressed does not exist. | 3 |
-| `ALREADY_EXISTS` | no | A scaffold would overwrite an existing note. | 3 |
-| `INVALID_ARGUMENT` | no | An argument is absent, mistyped, or outside its enum. | 3 |
+| `ALREADY_EXISTS` | no | A scaffold or move would overwrite an existing note. | 3 |
+| `INVALID_ARGUMENT` | no | An argument is absent, mistyped, outside its enum, or names more than one note. | 3 |
 | `HUMAN_ATTESTATION_REFUSED` | no | `by: human:*` was requested over MCP (§3.4). | 3 |
 | `PERMISSION_DENIED` | no | The filesystem refused the operation. | 3 |
 | `UNKNOWN_TOOL` | no | A `tools/call` named a tool outside the seven (§5.1). | 2 |
@@ -693,7 +711,7 @@ A failure is useless to a caller that cannot tell what kind of failure it was. E
 
 **MCP.** Tool failures return `isError: true` with the content being a JSON object `{"error": {"code", "message", "retryable", "tool"}}`. The payload rides in the text content because MCP's tool-result channel has no typed error field — `isError` is a single boolean — so the structure has to go somewhere the caller can still parse. This is separate from the JSON-RPC protocol errors (`-32700` through `-32603`), which govern malformed envelopes rather than failed operations and are unchanged.
 
-One tool sets `isError` without failing: `vault_lint` returns `isError: true` when the vault has error-severity findings, mirroring the CLI's exit 1, and its content is then the findings list rather than an error object. An agent that branches on `isError` alone sees a red vault as a failed call, which is the intent; one that needs to tell the two apart checks for the `error` key.
+`isError` means the call failed, nothing else. Findings describe the vault, not the call, so `vault_status` never sets it however red the vault; an agent branches on `finding_counts.error`. The CLI deliberately differs: `cadabby lint` keeps exit 1 for error findings, because pre-commit hooks depend on it.
 
 **CLI.** Six exit statuses, because each calls for a different reaction from a script: `0` success, `1` the command ran and the vault has findings, `2` the command was invoked wrongly, `3` fix the input or the environment, `4` transient, retry, `5` unexpected. `1` keeps its existing meaning because pre-commit hooks already depend on it, and `2` is not reused for anything else because argparse owns it.
 
@@ -750,7 +768,7 @@ Ingestion enforces closed-world source grounding: every factual claim in a note 
 
 ### 6.3. Epistemic Linting Workflow
 
-`cadabby lint` / `vault_lint` executes six deterministic gates across all discovered cognitive domains, skipping `{domain}/AGENTS.md` manifests. Each finding carries a stable code, a severity (`error` | `warning`), a `rel_path`, and a line number where applicable:
+`cadabby lint` / `vault_status(lint: true)` executes six deterministic gates across all discovered cognitive domains, skipping `{domain}/AGENTS.md` manifests. Each finding carries a stable code, a severity (`error` | `warning`), a `rel_path`, and a line number where applicable:
 
 1. **Schema Integrity** — frontmatter parses within the §3.2 subset; required fields present (`title`, `description`, `status`, `type`); `status` within enum; timestamps RFC 3339; `tags` within the §3.1 grammar.
    - For `wiki/`, `type` supports open dynamic typing (`allowed_types: None` by default).
@@ -763,7 +781,7 @@ Ingestion enforces closed-world source grounding: every factual claim in a note 
 3. **Link Consistency** — every `[[Wikilink]]` and every relative Markdown note link (§4.4) resolves across all domains (`links.target_cid IS NOT NULL`). Wikilink alias and anchor forms are resolved against note CIDs and stems; Markdown note links by exact path, and a dead one names the relative path that would resolve when its stem identifies a note. Anchors of both kinds are additionally checked against target markdown headings, matching the heading text, its space/hyphen-normalized form, or its GitHub-style slug (`#b-tree-indexes-v2` for `## B-Tree Indexes (v2)`). Codes: `LINK_DEAD` (error), `ANCHOR_MISSING` (warning — the target resolves, so the note is reachable and only the jump is wrong).
 4. **Provenance Check** — every `sources:` entry must exist under `raw/` (`sources.resolved = 1`). Furthermore, if the note's domain manifest specifies `require_sources: true`, an empty or omitted `sources:` list is flagged as an error. Code: `SOURCE_MISSING`. In-body citations get the same check: a relative Markdown link outside a code span whose path contains a `raw` segment must resolve, from the citing note's folder, to a file under `raw/`. Wikilinks never reach it, URLs are skipped, and a `raw/` link is never a graph edge. When the last `raw` segment onward names a real file, the message suggests the correct relative path, since the usual fault is one `../` too many or too few. Code: `RAW_LINK_BROKEN` (error — the citation a reader follows is dead).
 5. **Graph Connectivity** — flags orphan notes (zero inbound and zero outbound links). Evaluated for canonical `wiki/` notes (`WHERE n.layer = 'wiki'`), recognizing cross-domain links from external domains (e.g. a customer note linking to a wiki concept prevents that concept from being flagged as an orphan). Severity `warning`. Code: `NOTE_ORPHAN`. MOC coverage is a distinct concern and is deliberately not a gate: a note that links outward but appears in no Map of Content has edges and is therefore not an orphan, so it is surfaced by `index.md` instead (§2.5).
-6. **Verification Integrity** — actor strings match the §3.4 pattern; `of:` present on every entry; stale verifications enumerated as verification debt. Because `verified:` is an append-only audit trail (§3.4), an entry whose `of:` differs from `body_hash` is silent when superseded by a valid current entry of equal or higher authority (`human-reviewed` supersedes all prior entries; `machine-confirmed` supersedes prior machine entries while still warning if a prior `human:*` entry drifted). Codes: `ACTOR_MALFORMED` (error), `VERIFICATION_UNBOUND` (error — missing `of:`, so the attestation binds to nothing), `VERIFICATION_STALE` (warning).
+6. **Verification Integrity** — actor strings match the §3.4 pattern; `of:` present on every entry; stale verifications enumerated as verification debt. Because `verified:` is an append-only audit trail (§3.4), an entry whose `of:` differs from `body_hash` is silent when superseded by a valid current entry of equal or higher authority (`human-reviewed` supersedes all prior entries; `machine-confirmed` supersedes prior machine entries while still warning if a prior `human:*` entry drifted). A note warns at most once, naming its highest-authority stale entry (the latest human one, else the latest) and counting the others: the debt is one re-review however long the history, and a count that grew with the history would reward pruning it. Codes: `ACTOR_MALFORMED` (error), `VERIFICATION_UNBOUND` (error — missing `of:`, or an entry that is not a `by`/`at`/`of` mapping, so the attestation binds to nothing), `VERIFICATION_STALE` (warning).
 
    Severity across all six gates divides what is broken from what is owed. Exactly four codes are warnings — `NOTE_ORPHAN`, `ANCHOR_MISSING`, `VERIFICATION_STALE`, and the case arm of `TAG_MALFORMED` — and the division is a contract, not a convention. Promoting any of them to an error makes `lint` fail on a vault that is merely incomplete, which is the normal state of one being written to; demoting an error hides corruption. `TAG_MALFORMED` is the only code that is both, because whitespace in a tag is unrepairable while casing is fixed on the next agent write (§3.2).
 
@@ -805,7 +823,7 @@ cadabby/assets/plugins/cadabby/
 
 **Capabilities.** The `cadabby-wiki` skill injects high-level wiki operations into context without consuming prompt tokens up front. The root agent delegates reading, drafting, and cross-linking to **librarian**, and cache maintenance, diagnostics, and linting to **technician**. Slash commands `/ingest`, `/vault-status`, and `/vault-lint` are available in the chat UI.
 
-> **Verified Architecture (v0.3.2).** The manifest layout conforms to the single-definition invariant (§7.1): entry-point progressive disclosure skill at `skills/cadabby-wiki/SKILL.md` and thin subagent manifests in `agents/` delegating runbook execution directly to `.agents/skills/<persona>/SKILL.md` in the active vault. `cadabby init` scaffolds this plugin directly into `.agents/plugins/cadabby/` to guarantee zero-configuration, vault-scoped MCP auto-mount for Antigravity, symmetric with `.mcp.json` for Claude Code.
+> **Verified Architecture (v0.4.0).** The manifest layout conforms to the single-definition invariant (§7.1): entry-point progressive disclosure skill at `skills/cadabby-wiki/SKILL.md` and thin subagent manifests in `agents/` delegating runbook execution directly to `.agents/skills/<persona>/SKILL.md` in the active vault. `cadabby init` scaffolds this plugin directly into `.agents/plugins/cadabby/` to guarantee zero-configuration, vault-scoped MCP auto-mount for Antigravity, symmetric with `.mcp.json` for Claude Code.
 
 ### 7.3. Claude Code Integration
 
@@ -822,7 +840,7 @@ cadabby/assets/plugins/cadabby/
    }
    ```
 
-   `init` and `install` prefer the installed `cadabby` console script (`sys.executable` sibling) when present and runnable, falling back to `[sys.executable, "-m", "cadabby", "mcp"]` when running from an editable checkout or when no sibling binary exists, and finally `"python3"`. Recording the absolute path ensures agent subprocesses that inherit a minimal `PATH` still resolve the exact environment.
+   `init` and `install` prefer the installed `cadabby` console script (`sys.executable` sibling) when present and runnable, falling back to `[sys.executable, "-m", "cadabby", "mcp"]` when running from an editable checkout or when no sibling binary exists. Recording the absolute path ensures agent subprocesses that inherit a minimal `PATH` still resolve the exact environment.
 
 2. **Harness delegation via `CLAUDE.md`.** A ~15-line non-normative pointer instructing Claude Code to read `AGENTS.md` as the single constitution, to prefer native MCP tools over subshell commands, and never to override actor identity when stamping `verified:`. **`init` writes it once and no command ever rewrites it** — users customize `CLAUDE.md` heavily, and an engine that regenerates it will eventually destroy their work. `init --force` is the only path that overwrites, and it says so.
 
@@ -928,7 +946,7 @@ Registration edits configuration files the user owns, so the merge semantics are
 A vault is a directory in Git that a human in Obsidian and one or more agents may touch at once. The invariant is that **no interleaving leaves a file half-written**.
 
 * **Atomic writes.** Every file mutation writes to a temporary file in the *same directory*, `fsync`s it, and `os.replace()`s it over the target. A crashed or killed Cadabby never produces a truncated note. This applies to harness config files written by `install` as much as to vault notes.
-* **Read-modify-write safety.** `update` and `verify` re-read the file and recompute its hash immediately before replacing it; if the on-disk content changed since the operation began, the write aborts with `VAULT_CONFLICT` rather than clobbering a concurrent edit.
+* **Read-modify-write safety.** `update`, `move`, and `verify` re-read the file and recompute its hash immediately before replacing it; if the on-disk content changed since the operation began, the write aborts with `VAULT_CONFLICT` rather than clobbering a concurrent edit.
 * **Ledger appends.** `log.md` is appended with a single `write()` to a descriptor opened `O_APPEND`, which is the one case where no locking is required. (Atomicity holds for appends below the platform's pipe-buffer size; entries are single lines, far below it.)
 * **Index regeneration.** `index.md` is regenerated under an advisory lock (`.cadabby/vault.lock`, created `O_CREAT | O_EXCL`, holding pid and start time, treated as stale after 60 seconds). Rows are emitted in a **deterministic sort order** and the file is **written only if its bytes changed** — otherwise every sync churns the Git diff for nothing.
 * **Cache concurrency.** WAL mode plus a 5-second busy timeout. Two processes scanning simultaneously is correct but wasteful; it is not an error.
@@ -945,7 +963,8 @@ cadabby/
 ├── README.md                   # Quickstart, installation, and harness usage
 ├── LICENSE                     # MIT
 ├── SPECIFICATION.md            # This document
-├── .github/workflows/publish.yml
+├── .github/workflows/tests.yml    # unittest on Python 3.11 / 3.12 / 3.13; gates publish
+├── .github/workflows/publish.yml  # Tag push (v*) -> tests -> PyPI trusted publishing
 │
 ├── src/
 │   └── cadabby/
@@ -964,7 +983,7 @@ cadabby/
 │       ├── indexer.py          # index.md gap report (2.5) and log.md append/rotate
 │       ├── lint.py             # The dynamic six gates across all domains (6.3)
 │       ├── audit.py            # Git blame provenance audit (3.5)
-│       ├── ops.py              # scaffold, update, verify, ground — use cases, written to ports (9.1)
+│       ├── ops.py              # scaffold, update, move, verify, ground — use cases, written to ports (9.1)
 │       ├── installer.py        # cadabby init / install, idempotent config merge (7.6)
 │       ├── mcp.py              # JSON-RPC 2.0 stdio handler, 7 tools + domain resources
 │       │
@@ -1020,6 +1039,7 @@ cadabby/
     ├── test_lint.py            # Each gate's codes and severities
     ├── test_errors.py          # Code taxonomy, retryability, MCP payload, exit codes (5.4)
     ├── test_ops.py             # Scaffolding, attribution, conflict detection, atomicity
+    ├── test_move.py            # vault_move_note: link rewriting, trust impact, blockers, rollback
     ├── test_audit.py           # Git blame provenance audit for human:* attestations (3.5)
     ├── test_adapters.py        # Driven secondary storage adapters (DiskNoteStorage, FileLedger) (9.1)
     ├── test_domain_model.py    # Note entity and use cases driven through in-memory adapters
@@ -1044,7 +1064,7 @@ cadabby/
 | `LedgerPort` | `FileLedger` | `InMemoryLedger` |
 | `IndexCachePort` | `VaultCache` (§4) | — |
 
-Callers may inject adapters; omitting them falls back to the disk pair, so the ordinary code path is unchanged and nothing is wired by configuration. The payoff is that scaffolding, update, verification, and attribution logic can be exercised with no vault on disk, no SQLite file, and no temporary directory — the behavior under test is the use case itself rather than the use case plus the filesystem. `Protocol` is used instead of `abc.ABC` because it imposes no runtime base-class requirement and costs nothing at import time, which matters for a CLI that an agent may invoke many times in a session.
+Callers may inject adapters; omitting them falls back to the disk pair, so the ordinary code path is unchanged and nothing is wired by configuration. The payoff is that scaffolding, update, move, verification, and attribution logic can be exercised with no vault on disk, no SQLite file, and no temporary directory — the behavior under test is the use case itself rather than the use case plus the filesystem. `Protocol` is used instead of `abc.ABC` because it imposes no runtime base-class requirement and costs nothing at import time, which matters for a CLI that an agent may invoke many times in a session.
 
 The boundary is deliberately partial. It covers note persistence and the ledger, which are the operations that need substitution for testing and are plausible extension points. It does not cover the cache: `VaultCache` satisfies `IndexCachePort` structurally but has no second implementation, because a cache that is explicitly disposable (§4.2) gains nothing from being swappable. Ports are justified where a second implementation already exists or is clearly coming; elsewhere they are indirection with no reader.
 
@@ -1058,7 +1078,7 @@ That phrasing is a rule, not a style. A criterion that restates its requirement 
 
 A note on scope: the five-phase build order that used to open this section was removed at 0.3.1. It described the order in which already-shipped code was written, nothing checked it, and it was the one part of this document that could rot undetectably. Git history has it.
 
-### Criteria for 0.3.2
+### Criteria for 0.4.0
 
 * **C1.** Deleting `.cadabby/` and re-running any command reproduces byte-identical search results across all cognitive domains.
 * **C2.** Editing a verified note's body downgrades it to `stale-verified` on the next scan, and `status` counts it as verification debt.
@@ -1101,6 +1121,15 @@ A note on scope: the five-phase build order that used to open this section was r
 * **C39.** Audit a `human:*` endorsement that is not yet committed: one `PROVENANCE_MISMATCH` saying so, and no `UNSIGNED_ENDORSEMENT` under `--require-signed`.
 * **C40.** Ground a note whose frontmatter omits `type` and `status`: both are reported empty, never as invented defaults.
 * **C41.** Put `raw/run.log` in a vault and run any command: `status` reports `{".log": 1}` under `filename_only_raw` and a term from its body is not found with `domain: "raw"`. Add `.log` to `raw_text_extensions` and, with the file untouched, `filename_only_raw` is empty and the same search finds it; remove it again and the hit is gone.
+* **C42.** Scaffold `"Flash Attention"` with no `path` in an empty vault: the file is `wiki/flash-attention.md`. In a vault that already holds `wiki/Flash-Attention.md`, the same call is refused and writes nothing.
+* **C43.** With one note containing both `zorblat` and `quaffle` and two notes containing one each, `search("zorblat quaffle")` returns the first note at the top and both others below it; `limit: 1` returns only the first, and `zorblat AND quaffle` never returns the partial matches.
+* **C44.** Move a note that a neighbour links to as `[[x]]`, `[[x|a]]`, `[[x#h]]`, `![[x#h]]`, a table-escaped `[[x\|a]]` and two relative Markdown links: a dry-run lists that neighbour and writes nothing; applying rewrites exactly those seven targets and no link inside code. Move a note to another folder under the same stem instead: a bare `[[x]]` elsewhere is left byte-identical, and a `human-reviewed` moved note whose body did not change is still `human-reviewed` at its new path.
+* **C45.** Move a note into `wiki/` under a stem that a bare wikilink already opens in a domain: the move is refused and nothing is written. Move one that a `human-reviewed` note links to: refused until that note is named in `approve_stale`, after which it reads `stale-verified`. Edit a linking note between plan and apply: the apply fails with `VAULT_CONFLICT`, every file it had written is restored, and the edit survives.
+* **C46.** In a vault with one dead link, `vault_status` reports `finding_counts.error` of 1 with no `findings` and `isError: false`; with `lint: true` it adds the `LINK_DEAD` finding, still with `isError: false`. `cadabby status --json` reports the same counts, and calling `vault_lint` fails with `UNKNOWN_TOOL` whose message names `vault_status` with `lint: true`.
+* **C47.** Call `vault_update_note` with a `patch_frontmatter` that sets `verified` to a `human:*` entry: it fails with `HUMAN_ATTESTATION_REFUSED` and the file is unchanged. Patch `verified` to an agent entry, to `null`, or patch `generated`: each fails with `INVALID_ARGUMENT` and writes nothing.
+* **C48.** Give a note a list-valued `title`: `cadabby status` and every MCP tool still work, and lint reports `ENUM_INVALID` for it. `vault_scaffold_note` with a list `description` fails with `INVALID_ARGUMENT` and writes no file.
+* **C49.** With `customers/acme/README.md` and `projects/apollo/README.md` present, `vault_update_note`, `vault_verify_note` and `vault_move_note` on `README` each fail with `INVALID_ARGUMENT` naming both and change nothing, while each full path works. Name `wiki/Flash-Attention.md` as `wiki/flash-attention`: the tool acts on, and reports, `wiki/Flash-Attention`.
+* **C50.** Move a note while a referrer is edited between plan and apply, the referrer having frontmatter comments and CRLF line endings, into a folder that did not exist: every file the move wrote is restored byte for byte and the new folder is gone. Take a dry run's `plan_token`, add a link to the note, and apply with that token: it fails with `VAULT_CONFLICT` and writes nothing.
 
 ### Traceability
 
@@ -1111,7 +1140,7 @@ A criterion nobody can point to a test for is a wish. This table is the map, and
 | C1 | §4.1, §4.4 | `test_ac2_disposable_cache_reproducibility`, `test_disposable_cache_reproducibility`, `test_c1_multi_domain_tiebreak_reproducibility` |
 | C2 | §3.3, §4.3 | `test_ac4_body_edit_downgrades_to_stale_verified`, `test_drift_downgrades_to_stale_verified`, `test_status_counts_verification_debt`, `test_status_debt_agrees_with_the_index_report` |
 | C3 | §3.2, §6.3 | `test_ac3_restricted_yaml_grammar`, `test_gate1_schema_integrity_errors`, `test_parser_rejects_out_of_subset_shapes`, `test_update_note_rejects_out_of_subset_patch_without_touching_the_file` |
-| C4 | §6.3 | `test_clean_demo_vault_has_zero_errors` and the per-gate cases, extended by `test_gate1_invalid_timestamps_in_both_blocks`, `test_gate3_anchor_missing_only_when_the_target_resolves`, `test_gate3_anchor_that_exists_is_silent`, `test_gate6_stale_verification_is_debt_not_an_error`, `test_gate6_superseded_history_is_silent_when_reverified`, `test_raw_link_wrong_depth_is_reported_with_suggestion`, `test_correct_raw_links_code_spans_and_urls_are_ignored`; the taxonomy itself is held by `test_the_fixture_seeds_one_of_every_code`, `test_the_spec_names_exactly_the_codes_lint_emits` and `test_only_connectivity_and_debt_are_warnings`, which keep this document's list, `lint.py`'s emissions, and one all-codes fixture at the same set |
+| C4 | §6.3 | `test_clean_demo_vault_has_zero_errors` and the per-gate cases, extended by `test_gate1_invalid_timestamps_in_both_blocks`, `test_gate3_anchor_missing_only_when_the_target_resolves`, `test_gate3_anchor_that_exists_is_silent`, `test_gate6_stale_verification_is_debt_not_an_error`, `test_gate6_superseded_history_is_silent_when_reverified`, `test_gate6_one_stale_warning_per_note`, `test_raw_link_wrong_depth_is_reported_with_suggestion`, `test_correct_raw_links_code_spans_and_urls_are_ignored`; the taxonomy itself is held by `test_the_fixture_seeds_one_of_every_code`, `test_the_spec_names_exactly_the_codes_lint_emits` and `test_only_connectivity_and_debt_are_warnings`, which keep this document's list, `lint.py`'s emissions, and one all-codes fixture at the same set |
 | C5 | §2.2 | `test_discover_domains_ignores_reserved_and_ignored_directories`, `test_domain_with_agents_md`, `test_lint_require_sources_enforcement`, `test_lint_custom_types_and_allowed_types` |
 | C6 | §2.2, §5.1 | `test_scaffold_note_in_custom_domain`, `test_scaffold_note_enforces_domain_allowed_types`, `test_scaffold_path_outside_note_locations_is_refused` |
 | C7 | §5.1 | `test_ground_notes_enriches_domain_and_directives` |
@@ -1149,6 +1178,15 @@ A criterion nobody can point to a test for is a wish. This table is the map, and
 | C39 | §3.5 | `test_uncommitted_endorsement_is_a_provenance_failure`, `test_empty_author_never_matches` |
 | C40 | §3.1 | `test_missing_type_and_status_read_as_missing` |
 | C41 | §2.4, §4.3, §4.5 | `test_extension_list_change_reaches_untouched_raw_files`, `test_status_filename_only_raw_distinguishes_skipped_extensions_from_empty_text_files`, `test_unchanged_extension_list_rescans_nothing` |
+| C42 | §5.1 | `test_default_stem_is_lowercase_kebab_case`, `test_scaffold_refuses_case_only_collision` |
+| C43 | §4.4 | `test_or_fill_surfaces_partial_matches_after_all_terms_hits` |
+| C44 | §5.1 | `test_dry_run_writes_nothing`, `test_rewrites_every_link_form_and_nothing_else`, `test_links_that_still_resolve_are_left_alone`, `test_moved_note_keeps_its_tier_when_its_body_is_unchanged`, `test_span_slices_are_exactly_the_target_text`, `test_moved_note_images_and_reference_definitions_follow_the_new_folder`, `test_rewritten_links_stay_edges_or_the_destination_is_refused` |
+| C45 | §5.1 | `test_retargeting_someone_elses_link_is_refused`, `test_human_reviewed_referrer_needs_explicit_approval`, `test_conflict_mid_apply_restores_every_file`, `test_source_edited_between_plan_and_apply_is_a_conflict`, `test_in_memory_conflict_restores_every_note_and_logs_nothing` |
+| C46 | §4.5, §5.1, §5.4 | `test_status_reports_finding_counts_and_findings_only_on_request`, `test_status_json_carries_the_same_finding_counts_as_mcp` |
+| C47 | §3.4, §5.1 | `test_patch_frontmatter_never_writes_engine_owned_fields` |
+| C48 | §3.1, §5.1 | `test_list_valued_core_fields_never_break_the_scan` |
+| C49 | §5.1, §5.4 | `test_names_resolve_to_one_canonical_note_or_are_refused`, `test_ambiguous_names_and_unknown_approvals_are_refused`, `test_wrong_case_name_resolves_to_the_real_note` |
+| C50 | §5.1, §8 | `test_rollback_restores_exact_bytes_and_removes_new_folders`, `test_stale_plan_token_refuses_apply_and_writes_nothing` |
 
 C17-C20 were unmet together for several releases -- all four were the §2.5 gap report, specified and never built, while an older catalog occupied the file. They were closed as a group, since each depended on the same two queries. C2 and C4 followed: C2 needed the `status` payload asserted rather than only the tier behind it, and C4 needed a fixture seeding one instance of every lint code, which turned the taxonomy itself into something a test can hold. C1 was closed by adding `n.cid ASC` as the secondary sort key in §4.4, making equal-scoring search rows across domains deterministic regardless of insertion order. C24 arrived last and in the opposite order from the rest: §5.4 was written because the surface it describes was already shipped and undocumented, with one code living inside a message string and every other failure flattened to prose at the boundary. The criterion exists to keep that from recurring, which is why it checks the shape of a failure rather than any particular one.
 

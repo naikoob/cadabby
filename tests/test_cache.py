@@ -262,6 +262,10 @@ class TestVaultCache(unittest.TestCase):
         self.assertIsNone(or_fallback_fts5_query("SQLite OR DuckDB"))
         self.assertIsNone(or_fallback_fts5_query("SQLite NOT DuckDB"))
 
+        # Repeated terms (in any case) are one term: no redundant OR query
+        self.assertIsNone(or_fallback_fts5_query("foo foo"))
+        self.assertIsNone(or_fallback_fts5_query("Foo foo"))
+
         # Multi-term queries without explicit operators join tokens with OR
         self.assertEqual(
             or_fallback_fts5_query("AppendEntries XTerm XIndex TestInitialElection2A"),
@@ -297,6 +301,35 @@ class TestVaultCache(unittest.TestCase):
         self.assertGreater(len(raw_hits), 0)
         self.assertEqual(raw_hits[0].cid, "raw/lab2-spec.md")
         self.assertTrue(all(r.domain == "raw" for r in raw_hits))
+
+    def test_search_limit_must_be_a_positive_integer(self):
+        """§4.4. The OR fill compares against `limit`, so a string, bool or non-positive count is refused."""
+        self.cache.scan()
+        for bad in (0, -1, True, "5", 2.5):
+            with self.subTest(limit=bad), self.assertRaisesRegex(ValueError, "positive integer"):
+                self.cache.search("SQLite", limit=bad)  # type: ignore[arg-type]
+
+    def test_or_fill_surfaces_partial_matches_after_all_terms_hits(self):
+        """§4.4, §10 C43. One note matching every term must not hide notes matching only some."""
+
+        def note(stem: str, body: str) -> None:
+            (self.vault.wiki_dir / f"{stem}.md").write_text(
+                f"---\ntype: concept\ntitle: {stem}\ndescription: d\nstatus: active\n---\n# {stem}\n\n{body}\n",
+                "utf-8",
+            )
+
+        note("composite-brief", "Covers zorblat contention and the quaffle keepalive together.")
+        note("zorblat-contention", "Zorblat contention on hot prefixes.")
+        note("quaffle-keepalive", "The quaffle keepalive flag.")
+        self.cache.scan()
+
+        cids = [r.cid for r in self.cache.search("zorblat quaffle")]
+        self.assertEqual(cids[0], "wiki/composite-brief")
+        self.assertEqual(set(cids[1:]), {"wiki/zorblat-contention", "wiki/quaffle-keepalive"})
+        self.assertEqual(len(cids), len(set(cids)), "a note matched by both queries is listed once")
+
+        self.assertEqual([r.cid for r in self.cache.search("zorblat quaffle", limit=1)], ["wiki/composite-brief"])
+        self.assertEqual([r.cid for r in self.cache.search("zorblat AND quaffle")], ["wiki/composite-brief"])
 
     def test_hyphenated_and_special_queries(self):
         self.cache.scan()

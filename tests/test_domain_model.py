@@ -125,6 +125,27 @@ class TestDomainModel(unittest.TestCase):
         self.assertEqual(note.frontmatter["new_field"], "hello")
 
 
+class TestByteExactSerialize(unittest.TestCase):
+    """§8. An unchanged note writes back the exact text it was read from (comments, CRLF, quoting)."""
+
+    RAW = "---\r\n# owner: legal\r\ntype: concept\r\ntitle: 'Quoted'\r\ndescription: d\r\nstatus: active\r\n---\r\n# Body\r\n"
+
+    def test_unchanged_note_round_trips_verbatim(self):
+        note = Note.from_raw("wiki/X", "wiki/X.md", self.RAW)
+        self.assertEqual(note.serialize(), self.RAW)
+
+    def test_any_change_goes_through_the_canonical_writer(self):
+        note = Note.from_raw("wiki/X", "wiki/X.md", self.RAW)
+        note.patch_frontmatter({"status": "evergreen"})
+        out = note.serialize()
+        self.assertNotIn("# owner: legal", out)
+        self.assertNotIn("\r\n", out)
+        self.assertIn("status: evergreen", out)
+        body_changed = Note.from_raw("wiki/X", "wiki/X.md", self.RAW)
+        body_changed.body += "More.\n"
+        self.assertIn("More.", body_changed.serialize())
+
+
 class TestInMemoryHexagonalUseCases(unittest.TestCase):
     """Test use cases running purely in memory with zero disk I/O."""
 
@@ -147,8 +168,8 @@ class TestInMemoryHexagonalUseCases(unittest.TestCase):
             body="# Fast Attention\n\nTiling and SRAM optimization.\n",
             actor="agent:scaffold-bot",
         )
-        self.assertEqual(note.cid, "wiki/Fast-Attention")
-        self.assertTrue(self.storage.note_exists("wiki/Fast-Attention"))
+        self.assertEqual(note.cid, "wiki/fast-attention")
+        self.assertTrue(self.storage.note_exists("wiki/fast-attention"))
         self.assertEqual(len(self.ledger.entries), 1)
 
         # Scaffold duplicate raises FileExistsError
@@ -167,14 +188,14 @@ class TestInMemoryHexagonalUseCases(unittest.TestCase):
         # Wrong hash raises VaultConflictError
         with self.assertRaises(VaultConflictError):
             update_uc.execute(
-                cid_or_path="wiki/Fast-Attention",
+                cid_or_path="wiki/fast-attention",
                 frontmatter_patch={"status": "evergreen"},
                 expected_hash="sha256:0000000000000000000000000000000000000000000000000000000000000000",
             )
 
         # Correct hash succeeds
         updated_note = update_uc.execute(
-            cid_or_path="wiki/Fast-Attention",
+            cid_or_path="wiki/fast-attention",
             frontmatter_patch={"status": "evergreen"},
             expected_hash=f"sha256:{initial_hash}",
             actor="agent:update-bot",
@@ -187,14 +208,14 @@ class TestInMemoryHexagonalUseCases(unittest.TestCase):
         # the categorical code, never PERMISSION_DENIED (C12).
         with self.assertRaises(HumanAttestationRefusedError):
             verify_uc.execute(
-                cid_or_path="wiki/Fast-Attention",
+                cid_or_path="wiki/fast-attention",
                 actor="human:alice",
                 is_human_authorized=False,
             )
 
         # Agent attestation succeeds
         v_res = verify_uc.execute(
-            cid_or_path="wiki/Fast-Attention",
+            cid_or_path="wiki/fast-attention",
             actor="agent:audit-bot",
             method="formal-proof",
         )
@@ -203,7 +224,7 @@ class TestInMemoryHexagonalUseCases(unittest.TestCase):
         self.assertEqual(len(self.ledger.entries), 3)
 
         # Check persisted note in memory has updated verified frontmatter
-        persisted = self.storage.get_note("wiki/Fast-Attention")
+        persisted = self.storage.get_note("wiki/fast-attention")
         self.assertIsNotNone(persisted)
         self.assertEqual(persisted.trust_tier, "machine-confirmed")
 
@@ -221,11 +242,11 @@ class TestInMemoryHexagonalUseCases(unittest.TestCase):
         )
 
         ground_uc = GroundNotesUseCase(self.storage, cache=None)
-        grounded = ground_uc.execute(["wiki/Transformer-Architecture"])
+        grounded = ground_uc.execute(["wiki/transformer-architecture"])
 
         self.assertEqual(len(grounded), 1)
         res = grounded[0]
-        self.assertEqual(res["cid"], "wiki/Transformer-Architecture")
+        self.assertEqual(res["cid"], "wiki/transformer-architecture")
         self.assertEqual(res["title"], "Transformer Architecture")
         self.assertEqual(res["type"], "concept")
         self.assertEqual(res["trust_tier"], "unverified")
@@ -233,7 +254,7 @@ class TestInMemoryHexagonalUseCases(unittest.TestCase):
         self.assertIn("Self-attention mechanisms", res["content"])
 
         # Test budget truncation in memory
-        grounded_budget = ground_uc.execute(["wiki/Transformer-Architecture"], budget_tokens=20)
+        grounded_budget = ground_uc.execute(["wiki/transformer-architecture"], budget_tokens=20)
         self.assertEqual(len(grounded_budget), 1)
         self.assertTrue(grounded_budget[0]["truncated"])
         self.assertIn("[truncated:", grounded_budget[0]["content"])

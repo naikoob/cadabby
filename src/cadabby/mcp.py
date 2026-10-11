@@ -16,8 +16,8 @@ from cadabby import __version__
 from cadabby.cache import VaultCache
 from cadabby.constants import DIR_WIKI
 from cadabby.errors import INVALID_ARGUMENT, UNKNOWN_TOOL, HumanAttestationRefusedError, classify
-from cadabby.lint import run_vault_lint
-from cadabby.ops import ground_notes, scaffold_note, update_note, verify_note
+from cadabby.lint import status_report
+from cadabby.ops import ground_notes, move_note, scaffold_note, update_note, verify_note
 from cadabby.vault import Vault, path_to_cid
 
 
@@ -67,7 +67,7 @@ TOOLS = [
                 "status": {"type": "string", "description": "Filter by note status"},
                 "trust": {"type": "string", "description": "Filter by trust tier (human-reviewed, machine-confirmed, etc.)"},
                 "tag": {"type": "string", "description": "Filter by note tag"},
-                "limit": {"type": "integer", "default": 20, "description": "Max results to return"},
+                "limit": {"type": "integer", "minimum": 1, "default": 20, "description": "Max results to return"},
             },
             "required": ["query"],
         },
@@ -85,6 +85,7 @@ TOOLS = [
                 },
                 "budget_tokens": {
                     "type": "integer",
+                    "minimum": 1,
                     "description": "Optional token budget. Truncates cleanly at section boundaries if exceeded.",
                 },
             },
@@ -93,10 +94,20 @@ TOOLS = [
     },
     {
         "name": "vault_status",
-        "description": "Epistemic health summary: note counts by tier and type, verification debt (stale count), unprocessed and filename-only raw files, and broken-link count.",
+        "description": (
+            "Vault health check: note counts by tier and type, verification debt, unprocessed and "
+            "filename-only raw files, broken-link count, and finding_counts from the six lint gates. "
+            "Pass lint=true for the full findings list to repair."
+        ),
         "inputSchema": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "lint": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Include every finding (code, severity, path, message), not just the counts",
+                },
+            },
         },
     },
     {
@@ -193,17 +204,65 @@ TOOLS = [
         },
     },
     {
-        "name": "vault_lint",
-        "description": "Runs the six normative epistemic lint gates and returns structured diagnostics so an agent can self-heal its own output.",
+        "name": "vault_move_note",
+        "description": (
+            "Move or rename a note and repoint every link to it. Dry-run unless apply=true: the result "
+            "lists each note whose links change, its trust tier before and after, and a plan_token. Pass "
+            "that plan_token with apply=true so nothing is written if the vault changed since. Only links "
+            "that would break or open a different note are rewritten. Refused when the move would retarget "
+            "someone else's link, or would stale a human-reviewed note not named in approve_stale."
+        ),
         "inputSchema": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "cid": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Note to move: CID, relative path, stem or wikilink (an ambiguous name is refused)",
+                },
+                "to": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Destination vault-relative path (e.g. 'customers/acme/sizing'). A bare name renames "
+                        "in place; a trailing '/' (e.g. 'customers/acme/') moves the note into that folder"
+                    ),
+                },
+                "apply": {"type": "boolean", "default": False, "description": "Write the move; omit for a dry-run"},
+                "approve_stale": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "description": "Human-reviewed notes the user agreed may go stale-verified when their links are rewritten",
+                },
+                "plan_token": {
+                    "type": "string",
+                    "description": "The dry-run's plan_token; with apply=true, refuses (VAULT_CONFLICT) if the plan changed",
+                },
+            },
+            "required": ["cid", "to"],
         },
     },
 ]
 
 _REQUIRED_ARGS: dict[str, tuple[str, ...]] = {
     t["name"]: tuple(t["inputSchema"].get("required", ())) for t in TOOLS  # type: ignore[index]
+}
+_PROPERTIES: dict[str, dict[str, Any]] = {
+    t["name"]: t["inputSchema"].get("properties", {}) for t in TOOLS  # type: ignore[index,union-attr]
+}
+# Tools removed from the surface, mapped to what replaces them. Only ever read
+# to word an UNKNOWN_TOOL error: an agent still following a 0.3.x vault's
+# AGENTS.md can correct itself, and the surface stays at seven tools (§5.1).
+_RETIRED_TOOLS: dict[str, str] = {
+    "vault_lint": "vault_status with lint: true",
+}
+_JSON_TYPES: dict[str, type | tuple[type, ...]] = {
+    "string": str,
+    "integer": int,
+    "number": (int, float),
+    "boolean": bool,
+    "array": list,
+    "object": dict,
 }
 
 
@@ -212,14 +271,52 @@ def _required_args(tool: str) -> tuple[str, ...]:
     return _REQUIRED_ARGS.get(tool, ())
 
 
+def _schema_violation(name: str, value: Any, schema: dict[str, Any]) -> str | None:
+    """Why `value` does not satisfy the subset of JSON Schema the tool declarations use, or None.
+
+    Checked once at the boundary for every tool, from the same inputSchema
+    clients read, so a mistyped argument is INVALID_ARGUMENT before any engine
+    code runs -- never an INTERNAL from deep inside, never written to disk.
+    """
+    expected = schema.get("type")
+    if expected is not None:
+        # bool is an int subclass in Python, and never a JSON integer.
+        if not isinstance(value, _JSON_TYPES[expected]) or (expected in ("integer", "number") and isinstance(value, bool)):
+            return f"'{name}' must be {'an' if expected[0] in 'aeiou' else 'a'} {expected}"
+    if "enum" in schema and value not in schema["enum"]:
+        return f"'{name}' must be one of {schema['enum']}"
+    if "minimum" in schema and value < schema["minimum"]:
+        return f"'{name}' must be at least {schema['minimum']}"
+    if "minLength" in schema and len(value) < schema["minLength"]:
+        return f"'{name}' must not be empty"
+    if expected == "array" and "items" in schema:
+        for i, item in enumerate(value):
+            if why := _schema_violation(f"{name}[{i}]", item, schema["items"]):
+                return why
+    if expected == "object" and "properties" in schema:
+        for key in schema.get("required", ()):
+            if key not in value:
+                return f"'{name}.{key}' is required"
+        for key, sub in schema["properties"].items():
+            if value.get(key) is not None and (why := _schema_violation(f"{name}.{key}", value[key], sub)):
+                return why
+    return None
+
+
 def _section_arg(args: dict[str, Any], key: str) -> tuple[str, str] | None:
     """Parse an optional [heading, body] array parameter for vault_update_note."""
     s = args.get(key)
     if s is None:
         return None
-    if not isinstance(s, (list, tuple)) or not (1 <= len(s) <= 2) or not all(isinstance(x, str) for x in s):
+    if not (1 <= len(s) <= 2):
         raise ValueError(f"'{key}' must be a [heading, body] array of strings")
     return (s[0], s[1]) if len(s) > 1 else (s[0], "")
+
+
+def _bool_arg(args: dict[str, Any], key: str, *, default: bool = False) -> bool:
+    """An optional boolean argument; its type was already checked against the schema."""
+    val = args.get(key)
+    return default if val is None else bool(val)
 
 
 class McpServer:
@@ -290,13 +387,10 @@ class McpServer:
         return _tool_ok([r.to_dict() for r in res])
 
     def _tool_ground(self, args: dict[str, Any]) -> dict[str, Any]:
-        cids = args["cids"]
-        if not isinstance(cids, list) or not all(isinstance(c, str) for c in cids):
-            raise ValueError("'cids' must be a list of strings")
         self.cache.scan()
         grounded = ground_notes(
             self.vault,
-            cids,
+            args["cids"],
             budget_tokens=args.get("budget_tokens"),
             cache=self.cache,
         )
@@ -310,9 +404,9 @@ class McpServer:
             description=args["description"],
             tags=args.get("tags"),
             sources=args.get("sources"),
-            body=args.get("body", ""),
+            body=args.get("body") or "",
             actor=self.client_id,
-            domain=args.get("domain", DIR_WIKI),
+            domain=args.get("domain") or DIR_WIKI,
             path=args.get("path"),
             template=args.get("template"),
             cache=self.cache,
@@ -346,7 +440,7 @@ class McpServer:
             vault=self.vault,
             cid_or_path=args["cid"],
             actor=self.client_id,
-            method=args.get("method", "automated-check"),
+            method=args.get("method") or "automated-check",
             is_human_authorized=False,
             cache=self.cache,
         )
@@ -356,31 +450,31 @@ class McpServer:
             f"-> derived trust tier: '{res['trust_tier']}'"
         )
 
-    def _tool_status(self, _args: dict[str, Any]) -> dict[str, Any]:
-        self.cache.scan()
-        return _tool_ok(self.cache.get_status())
+    def _tool_status(self, args: dict[str, Any]) -> dict[str, Any]:
+        return _tool_ok(status_report(self.vault, self.cache, lint=_bool_arg(args, "lint", default=False)))
 
-    def _tool_lint(self, _args: dict[str, Any]) -> dict[str, Any]:
-        findings = run_vault_lint(self.vault, cache=self.cache)
-        out = [f.to_dict() for f in findings]
-        has_errors = any(f.severity == "error" for f in findings)
-        # Deliberately neither _tool_ok nor _tool_error: the call
-        # succeeded, and isError mirrors the CLI's exit 1 for "the
-        # vault has findings" (§5.4). The body is the findings list,
-        # not an error envelope.
-        return {
-            "content": [{"type": "text", "text": json.dumps(out, indent=2)}],
-            "isError": has_errors,
-        }
+    def _tool_move_note(self, args: dict[str, Any]) -> dict[str, Any]:
+        return _tool_ok(
+            move_note(
+                self.vault,
+                args["cid"],
+                args["to"],
+                apply=_bool_arg(args, "apply", default=False),
+                approve_stale=args.get("approve_stale") or [],
+                plan_token=args.get("plan_token"),
+                actor=self.client_id,
+                cache=self.cache,
+            )
+        )
 
     _TOOL_HANDLERS = {
         "vault_search": _tool_search,
         "vault_ground": _tool_ground,
         "vault_scaffold_note": _tool_scaffold_note,
         "vault_update_note": _tool_update_note,
+        "vault_move_note": _tool_move_note,
         "vault_verify_note": _tool_verify_note,
         "vault_status": _tool_status,
-        "vault_lint": _tool_lint,
     }
 
     def handle_tools_call(self, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -405,7 +499,16 @@ class McpServer:
 
         handler = self._TOOL_HANDLERS.get(name)
         if handler is None:
-            return _tool_error(name, UNKNOWN_TOOL, f"Unknown tool: {name}", retryable=False)
+            message = f"Unknown tool: {name}"
+            if replacement := _RETIRED_TOOLS.get(name):
+                message += f" -- retired in 0.4.0; call {replacement} instead"
+            return _tool_error(name, UNKNOWN_TOOL, message, retryable=False)
+
+        # Types come from the same declaration. A JSON null means "not given".
+        for key, value in args.items():
+            schema = _PROPERTIES[name].get(key)
+            if schema is not None and value is not None and (why := _schema_violation(key, value, schema)):
+                return _tool_error(name, INVALID_ARGUMENT, why, retryable=False)
 
         try:
             return handler(self, args)

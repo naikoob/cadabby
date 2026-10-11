@@ -617,7 +617,7 @@ require_sources: false
             actor="agent:ops-test",
         )
         self.assertTrue(path.exists())
-        self.assertEqual(self.vault.rel_path(path), "customers/Acme-Corporation.md")
+        self.assertEqual(self.vault.rel_path(path), "customers/acme-corporation.md")
         content = path.read_text("utf-8")
         self.assertIn("type: account", content)
         self.assertIn("Acme Corporation", content)
@@ -706,7 +706,7 @@ Details here.
                 },
             )
             self.assertFalse(scaffold_res["isError"])
-            self.assertIn("Scaffolded note: customers/Beta-Client.md", scaffold_res["content"][0]["text"])
+            self.assertIn("Scaffolded note: customers/beta-client.md", scaffold_res["content"][0]["text"])
 
             # Search filtered by domain
             server.cache.scan()
@@ -720,7 +720,7 @@ Details here.
             self.assertFalse(search_res["isError"])
             results = json.loads(search_res["content"][0]["text"])
             self.assertEqual(len(results), 1)
-            self.assertEqual(results[0]["cid"], "customers/Beta-Client")
+            self.assertEqual(results[0]["cid"], "customers/beta-client")
             self.assertEqual(results[0]["domain"], "customers")
 
 
@@ -745,7 +745,7 @@ class TestDomainManifestValidity(unittest.TestCase):
         self.assertEqual(findings[0].severity, "error")
         with self.assertRaisesRegex(ValueError, "AGENTS.md is invalid"):
             scaffold_note(self.vault, title="Acme", type_="account", description="d", domain="customers")
-        self.assertFalse((self.vault_dir / "customers" / "Acme.md").exists())
+        self.assertFalse((self.vault_dir / "customers" / "acme.md").exists())
         directives = self.vault.discover_domains()["customers"].directives_markdown
         self.assertNotIn("allowed_types", directives)
         self.assertIn("# Directives", directives)
@@ -840,7 +840,7 @@ Architectural decisions must link to canonical concepts.
             domain="customers",
             path="customers/acme/Account.md",
             sources=["raw/contract-acme.txt"],
-            body="# Acme Corp Account\n\nUses [[projects/apollo/README|Apollo Engine]] and implements [[Event-Sourcing]].\n",
+            body="# Acme Corp Account\n\nUses [[projects/apollo/README|Apollo Engine]] and implements [[event-sourcing]].\n",
             actor="agent:crm-sync",
         )
         self.assertTrue(cust_note_path.exists())
@@ -853,7 +853,7 @@ Architectural decisions must link to canonical concepts.
             description="High throughput event processing platform",
             domain="projects",
             path="projects/apollo/README.md",
-            body="# Apollo Engine\n\nBuilt on [[Event-Sourcing]] for client [[customers/acme/Account]].\n",
+            body="# Apollo Engine\n\nBuilt on [[event-sourcing]] for client [[customers/acme/Account]].\n",
             actor="agent:project-planner",
         )
         self.assertTrue(proj_note_path.exists())

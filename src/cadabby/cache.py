@@ -196,13 +196,16 @@ _FTS_TOKEN_RE = re.compile(r'"[^"]*"\*?|\S+')
 
 
 def or_fallback_fts5_query(clean_query: str) -> str | None:
-    """Build an OR-joined FTS5 query when an implicit-AND multi-term query returns 0 rows.
+    """Build an OR-joined FTS5 query to fill an implicit-AND multi-term search short of `limit`.
 
-    Returns None for empty/single-term queries or when the caller wrote explicit
-    boolean operators (AND, OR, NOT), preserving strict boolean semantics when requested.
+    Returns None for empty/single-term queries, duplicate-only terms, or when the caller
+    wrote explicit boolean operators (AND, OR, NOT), preserving strict boolean semantics.
     """
     tokens = _FTS_TOKEN_RE.findall(clean_query)
     if len(tokens) < 2 or any(t in ("AND", "OR", "NOT") for t in tokens):
+        return None
+    distinct = list(dict.fromkeys(t.casefold() for t in tokens))
+    if len(distinct) < 2:
         return None
     return " OR ".join(tokens)
 
@@ -637,6 +640,14 @@ class VaultCache:
         b_hash = compute_body_hash(body)
         tags = fm.get("tags")
         sources = fm.get("sources")
+
+        def text(key: str) -> str | None:
+            # The restricted YAML subset admits a list or mapping here, which
+            # sqlite cannot bind. Store NULL and let gate 1 report it
+            # (ENUM_INVALID) rather than crash every scan, and every command.
+            value = fm.get(key)
+            return value if isinstance(value, str) else None
+
         self.upsert_note(
             NoteRecord(
                 rel_path=rel_path,
@@ -645,10 +656,10 @@ class VaultCache:
                 file_size=st.st_size,
                 file_hash=f_hash,
                 body=body,
-                title=fm.get("title") or abs_path.stem,
-                description=fm.get("description"),
-                type_=fm.get("type"),
-                status=fm.get("status"),
+                title=text("title") or abs_path.stem,
+                description=text("description"),
+                type_=text("type"),
+                status=text("status"),
                 trust_tier=derive_trust_tier(fm.get("verified"), b_hash),
                 body_hash=b_hash,
                 frontmatter_json=json.dumps(fm),
@@ -795,6 +806,11 @@ class VaultCache:
         limit: int = 20,
     ) -> list[SearchResult]:
         """Perform BM25 search across cognitive domain notes with epistemic rank boosting conforming to §4.4."""
+        # The OR fill compares against `limit`, so it must be a real count: a
+        # string broke the comparison and a negative one (SQLite's "no limit")
+        # silently skipped the fill.
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError(f"limit must be a positive integer, got {limit!r}")
         clean_query = sanitize_fts5_query(query)
         if not clean_query:
             return []
@@ -876,10 +892,12 @@ class VaultCache:
 
         try:
             rows = conn.execute(sql, params).fetchall()
-            if not rows:
-                fallback_query = or_fallback_fts5_query(clean_query)
-                if fallback_query is not None:
-                    rows = conn.execute(sql, {**params, "query": fallback_query}).fetchall()
+            fallback_query = or_fallback_fts5_query(clean_query)
+            if fallback_query is not None and len(rows) < limit:
+                # All-terms matches keep the top slots; partial matches only fill what is left.
+                seen = {r["cid"] for r in rows}
+                extra = conn.execute(sql, {**params, "query": fallback_query}).fetchall()
+                rows += [r for r in extra if r["cid"] not in seen][: limit - len(rows)]
         except sqlite3.OperationalError as e:
             # Only a MATCH expression FTS5 cannot parse means "no results". A
             # lock or I/O failure must propagate so classify() reports it as
