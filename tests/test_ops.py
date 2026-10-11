@@ -68,13 +68,13 @@ class TestOps(unittest.TestCase):
         Coercing the value would leave frontmatter this engine cannot re-read,
         dropping the note out of search while the call reported success.
         """
-        target = self.vault.wiki_dir / "SQLite.md"
+        target = self.vault.wiki_dir / "sqlite.md"
         before = target.read_text("utf-8")
 
         with self.assertRaises(FrontmatterSerializeError):
             update_note(
                 vault=self.vault,
-                cid_or_path="wiki/SQLite",
+                cid_or_path="wiki/sqlite",
                 frontmatter_patch={"provenance": {"import": {"tool": "zotero"}}},
                 actor="agent:claude-test",
             )
@@ -86,7 +86,7 @@ class TestOps(unittest.TestCase):
         # A legal one-level mapping is unaffected by the guard.
         update_note(
             vault=self.vault,
-            cid_or_path="wiki/SQLite",
+            cid_or_path="wiki/sqlite",
             frontmatter_patch={"provenance": {"tool": "zotero"}},
             actor="agent:claude-test",
         )
@@ -147,8 +147,8 @@ class TestOps(unittest.TestCase):
         self.assertIn("Path traversal detected", str(ctx.exception))
 
     def test_update_note_sections_and_patch(self):
-        cid = "wiki/Flash-Attention"
-        note_file = self.vault.wiki_dir / "Flash-Attention.md"
+        cid = "wiki/flash-attention"
+        note_file = self.vault.wiki_dir / "flash-attention.md"
         h_before = compute_file_sha256(note_file)
 
         # Update note: append a section and patch status
@@ -167,7 +167,7 @@ class TestOps(unittest.TestCase):
         self.assertIn("Benchmarking shows 2-4x speedup.", body)
 
     def test_verify_note_human_refusal_and_machine_attestation(self):
-        cid = "wiki/Flash-Attention"
+        cid = "wiki/flash-attention"
 
         # A human:* attestation without interactive authorization is refused with
         # the categorical code, never PERMISSION_DENIED (C12).
@@ -191,42 +191,42 @@ class TestOps(unittest.TestCase):
         self.assertTrue(result["of"].startswith("sha256:"))
 
     def test_ground_notes_and_budget_truncation(self):
-        cids = ["wiki/Epistemic-Trust-Tiers", "wiki/SQLite"]
+        cids = ["wiki/epistemic-trust-tiers", "wiki/sqlite"]
         grounded = ground_notes(self.vault, cids, budget_tokens=5000)
 
         self.assertEqual(len(grounded), 2)
-        epistemic = next(g for g in grounded if "Epistemic-Trust-Tiers" in g["cid"])
+        epistemic = next(g for g in grounded if "epistemic-trust-tiers" in g["cid"])
         self.assertEqual(epistemic["trust_tier"], "human-reviewed")
         self.assertGreater(len(epistemic["links"]), 0)
         self.assertFalse(epistemic["truncated"])
 
     def test_ground_notes_stem_and_wikilink_resolution(self):
         # 1. Bare note stems
-        grounded_stems = ground_notes(self.vault, ["Epistemic-Trust-Tiers", "SQLite"])
+        grounded_stems = ground_notes(self.vault, ["epistemic-trust-tiers", "sqlite"])
         self.assertEqual(len(grounded_stems), 2)
         cids = [g["cid"] for g in grounded_stems]
-        self.assertIn("wiki/Epistemic-Trust-Tiers", cids)
-        self.assertIn("wiki/SQLite", cids)
+        self.assertIn("wiki/epistemic-trust-tiers", cids)
+        self.assertIn("wiki/sqlite", cids)
 
         # 2. Wikilink syntax with anchor and alias
         grounded_wiki = ground_notes(
             self.vault,
-            ["[[Epistemic-Trust-Tiers#Tiers]]", "[[SQLite|SQLite Database]]"],
+            ["[[epistemic-trust-tiers#Tiers]]", "[[sqlite|SQLite Database]]"],
         )
         self.assertEqual(len(grounded_wiki), 2)
         cids_wiki = [g["cid"] for g in grounded_wiki]
-        self.assertIn("wiki/Epistemic-Trust-Tiers", cids_wiki)
-        self.assertIn("wiki/SQLite", cids_wiki)
+        self.assertIn("wiki/epistemic-trust-tiers", cids_wiki)
+        self.assertIn("wiki/sqlite", cids_wiki)
 
         # 3. Relative path suffixes and .md extension
         grounded_paths = ground_notes(
             self.vault,
-            ["Epistemic-Trust-Tiers.md", "wiki/SQLite.md"],
+            ["epistemic-trust-tiers.md", "wiki/sqlite.md"],
         )
         self.assertEqual(len(grounded_paths), 2)
         cids_paths = [g["cid"] for g in grounded_paths]
-        self.assertIn("wiki/Epistemic-Trust-Tiers", cids_paths)
-        self.assertIn("wiki/SQLite", cids_paths)
+        self.assertIn("wiki/epistemic-trust-tiers", cids_paths)
+        self.assertIn("wiki/sqlite", cids_paths)
 
         # 4. Custom domain notes via bare stem
         cust_dir = self.vault_root / "customers"
@@ -308,7 +308,7 @@ class TestOps(unittest.TestCase):
 
     def test_scaffold_refuses_case_only_collision(self):
         """§5.1, §10 C42. A stem differing from an existing note only by case is refused on disk and in memory."""
-        # Disk: the demo vault ships wiki/Flash-Attention.md in Title-Case.
+        (self.vault.wiki_dir / "flash-attention.md").rename(self.vault.wiki_dir / "Flash-Attention.md")
         with self.assertRaisesRegex(FileExistsError, "only by letter case"):
             scaffold_note(self.vault, title="Flash Attention", type_="concept", description="d")
         self.assertFalse((self.vault.wiki_dir / "flash-attention.md").exists())
@@ -334,9 +334,9 @@ class TestOps(unittest.TestCase):
     def test_names_resolve_to_one_canonical_note_or_are_refused(self):
         """§5.1, §10 C49. Exact path first, then a unique case-insensitive path, then wikilink semantics."""
         storage = DiskNoteStorage(self.vault)
-        self.assertEqual(resolve_note_cid(storage, "wiki/flash-attention"), "wiki/Flash-Attention")
-        self.assertEqual(resolve_note_cid(storage, "[[Flash-Attention#Tiling|FA]]"), "wiki/Flash-Attention")
-        self.assertEqual(resolve_note_cid(storage, "./wiki/SQLite.md"), "wiki/SQLite")
+        self.assertEqual(resolve_note_cid(storage, "wiki/Flash-Attention"), "wiki/flash-attention")
+        self.assertEqual(resolve_note_cid(storage, "[[flash-attention#Tiling|FA]]"), "wiki/flash-attention")
+        self.assertEqual(resolve_note_cid(storage, "./wiki/sqlite.md"), "wiki/sqlite")
 
         for rel in ("customers/acme/README.md", "projects/apollo/README.md"):
             (self.vault_root / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -352,10 +352,10 @@ class TestOps(unittest.TestCase):
         self.assertEqual({p: p.read_bytes() for p in self.vault_root.rglob("README.md")}, before)
         # An exact path always works, and a wiki-relative name is canonical (§4.4), never ambiguous.
         update_note(self.vault, "projects/apollo/README", frontmatter_patch={"description": "x"})
-        (self.vault_root / "customers" / "acme" / "SQLite.md").write_text(
+        (self.vault_root / "customers" / "acme" / "sqlite.md").write_text(
             "---\ntype: concept\ntitle: Twin\ndescription: d\nstatus: active\n---\n# Twin\n", "utf-8"
         )
-        self.assertEqual(resolve_note_cid(storage, "SQLite"), "wiki/SQLite")
+        self.assertEqual(resolve_note_cid(storage, "sqlite"), "wiki/sqlite")
         with self.assertRaises(FileNotFoundError):
             resolve_note_cid(storage, "../outside")
 
@@ -369,25 +369,25 @@ class TestOps(unittest.TestCase):
 
     def test_patch_frontmatter_never_writes_engine_owned_fields(self):
         """§3.4, §10 C47. `verified` and `generated` are written by the engine alone."""
-        note = self.vault.wiki_dir / "Flash-Attention.md"
+        note = self.vault.wiki_dir / "flash-attention.md"
         before = note.read_bytes()
         forged = [{"by": "human:mallory", "at": "2026-01-01T00:00:00Z", "of": "sha256:" + "0" * 64}]
         with self.assertRaises(HumanAttestationRefusedError):
-            update_note(self.vault, "wiki/Flash-Attention", frontmatter_patch={"verified": forged})
+            update_note(self.vault, "wiki/flash-attention", frontmatter_patch={"verified": forged})
         for patch_ in ({"verified": None}, {"verified": [{"by": "agent:x", "of": "sha256:1"}]}, {"generated": {"by": "agent:x"}}):
             with self.subTest(patch=patch_), self.assertRaisesRegex(ValueError, "engine-owned"):
-                update_note(self.vault, "wiki/Flash-Attention", frontmatter_patch=patch_)
+                update_note(self.vault, "wiki/flash-attention", frontmatter_patch=patch_)
         self.assertEqual(note.read_bytes(), before)
 
         with McpServer(self.vault) as server:
-            res = server.handle_tools_call("vault_update_note", {"cid": "wiki/Flash-Attention", "patch_frontmatter": {"verified": forged}})
+            res = server.handle_tools_call("vault_update_note", {"cid": "wiki/flash-attention", "patch_frontmatter": {"verified": forged}})
         self.assertEqual(json.loads(res["content"][0]["text"])["error"]["code"], "HUMAN_ATTESTATION_REFUSED")
         self.assertEqual(note.read_bytes(), before)
 
     def test_list_valued_core_fields_never_break_the_scan(self):
         """§3.1, §10 C48. A list title is indexed as absent and reported by gate 1; writes refuse to create one."""
         (self.vault.wiki_dir / "Listy.md").write_text(
-            "---\ntype: concept\ntitle:\n  - one\n  - two\ndescription: d\nstatus: active\n---\n# Listy [[SQLite]]\n", "utf-8"
+            "---\ntype: concept\ntitle:\n  - one\n  - two\ndescription: d\nstatus: active\n---\n# Listy [[sqlite]]\n", "utf-8"
         )
         with VaultCache(self.vault) as cache:
             cache.scan()
@@ -396,7 +396,7 @@ class TestOps(unittest.TestCase):
         self.assertIn("ENUM_INVALID", codes)
 
         with self.assertRaisesRegex(ValueError, "'type' must be a string"):
-            update_note(self.vault, "wiki/SQLite", frontmatter_patch={"type": ["a", "b"]})
+            update_note(self.vault, "wiki/sqlite", frontmatter_patch={"type": ["a", "b"]})
         with self.assertRaisesRegex(ValueError, "description must be a string"):
             scaffold_note(self.vault, "Listy Two", "concept", ["one", "two"])  # type: ignore[arg-type]
         self.assertFalse((self.vault.wiki_dir / "listy-two.md").exists())
@@ -404,7 +404,7 @@ class TestOps(unittest.TestCase):
     def test_implicit_occ_detects_concurrent_modification_on_update_and_verify(self):
         base_storage = DiskNoteStorage(self.vault)
         ledger = FileLedger(self.vault)
-        note_path = self.vault.wiki_dir / "Flash-Attention.md"
+        note_path = self.vault.wiki_dir / "flash-attention.md"
 
         class RacingStorage(DiskNoteStorage):
             def get_note(self_inner, cid_or_path: str):
@@ -416,16 +416,16 @@ class TestOps(unittest.TestCase):
         racing = RacingStorage(self.vault)
         with self.assertRaises(VaultConflictError):
             UpdateNoteUseCase(racing, ledger).execute(
-                cid_or_path="wiki/Flash-Attention",
+                cid_or_path="wiki/flash-attention",
                 frontmatter_patch={"description": "Should fail due to concurrent edit"},
             )
 
         with self.assertRaises(VaultConflictError):
             VerifyNoteUseCase(racing, ledger).execute(
-                cid_or_path="wiki/Flash-Attention",
+                cid_or_path="wiki/flash-attention",
                 actor="agent:verifier",
             )
-        self.assertIsNotNone(base_storage.get_note("wiki/Flash-Attention"))
+        self.assertIsNotNone(base_storage.get_note("wiki/flash-attention"))
 
     def test_ground_notes_closes_temporary_cache(self):
         closed_instances: list[VaultCache] = []
@@ -436,7 +436,7 @@ class TestOps(unittest.TestCase):
             orig_close(cache_self)
 
         with patch.object(VaultCache, "close", autospec=True, side_effect=tracking_close):
-            grounded = ground_notes(self.vault, ["wiki/SQLite"], cache=None)
+            grounded = ground_notes(self.vault, ["wiki/sqlite"], cache=None)
             self.assertEqual(len(grounded), 1)
             self.assertEqual(len(closed_instances), 1)
 

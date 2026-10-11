@@ -19,7 +19,7 @@ generated:
 Index of AI architecture components, model attention optimizations, and evaluation mechanisms.
 
 ## Architectures & Mechanisms
-- [[Flash-Attention]] - IO-aware memory-efficient exact attention.
+- [[flash-attention]] - IO-aware memory-efficient exact attention.
 
 ## Trust & Verification
-- [[Epistemic-Trust-Tiers]] - Hierarchical classification of knowledge ground truth.
+- [[epistemic-trust-tiers]] - Hierarchical classification of knowledge ground truth.

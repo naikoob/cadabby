@@ -60,12 +60,12 @@ class TestMcpServer(unittest.TestCase):
             {"replace_text", "replace_section", "append_section"},
         )
         # Over the wire the batch is all-or-nothing: a bad third edit leaves the file alone.
-        target = self.vault_root / "wiki" / "SQLite.md"
+        target = self.vault_root / "wiki" / "sqlite.md"
         before = target.read_bytes()
         res = self.server.handle_tools_call(
             "vault_update_note",
             {
-                "cid": "wiki/SQLite",
+                "cid": "wiki/sqlite",
                 "edits": [
                     {"op": "replace_text", "old": "small, fast", "new": "small and fast"},
                     {"op": "replace_text", "old": "text that is not in the note", "new": "x"},
@@ -91,13 +91,13 @@ class TestMcpServer(unittest.TestCase):
         self.assertGreater(len(data_search_hyphen), 0)
 
         # Ground with bare stem and wikilink
-        res_ground = self.server.handle_tools_call("vault_ground", {"cids": ["SQLite", "[[Epistemic-Trust-Tiers]]"]})
+        res_ground = self.server.handle_tools_call("vault_ground", {"cids": ["sqlite", "[[epistemic-trust-tiers]]"]})
         self.assertFalse(res_ground["isError"])
         data_ground = json.loads(res_ground["content"][0]["text"])
         self.assertEqual(len(data_ground), 2)
         grounded_cids = [g["cid"] for g in data_ground]
-        self.assertIn("wiki/SQLite", grounded_cids)
-        self.assertIn("wiki/Epistemic-Trust-Tiers", grounded_cids)
+        self.assertIn("wiki/sqlite", grounded_cids)
+        self.assertIn("wiki/epistemic-trust-tiers", grounded_cids)
 
     def test_tools_call_scaffold_update_verify_status_lint(self):
         self.server.handle_initialize({"clientInfo": {"name": "agent-smith"}})
@@ -159,7 +159,7 @@ class TestMcpServer(unittest.TestCase):
     def test_status_reports_finding_counts_and_findings_only_on_request(self):
         """§10 C46. Findings describe the vault, not the call: never isError; vault_lint is gone."""
         (self.vault_root / "wiki" / "Dead-Linker.md").write_text(
-            "---\ntype: concept\ntitle: Dead Linker\ndescription: d\nstatus: active\n---\n[[Nowhere]] [[SQLite]]\n",
+            "---\ntype: concept\ntitle: Dead Linker\ndescription: d\nstatus: active\n---\n[[Nowhere]] [[sqlite]]\n",
             "utf-8",
         )
         plain = self.server.handle_tools_call("vault_status", {})

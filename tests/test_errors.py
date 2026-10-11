@@ -204,7 +204,7 @@ class TestMCPErrorPayload(unittest.TestCase):
         """§3.4. Not INVALID_ARGUMENT: there is no argument that would work."""
         for key in ("actor", "by"):
             with self.subTest(key=key):
-                err = self._error("vault_verify_note", {"cid": "wiki/Flash-Attention", key: "human:attacker"})
+                err = self._error("vault_verify_note", {"cid": "wiki/flash-attention", key: "human:attacker"})
                 self.assertEqual(err["code"], "HUMAN_ATTESTATION_REFUSED")
                 self.assertFalse(err["retryable"])
 
@@ -213,7 +213,7 @@ class TestMCPErrorPayload(unittest.TestCase):
         err = self._error(
             "vault_update_note",
             {
-                "cid": "wiki/Flash-Attention",
+                "cid": "wiki/flash-attention",
                 "patch_frontmatter": {"status": "deprecated"},
                 "expected_hash": "sha256:" + "0" * 64,
             },

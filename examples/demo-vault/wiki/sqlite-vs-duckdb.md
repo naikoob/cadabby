@@ -16,4 +16,4 @@ generated:
 
 SQLite is optimized for transactional workloads (row-oriented OLTP) whereas DuckDB is optimized for analytical queries (columnar OLAP).
 
-See [[SQLite]] for primary details.
+See [[sqlite]] for primary details.

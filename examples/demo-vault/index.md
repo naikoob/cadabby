@@ -7,8 +7,8 @@
 
 | Map of Content | Description |
 | :--- | :--- |
-| [[AI-Systems-MOC]] | Map of Content covering AI architectures, attention mechanisms, and epistemic evaluation |
-| [[Storage-MOC]] | Map of Content covering storage engines, embedded databases, and transactional architectures |
+| [[ai-systems-moc]] | Map of Content covering AI architectures, attention mechanisms, and epistemic evaluation |
+| [[storage-moc]] | Map of Content covering storage engines, embedded databases, and transactional architectures |
 
 ## Raw Sources
 

@@ -164,24 +164,24 @@ class TestMoveNote(unittest.TestCase):
         self.assertEqual(self._snapshot(), before)
 
     def test_human_reviewed_referrer_needs_explicit_approval(self):
-        """§10 C45. The demo's human-reviewed note links to Flash-Attention; renaming it needs the user's OK."""
-        plan = move_note(self.vault, "wiki/Flash-Attention", "flash-attention")
-        self.assertTrue(any("Epistemic-Trust-Tiers" in b for b in plan["blocked"]))
+        """§10 C45. The demo's human-reviewed note links to flash-attention; renaming it needs the user's OK."""
+        plan = move_note(self.vault, "wiki/flash-attention", "fa-tiling")
+        self.assertTrue(any("epistemic-trust-tiers" in b for b in plan["blocked"]))
         with self.assertRaises(ValueError):
-            move_note(self.vault, "wiki/Flash-Attention", "flash-attention", apply=True)
+            move_note(self.vault, "wiki/flash-attention", "fa-tiling", apply=True)
 
         applied = move_note(
             self.vault,
-            "wiki/Flash-Attention",
-            "flash-attention",
+            "wiki/flash-attention",
+            "fa-tiling",
             apply=True,
-            approve_stale=["wiki/Epistemic-Trust-Tiers"],
+            approve_stale=["wiki/epistemic-trust-tiers"],
         )
         tiers = {n["cid"]: (n["tier_before"], n["tier_after"]) for n in applied["notes"]}
-        self.assertEqual(tiers["wiki/Epistemic-Trust-Tiers"], ("human-reviewed", "stale-verified"))
+        self.assertEqual(tiers["wiki/epistemic-trust-tiers"], ("human-reviewed", "stale-verified"))
         names = {p.name for p in (self.root / "wiki").glob("*.md")}
-        self.assertIn("flash-attention.md", names)
-        self.assertNotIn("Flash-Attention.md", names)
+        self.assertIn("fa-tiling.md", names)
+        self.assertNotIn("flash-attention.md", names)
         self.assertEqual([f for f in run_vault_lint(self.vault) if f.severity == "error"], [])
 
     def test_conflict_mid_apply_restores_every_file(self):
@@ -212,8 +212,8 @@ class TestMoveNote(unittest.TestCase):
             ("wiki/sub/target-note", ValueError, "flat"),
             ("raw/target-note", ValueError, "reserved"),
             ("customers/acme/target-note", ValueError, "allowed types"),
-            ("wiki/SQLite", FileExistsError, "already exists"),
-            ("wiki/sqlite", FileExistsError, "only by letter case"),
+            ("wiki/sqlite", FileExistsError, "already exists"),
+            ("wiki/SQLite", FileExistsError, "only by letter case"),
             ("wiki/target-note", ValueError, "already at"),
         ]
         for to, exc, needle in cases:
@@ -239,7 +239,7 @@ class TestMoveNote(unittest.TestCase):
             )
             self.assertTrue(json.loads(done["content"][0]["text"])["applied"])
             refused = server.handle_tools_call(
-                "vault_move_note", {"cid": "wiki/Flash-Attention", "to": "flash-attention", "apply": True}
+                "vault_move_note", {"cid": "wiki/flash-attention", "to": "fa-tiling", "apply": True}
             )
             self.assertTrue(refused["isError"])
             self.assertEqual(json.loads(refused["content"][0]["text"])["error"]["code"], "INVALID_ARGUMENT")
@@ -248,7 +248,7 @@ class TestMoveNote(unittest.TestCase):
         """§5.1. Relative links that still resolve from the new path are left alone, so attestations stay valid."""
         self._write(
             "wiki/target-note.md",
-            _fm("Target") + "[sib](./SQLite.md) and [up](../wiki/SQLite.md) and [here](./#top)\n",
+            _fm("Target") + "[sib](./sqlite.md) and [up](../wiki/sqlite.md) and [here](./#top)\n",
         )
         verify_note(self.vault, "wiki/target-note", actor="human:owner", is_human_authorized=True)
         plan = move_note(self.vault, "wiki/target-note", "renamed-note", apply=True)
@@ -256,8 +256,8 @@ class TestMoveNote(unittest.TestCase):
         self.assertEqual(plan["moved_note"]["tier_before"], "human-reviewed")
         self.assertEqual(plan["moved_note"]["tier_after"], "human-reviewed")
         body = (self.root / "wiki/renamed-note.md").read_text("utf-8")
-        self.assertIn("[sib](./SQLite.md)", body)
-        self.assertIn("[up](../wiki/SQLite.md)", body)
+        self.assertIn("[sib](./sqlite.md)", body)
+        self.assertIn("[up](../wiki/sqlite.md)", body)
         self.assertIn("[here](./#top)", body)
 
     def test_moved_note_self_link_by_filename_follows_the_rename(self):
@@ -304,20 +304,20 @@ class TestMoveNote(unittest.TestCase):
         """§5.1. The note and each approve_stale entry may be a CID, stem or wikilink."""
         plan = move_note(
             self.vault,
-            "Flash-Attention",
             "flash-attention",
-            approve_stale=["[[Epistemic-Trust-Tiers]]"],
+            "fa-tiling",
+            approve_stale=["[[epistemic-trust-tiers]]"],
         )
         self.assertEqual(plan["blocked"], [])
         plan = move_note(
             self.vault,
-            "[[Flash-Attention]]",
-            "flash-attention",
+            "[[flash-attention]]",
+            "fa-tiling",
             apply=True,
-            approve_stale=["Epistemic-Trust-Tiers"],
+            approve_stale=["epistemic-trust-tiers"],
         )
-        self.assertEqual(plan["from"], "wiki/Flash-Attention")
-        self.assertEqual(plan["to"], "wiki/flash-attention")
+        self.assertEqual(plan["from"], "wiki/flash-attention")
+        self.assertEqual(plan["to"], "wiki/fa-tiling")
 
     def test_ambiguous_names_and_unknown_approvals_are_refused(self):
         """§5.1, §10 C49. Two README hubs make `README` ambiguous; an approval naming no note is an error."""
@@ -328,15 +328,15 @@ class TestMoveNote(unittest.TestCase):
             move_note(self.vault, "README", "archive/", apply=True)
         self.assertEqual(ctx.exception.candidates, ["customers/acme/README", "projects/apollo/README"])
         with self.assertRaises(FileNotFoundError):
-            move_note(self.vault, "wiki/SQLite", "sqlite-x", approve_stale=["No-Such-Note"])
+            move_note(self.vault, "wiki/sqlite", "sqlite-x", approve_stale=["No-Such-Note"])
         self.assertEqual(self._snapshot(), before)
 
     def test_wrong_case_name_resolves_to_the_real_note(self):
         """§10 C49. The source is always a listed CID, never the caller's spelling (APFS/NTFS would open either)."""
-        plan = move_note(self.vault, "wiki/flash-attention", "fa-renamed")
-        self.assertEqual(plan["from"], "wiki/Flash-Attention")
+        plan = move_note(self.vault, "wiki/Flash-Attention", "fa-renamed")
+        self.assertEqual(plan["from"], "wiki/flash-attention")
         # The real note's referrers are planned, so the human-reviewed guard still fires.
-        self.assertTrue(any("Epistemic-Trust-Tiers" in b for b in plan["blocked"]))
+        self.assertTrue(any("epistemic-trust-tiers" in b for b in plan["blocked"]))
 
     def test_overlapping_nested_link_spans_do_not_duplicate_body_text(self):
         """§5.1. Nested link syntax [x]([[target-note]].md) in a referrer rewrites the wikilink once, cleanly."""
@@ -357,7 +357,7 @@ class TestMoveNote(unittest.TestCase):
 
     def test_human_reviewed_moved_note_can_be_approved_by_its_destination(self):
         """§5.1. A moved note whose own links change is named in approve_stale by old or new path."""
-        self._write("wiki/hr-target.md", _fm("HR") + "[sib](SQLite.md)\n")
+        self._write("wiki/hr-target.md", _fm("HR") + "[sib](sqlite.md)\n")
         verify_note(self.vault, "wiki/hr-target", actor="human:tester", is_human_authorized=True)
         blocked = move_note(self.vault, "wiki/hr-target", "customers/acme/hr-target")["blocked"]
         self.assertTrue(any("hr-target.md is human-reviewed" in b for b in blocked))
@@ -426,9 +426,9 @@ class TestMoveNote(unittest.TestCase):
                 return note
 
         uc = MoveNoteUseCase(CaseInsensitiveDisk(self.vault), FileLedger(self.vault), vault=self.vault)
-        plan = uc.plan("wiki/flash-attention", "fa-renamed")
-        self.assertEqual(plan.source.cid, "wiki/Flash-Attention")
-        self.assertTrue(any("Epistemic-Trust-Tiers" in b for b in plan.blocked))
+        plan = uc.plan("wiki/Flash-Attention", "fa-renamed")
+        self.assertEqual(plan.source.cid, "wiki/flash-attention")
+        self.assertTrue(any("epistemic-trust-tiers" in b for b in plan.blocked))
 
     def test_a_rewrite_that_would_not_read_back_blocks_the_plan(self):
         """§5.1. Every rewritten link is re-parsed; one that no longer names the moved note is a blocker."""

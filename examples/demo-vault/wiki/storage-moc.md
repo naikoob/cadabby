@@ -18,4 +18,4 @@ generated:
 Index of core storage engines, embedded databases, and transactional architectures.
 
 ## Storage Engines
-- [[SQLite]] - Self-contained serverless transactional database engine.
+- [[sqlite]] - Self-contained serverless transactional database engine.
