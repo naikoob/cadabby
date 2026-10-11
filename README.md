@@ -45,6 +45,18 @@ cadabby --help
 Cadabby has **zero runtime dependencies** (pure CPython >= 3.11 standard
 library), so installation never pulls in a transitive dependency tree.
 
+### Upgrading from 0.4.0
+
+0.4.1 changes no tools, flags or file formats. After upgrading the package, in each vault:
+
+1. Run `cadabby install --all` to refresh the engine-owned runbooks and plugin.
+2. In the vault's own `AGENTS.md` (user-owned, never overwritten), change
+   `vault_search(query, type_="moc")` to `vault_search(query, type="moc")`. The server
+   ignores `type_`, so MOC searches following the old line silently returned every note type.
+3. Optional: adopt the new, much shorter `AGENTS.md` template, which routes task
+   procedures to the runbooks. Run `cadabby init` into a scratch folder to see it, and
+   carry over any edits of your own. New vaults get it automatically.
+
 ### Upgrading from 0.3.x
 
 0.4.0 folds `vault_lint` into `vault_status` (`lint: true`) and adds
@@ -65,7 +77,7 @@ git clone https://github.com/naikoob/cadabby.git
 cd cadabby
 uv sync                    # or: pip install -e .
 
-# Fast parallel test execution across all CPU cores (~25s, 536 tests):
+# Fast parallel test execution across all CPU cores (~25s, 539 tests):
 python3 tests/run_parallel.py
 
 # Canonical sequential test suite:
@@ -333,7 +345,7 @@ Status multipliers apply on top of trust tiers:
 Cadabby uses standard-library `unittest` with **zero test dependencies**:
 
 ```bash
-# Fast parallel test execution across all CPU cores (~25s, 536 tests):
+# Fast parallel test execution across all CPU cores (~25s, 539 tests):
 python3 tests/run_parallel.py
 
 # Parallel execution with verbose output or target filtering:
