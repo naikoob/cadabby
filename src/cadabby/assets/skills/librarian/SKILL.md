@@ -32,10 +32,10 @@ The **librarian** is responsible for growing the knowledge base with compounding
    - Update non-`human-reviewed` related notes via `vault_update_note` to reference the new findings and prevent orphaned nodes. Several changes to the same hub or MOC go in one call's `edits` list, not one call per link.
    - **Guarded Q&A stashing & synthesis completeness**: When answering questions, distinguish vault-backed claims (with their `trust_tier`) from ungrounded gaps. Never stash unrequested model lore as if it were source-backed. When a user asks to save a study supplement or compile a synthesis note / cheat sheet spanning both verified and `unverified` notes, include the full user-requested scope (marking unverified sections with `[unverified]` or an `Unverified Supplement` callout) and leave the note `unverified` rather than omitting topics to chase `machine-confirmed`.
    - **MOC Anchoring Protocol**:
-     - Check for an existing suitable MOC using `vault_search(query, type_="moc")`.
+     - Check for an existing suitable MOC using `vault_search(query, type="moc")`.
      - Link the newly scaffolded note into the matching MOC using `vault_update_note` (asking the user first if the MOC itself is `human-reviewed`).
      - If no relevant MOC exists and the note starts a new topical cluster, scaffold a new MOC (`type: "moc"`, stem: `"{topic}-moc"`).
-     - If the target MOC has grown beyond ~25 links or $\ge 6$ subtopics, plan an MOC split into focused child MOCs.
+     - If the target MOC has grown beyond ~25 links or ≥ 6 subtopics, plan an MOC split into focused child MOCs.
 
 3. **Attestation**:
    - **Mandatory pre-verification audit**: Only call `vault_verify_note(cid, method="source-crosscheck")` after re-reading the cited `raw/` source and confirming every number, quote, entity name, date, formula derivation, and causal claim in the note body matches the source text. The MCP server automatically binds your agent session identity.

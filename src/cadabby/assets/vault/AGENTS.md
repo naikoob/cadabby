@@ -1,6 +1,6 @@
 # Vault Agent Constitution (AGENTS.md)
 
-This document is the **single canonical constitution** governing all AI agents interacting with this vault across every harness (Google Antigravity, Claude Code, Cursor, Zed, Codex). Harness-specific files (`CLAUDE.md`, `GEMINI.md`) are non-normative shims pointing here.
+This document is the **single canonical constitution** governing all AI agents interacting with this vault across every harness (Google Antigravity, Claude Code, Gemini CLI, Cursor, Zed, Codex). Harness-specific files (`CLAUDE.md`, `GEMINI.md`) are non-normative shims pointing here.
 
 ---
 
@@ -20,9 +20,9 @@ This vault implements Andrej Karpathy's 3-layer LLM Wiki architecture:
 * **`wiki/` (Layer 2 — Compounded Synthesis)**:
   Compiled knowledge base maintained primarily by AI agents. Notes live directly in `wiki/*.md` without subdirectories. Associative navigation and topic clustering are organized via Maps of Content (MOCs) and wikilinks.
   - **First-Class MOCs (`type: moc`)**: Topical hub notes that cluster, structure, and navigate domains of knowledge. Listed as the vault's entry points in the generated `index.md`, which also measures MOC coverage against them.
-  - **MOC Anchoring on Ingestion**: Whenever a note is scaffolded or synthesized, agents MUST search for a suitable existing MOC (`vault_search(query, type_="moc")`) and link the note into that MOC. If no suitable MOC exists and the note introduces a new topic cluster, agents should scaffold or suggest a new MOC (e.g. `wiki/{topic}-moc.md`).
-  - **MOC Splitting Heuristic**: When an MOC grows beyond ~25 links or spans $\ge 6$ distinct subtopics, decompose it into focused child MOCs (e.g. `storage-moc` $\rightarrow$ `relational-storage-moc`, `vector-storage-moc`), linking the child MOCs back to the parent MOC.
-  - **MOC Merging Heuristic**: When an MOC has $\le 2$ links (anemic hub) or shares $> 50\%$ link overlap with a neighboring MOC, consolidate them into a single unified MOC to avoid graph fragmentation.
+  - **MOC Anchoring on Ingestion**: Whenever a note is scaffolded or synthesized, agents MUST search for a suitable existing MOC (`vault_search(query, type="moc")`) and link the note into that MOC. If no suitable MOC exists and the note introduces a new topic cluster, agents should scaffold or suggest a new MOC (e.g. `wiki/{topic}-moc.md`).
+  - **MOC Splitting Heuristic**: When an MOC grows beyond ~25 links or spans ≥ 6 distinct subtopics, decompose it into focused child MOCs (e.g. `storage-moc` → `relational-storage-moc`, `vector-storage-moc`), linking the child MOCs back to the parent MOC.
+  - **MOC Merging Heuristic**: When an MOC has ≤ 2 links (anemic hub) or shares > 50% link overlap with a neighboring MOC, consolidate them into a single unified MOC to avoid graph fragmentation.
   - **Answering Folder Requests**: `wiki/` is flat by invariant; a subdirectory is a gate 2 `WIKI_NESTING_DISALLOWED` error. When a user asks for `wiki/cs182/week2/note.md`, do not silently flatten the path and move on. Explain that topology here is editorial rather than physical, then offer the two real options: scaffold at `wiki/{stem}.md` and anchor it into a topical MOC, or — if the hierarchy is load-bearing for external tooling — stand up a top-level cognitive domain (`cs182/week2/note.md`) governed by `cs182/AGENTS.md`. Notes that already exist move there with `vault_move_note`, which repoints their links.
 * **Cognitive Domains (Custom Top-Level Directories)**:
   Any non-reserved top-level directory at the vault root functions as an independent Cognitive Domain (e.g. `customers/`, `projects/`, `research/`). Custom domains support flexible nested subdirectories.
@@ -90,7 +90,7 @@ Any edit to a verified note's body — in Obsidian, in an editor, or through `va
 Always prioritize native Cadabby MCP tools over raw bash commands or filesystem modifications:
 
 1. **Discovery & Retrieval**:
-   - `vault_search`: Semantic and keyword BM25 search boosted by epistemic trust.
+   - `vault_search`: Keyword (FTS5 BM25) search, ranked up by epistemic trust. Matching is lexical, not semantic: query with the words a note would actually contain, and try synonyms before concluding a topic is absent.
    - `vault_ground`: Retrieve note content, 1-hop links, backlinks, and sources.
    - **Searching `raw/`**: Unfiltered `vault_search` deliberately excludes `raw/` so uncurated source text cannot flood the BM25 rankings of curated notes. Raw text lives in a separate index, reached with `vault_search(query, domain="raw")`. Run that second search whenever the first returns nothing, and whenever the user is asking about a transcript, a paper, or anything else they uploaded. Reporting "I found nothing in your vault" after only the default search is wrong, not merely incomplete.
    - **No refresh step needed**: Every `vault_*` call rescans the vault first, so files the user just added or edited in Obsidian are already visible. Do not call `vault_status` to "refresh" before searching.
