@@ -2,7 +2,7 @@
 
 > **Epistemically Auditable LLM Wiki Engine for Humans & AI Agents**
 
-Cadabby is a zero-dependency, local-first engine and Model Context Protocol (MCP) server for maintaining living, high-density knowledge vaults. It enables AI agents (Claude Code, Google Antigravity, OpenHands, etc.) and humans (via Obsidian or CLI) to collaboratively build, cross-reference, and audit knowledge graphs anchored by Open Knowledge Foundation (OKF) epistemic trust tiers.
+Cadabby is a zero-dependency, local-first engine and Model Context Protocol (MCP) server for maintaining living, high-density knowledge vaults. It enables AI agents (Claude Code, Google Antigravity, OpenHands, etc.) and humans (via Obsidian or CLI) to collaboratively build, cross-reference, and audit knowledge graphs anchored by Open Knowledge Format (OKF) epistemic trust tiers.
 
 ---
 
