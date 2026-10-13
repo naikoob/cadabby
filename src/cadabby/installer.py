@@ -280,7 +280,8 @@ def _is_cadabby_entry(entry: Any) -> bool:
     """
     if not isinstance(entry, dict):
         return False
-    args = [str(a) for a in entry.get("args") or []]
+    raw_args = entry.get("args")
+    args = [str(a) for a in raw_args] if isinstance(raw_args, (list, tuple)) else []
     return Path(str(entry.get("command", ""))).name.startswith("cadabby") or "cadabby" in args
 
 
@@ -288,7 +289,8 @@ def _entry_vault(entry: Any) -> str | None:
     """Return the vault an mcpServers entry is bound to, or None if unbound."""
     if not isinstance(entry, dict):
         return None
-    args = [str(a) for a in entry.get("args") or []]
+    raw_args = entry.get("args")
+    args = [str(a) for a in raw_args] if isinstance(raw_args, (list, tuple)) else []
     if "--vault" in args:
         index = args.index("--vault")
         if index + 1 < len(args):
@@ -393,8 +395,10 @@ def install_antigravity(
             if mcp_file.exists():
                 try:
                     cur_cfg = json.loads(mcp_file.read_text("utf-8"))
-                    if cur_cfg.get("mcpServers", {}).get("cadabby") == desired_entry:
-                        return True, f"Antigravity plugin already installed at {dest} (unchanged)."
+                    if isinstance(cur_cfg, dict):
+                        mcp_servers = cur_cfg.get("mcpServers")
+                        if isinstance(mcp_servers, dict) and mcp_servers.get("cadabby") == desired_entry:
+                            return True, f"Antigravity plugin already installed at {dest} (unchanged)."
                 except (json.JSONDecodeError, OSError):
                     pass
             if not force:

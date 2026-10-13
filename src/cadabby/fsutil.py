@@ -46,7 +46,7 @@ def atomic_write(target_path: Path | str, content: str | bytes, encoding: str = 
     tmp_path = target.parent / f".tmp_{os.getpid()}_{uuid.uuid4().hex[:8]}_{target.name}"
 
     try:
-        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
         try:
             total_written = 0
             while total_written < len(data):
@@ -65,10 +65,9 @@ def atomic_write(target_path: Path | str, content: str | bytes, encoding: str = 
             os.chmod(tmp_path, target.stat().st_mode & 0o7777)
 
         os.replace(tmp_path, target)
-    except Exception:
-        if tmp_path.exists():
-            with contextlib.suppress(OSError):
-                tmp_path.unlink()
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp_path.unlink(missing_ok=True)
         raise
 
 
@@ -170,9 +169,12 @@ def advisory_lock(
                 raw_info = raw_bytes.decode("utf-8", errors="replace").strip()
                 if ":" in raw_info:
                     pid_str, ts_str = raw_info.split(":", 1)
-                    lock_pid = int(pid_str)
-                    lock_ts = float(ts_str)
-                    is_stale = (now - lock_ts > stale_age) or not _is_process_alive(lock_pid)
+                    try:
+                        lock_pid = int(pid_str)
+                        lock_ts = float(ts_str)
+                        is_stale = (now - lock_ts > stale_age) or not _is_process_alive(lock_pid)
+                    except ValueError:
+                        is_stale = True
                 else:
                     is_stale = True
 

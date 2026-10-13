@@ -240,11 +240,13 @@ def resolve_relative_path(source_cid: str, path_part: str) -> str | None:
     """The vault-relative path a relative link names from its source note's folder.
 
     `path_part` is already decoded and carries no `#anchor`. Returns None when
-    the path climbs out of the vault.
+    the path climbs out of the vault or is absolute.
     """
+    if path_part.startswith("/"):
+        return None
     source_dir = posixpath.dirname(cid_to_path(source_cid))
     joined = posixpath.normpath(posixpath.join(source_dir, path_part))
-    if joined in (".", "..") or joined.startswith("../"):
+    if joined in (".", "..") or joined.startswith(("../", "/")):
         return None
     return joined
 
@@ -392,7 +394,8 @@ def get_note_graph(conn: sqlite3.Connection, target_cid: str) -> dict[str, Any] 
     # 4. 2-hop forward links (targets of 1-hop forward targets)
     two_hop_forward: list[dict[str, Any]] = []
     if forward_cids:
-        placeholders = ",".join("?" for _ in forward_cids)
+        forward_list = sorted(forward_cids)
+        placeholders = ",".join("?" for _ in forward_list)
         cur = conn.execute(
             f"""
             SELECT DISTINCT source_cid, target_cid
@@ -403,14 +406,15 @@ def get_note_graph(conn: sqlite3.Connection, target_cid: str) -> dict[str, Any] 
               AND target_cid NOT IN ({placeholders})
             ORDER BY target_cid ASC;
             """,
-            (*forward_cids, target_cid, *forward_cids),
+            (*forward_list, target_cid, *forward_list),
         )
         two_hop_forward = [{"via": r["source_cid"], "target_cid": r["target_cid"]} for r in cur.fetchall()]
 
     # 5. 2-hop backlinks (sources linking to 1-hop backlinks)
     two_hop_backlinks: list[dict[str, Any]] = []
     if backlink_cids:
-        placeholders = ",".join("?" for _ in backlink_cids)
+        backlink_list = sorted(backlink_cids)
+        placeholders = ",".join("?" for _ in backlink_list)
         cur = conn.execute(
             f"""
             SELECT DISTINCT source_cid, target_cid
@@ -420,7 +424,7 @@ def get_note_graph(conn: sqlite3.Connection, target_cid: str) -> dict[str, Any] 
               AND source_cid NOT IN ({placeholders})
             ORDER BY source_cid ASC;
             """,
-            (*backlink_cids, target_cid, *backlink_cids),
+            (*backlink_list, target_cid, *backlink_list),
         )
         two_hop_backlinks = [{"source_cid": r["source_cid"], "via": r["target_cid"]} for r in cur.fetchall()]
 

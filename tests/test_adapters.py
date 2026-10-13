@@ -91,6 +91,15 @@ class TestDiskNoteStorage(unittest.TestCase):
         self.assertIsNone(self.storage.get_note("../../etc/passwd"))
         self.assertIsNone(self.storage.get_note("/etc/passwd"))
 
+    def test_get_note_non_utf8_bytes_raises_unicodedecodeerror(self):
+        note_path = self.vault_dir / "wiki" / "concepts" / "Binary.md"
+        # Write bytes containing invalid UTF-8 byte 0xff
+        note_path.write_bytes(
+            b"---\ntype: concept\ntitle: Binary\ndescription: Invalid UTF8\nstatus: active\n---\n# Binary\n\xff\n"
+        )
+        with self.assertRaises(UnicodeDecodeError):
+            self.storage.get_note("wiki/concepts/Binary")
+
     def test_save_note_success(self):
         note = Note(
             cid="wiki/concepts/Relativity",

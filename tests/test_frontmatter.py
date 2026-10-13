@@ -35,6 +35,8 @@ class TestFrontmatterParser(unittest.TestCase):
         self.assertEqual(parse_scalar('"with \\"quotes\\""', 1), 'with "quotes"')
         self.assertEqual(parse_scalar("'single quoted'", 1), "single quoted")
         self.assertEqual(parse_scalar("'it''s ok'", 1), "it's ok")
+        with self.assertRaises(FrontmatterParseError):
+            parse_scalar("'it's bad'", 1)
 
     def test_valid_okf_frontmatter(self):
         sample = """---
