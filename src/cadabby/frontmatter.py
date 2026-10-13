@@ -103,6 +103,8 @@ def parse_scalar(raw: str, line_no: int) -> str | bool | None:
             raise FrontmatterParseError("Unclosed single-quoted string", line_no)
         inner = val[1:-1]
         # In YAML, '' represents an escaped single quote
+        if "'" in inner.replace("''", ""):
+            raise FrontmatterParseError("Unescaped single quote inside single-quoted string", line_no)
         return inner.replace("''", "'")
 
     # Bare scalars. The forbidden-feature checks apply here and only here: a

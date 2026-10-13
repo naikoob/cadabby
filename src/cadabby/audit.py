@@ -63,7 +63,7 @@ def run_vault_audit(vault: Vault, require_signed: bool = False) -> tuple[list[Au
     for file_path in all_note_files:
         rel_path = vault.rel_path(file_path)
         try:
-            content = file_path.read_text("utf-8")
+            content = file_path.read_text("utf-8", errors="replace")
         except OSError:
             continue
 
@@ -151,7 +151,7 @@ def run_vault_audit(vault: Vault, require_signed: bool = False) -> tuple[list[Au
             if require_signed and commit_hash and commit_hash != UNCOMMITTED_SHA:
                 try:
                     sig_res = subprocess.run(
-                        ["git", "log", "-1", "--format=%G?", commit_hash],
+                        ["git", "log", "-1", "--format=%G?", commit_hash, "--"],
                         cwd=vault.root,
                         capture_output=True,
                         text=True,

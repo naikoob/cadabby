@@ -301,6 +301,51 @@ class TestAudit(unittest.TestCase):
             self.assertEqual(findings[0].actor, "human:alice")
             self.assertEqual(findings[0].line, 8)
 
+    def test_audit_handles_non_utf8_file_without_crashing(self):
+        corrupt_file = self.vault_root / "wiki" / "Corrupt.md"
+        corrupt_file.write_bytes(b"---\ntype: concept\ntitle: Corrupt\nstatus: active\n---\n# Corrupt\n\xff\n")
+        with (
+            patch("cadabby.audit.is_git_repository", return_value=True),
+            patch("subprocess.run") as mock_run,
+        ):
+            findings, notice = run_vault_audit(self.vault)
+            self.assertEqual(findings, [])
+            self.assertIsNone(notice)
+
+    def test_git_log_uses_positional_separator(self):
+        self._write_note(
+            "Note-Alice",
+            frontmatter_extra="verified:\n  - by: human:alice\n    at: '2026-10-01T00:00:00Z'\n    of: sha256:abc",
+        )
+        mock_blame = (
+            "commit456 1 1 1\n"
+            "author Alice\n"
+            "author-mail <alice@example.com>\n"
+            "\t  - by: human:alice\n"
+        )
+        commands_run: list[list[str]] = []
+        with (
+            patch("cadabby.audit.is_git_repository", return_value=True),
+            patch("subprocess.run") as mock_run,
+        ):
+            def fake_run(cmd, **kwargs):
+                commands_run.append(cmd)
+                ret = MagicMock()
+                if "blame" in cmd:
+                    ret.returncode = 0
+                    ret.stdout = mock_blame
+                elif "log" in cmd:
+                    ret.returncode = 0
+                    ret.stdout = "G\n"
+                return ret
+
+            mock_run.side_effect = fake_run
+            findings, notice = run_vault_audit(self.vault, require_signed=True)
+            self.assertEqual(findings, [])
+            log_cmds = [c for c in commands_run if "log" in c]
+            self.assertEqual(len(log_cmds), 1)
+            self.assertEqual(log_cmds[0][-1], "--")
+
 
 if __name__ == "__main__":
     unittest.main()

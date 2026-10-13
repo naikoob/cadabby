@@ -330,6 +330,8 @@ class TestMarkdownNoteLinkExtraction(unittest.TestCase):
         self.assertEqual(resolve_markdown_target(src, "Notes.md#Top"), "customers/acme/Notes")
         self.assertEqual(resolve_markdown_target("wiki/A", "B%20C.md"), "wiki/B C")
         self.assertIsNone(resolve_markdown_target(src, "../../../outside.md"))
+        self.assertIsNone(resolve_markdown_target(src, "/etc/passwd.md"))
+        self.assertIsNone(resolve_markdown_target(src, "/wiki/A.md"))
 
     def test_only_note_capable_paths_qualify(self):
         for rel in ("wiki/A.md", "customers/acme/Deal.md", "newdomain/Missing.md", "wiki/sub/Nested.md"):

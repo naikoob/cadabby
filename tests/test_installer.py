@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 
 from cadabby.installer import (
+    _entry_vault,
+    _is_cadabby_entry,
     default_antigravity_path,
     default_claude_path,
     install_antigravity,
@@ -330,6 +332,17 @@ class TestInstaller(unittest.TestCase):
             self.assertFalse(ok_in)
             self.assertFalse(ok_un)
             self.assertEqual(cfg.read_bytes(), payload)
+
+    def test_is_cadabby_entry_and_entry_vault_resilience(self):
+        # Must not raise on non-dict or non-list args
+        self.assertFalse(_is_cadabby_entry(None))
+        self.assertFalse(_is_cadabby_entry("string"))
+        self.assertFalse(_is_cadabby_entry({"args": None}))
+        self.assertFalse(_is_cadabby_entry({"args": 42}))
+        self.assertIsNone(_entry_vault(None))
+        self.assertIsNone(_entry_vault({"args": 123}))
+        self.assertIsNone(_entry_vault({"args": None}))
+        self.assertEqual(_entry_vault({"args": ["--vault", "/tmp/v"]}), "/tmp/v")
 
 
 if __name__ == "__main__":

@@ -130,6 +130,29 @@ class TestFsutil(unittest.TestCase):
         self.assertTrue(lock_file.exists())
         self.assertEqual(lock_file.read_text("utf-8").strip(), "12345:9999999999.000")
 
+    def test_corrupt_lock_recovery(self):
+        lock_file = self.dir / ".cadabby" / "vault.lock"
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+        # Write corrupted lock content with colon but non-numeric data
+        lock_file.write_text("corrupt:data\n", "utf-8")
+
+        with advisory_lock(lock_file, stale_age=1.0, timeout=0.5):
+            self.assertTrue(lock_file.exists())
+
+        self.assertFalse(lock_file.exists())
+
+    def test_atomic_write_cleans_up_on_base_exception(self):
+        from unittest.mock import patch
+
+        target = self.dir / "interrupt.md"
+        with patch("os.write", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                atomic_write(target, "content")
+
+        self.assertFalse(target.exists())
+        tmp_files = list(self.dir.glob(".tmp_*"))
+        self.assertEqual(len(tmp_files), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
