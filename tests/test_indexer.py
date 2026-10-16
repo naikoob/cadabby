@@ -132,6 +132,28 @@ class TestIndexIsAGapReport(IndexerFixture):
     def test_an_empty_vault_says_so_rather_than_rendering_nothing(self):
         self.assertIn("Nothing outstanding", self._index())
 
+    def test_index_excludes_archive_and_abandoned_from_worklists(self):
+        """§2.5, §10 C53: Retired notes (archive/ or deprecated/abandoned) never appear in Unfiled or Verification Debt."""
+        self._note("Hub-MOC", type_="moc")
+        # Unfiled abandoned note in wiki/ and unfiled active note in archive/
+        self._note("Dropped-Idea", status="abandoned")
+        self._note("Old-Course-Note", status="completed", domain="archive/cs244b")
+        # Stale-verified notes in archive/, deprecated, and abandoned
+        stale_v = "\n  - by: agent:test\n    at: '2026-01-01T00:00:00Z'\n    of: 'sha256:0000'"
+        for stem, status, dom in (
+            ("Archived-Stale", "completed", "archive/cs244b"),
+            ("Deprecated-Stale", "deprecated", "wiki"),
+            ("Abandoned-Stale", "abandoned", "wiki"),
+        ):
+            p = self._note(stem, status=status, domain=dom, verified=stale_v)
+            p.write_text(p.read_text("utf-8") + "\ndrifted\n", "utf-8")
+
+        md = self._index()
+        self.assertNotIn("## Unfiled Notes", md)
+        self.assertNotIn("## Verification Debt", md)
+        for stem in ("Dropped-Idea", "Old-Course-Note", "Archived-Stale", "Deprecated-Stale", "Abandoned-Stale"):
+            self.assertNotIn(stem, md)
+
 
 class TestUnfiledTracksTheGraph(IndexerFixture):
     """§10 C18. The Unfiled section is the one gap lint cannot catch."""

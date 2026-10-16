@@ -14,7 +14,7 @@ from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import unquote
 
-from cadabby.constants import DIR_RAW
+from cadabby.constants import DIR_ARCHIVE, DIR_RAW, DIR_WIKI
 from cadabby.domain import iter_fence_states
 from cadabby.vault import cid_to_path, normalize_rel, path_to_cid
 
@@ -278,15 +278,21 @@ class LinkTargetIndex:
         self.known_cids: frozenset[str] = frozenset(known_cids)
 
         # Prioritize wiki/ notes first so canonical knowledge takes precedence
-        # for bare stem resolution (e.g. [[Architecture]]), while suffix matches
-        # resolve unambiguously to specific domain notes.
-        sorted_cids = sorted(known_cids, key=lambda c: (0 if c.startswith("wiki/") else 1, c))
+        # for bare stem resolution (e.g. [[Architecture]]), while active domains
+        # precede archive/ so retired notes never shadow live ones ("archive/"
+        # sorts alphabetically before "customers/" or "projects/").
+        wiki_prefix = f"{DIR_WIKI}/"
+        archive_prefix = f"{DIR_ARCHIVE}/"
+        sorted_cids = sorted(
+            known_cids,
+            key=lambda c: (0 if c.startswith(wiki_prefix) else (2 if c.startswith(archive_prefix) else 1), c),
+        )
 
         for cid in sorted_cids:
             if cid not in self._exact_map:
                 self._exact_map[cid] = cid
-            if cid.startswith("wiki/"):
-                short = cid[5:]
+            if cid.startswith(wiki_prefix):
+                short = cid.removeprefix(wiki_prefix)
                 if short not in self._exact_map:
                     self._exact_map[short] = cid
 

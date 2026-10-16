@@ -13,7 +13,7 @@ from typing import Any
 from cadabby.okf import utc_now_iso
 
 from cadabby.cache import VaultCache, unprocessed_raw_paths
-from cadabby.constants import LEDGER_TITLE, TYPE_MOC
+from cadabby.constants import DIR_ARCHIVE, LEDGER_TITLE, TYPE_MOC
 from cadabby.fsutil import advisory_lock, append_ledger, atomic_write
 from cadabby.vault import Vault
 
@@ -126,7 +126,7 @@ def _unfiled(conn: sqlite3.Connection) -> list[str]:
         SELECT stem, description FROM notes
         WHERE layer = 'wiki'
           AND parse_error IS NULL
-          AND COALESCE(status, 'active') != 'deprecated'
+          AND COALESCE(status, 'active') NOT IN ('deprecated', 'abandoned')
           AND cid NOT IN (SELECT cid FROM filed)
         ORDER BY stem ASC;
         """,
@@ -166,14 +166,19 @@ def _raw_queue(conn: sqlite3.Connection) -> list[str]:
 def _verification_debt(conn: sqlite3.Connection) -> list[str]:
     """Section 4: notes whose verification entries have all gone stale (§3.4).
 
-    Vault-wide: any note in any domain can carry verification entries.
+    Vault-wide across active domains: retired notes (`archive/`, `deprecated`,
+    or `abandoned`) are excluded because they are no longer maintained.
     """
     rows = conn.execute(
         """
         SELECT cid FROM notes
-        WHERE trust_tier = 'stale-verified' AND parse_error IS NULL
+        WHERE trust_tier = 'stale-verified'
+          AND parse_error IS NULL
+          AND layer != ?
+          AND COALESCE(status, 'active') NOT IN ('deprecated', 'abandoned')
         ORDER BY cid ASC;
-        """
+        """,
+        (DIR_ARCHIVE,),
     ).fetchall()
     if not rows:
         return []

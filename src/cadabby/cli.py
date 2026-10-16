@@ -204,6 +204,14 @@ def _parse_json_flag(raw: str, flag_name: str, expected_type: type, type_label: 
     return parsed
 
 
+def _parse_section_arg(raw: str | None) -> tuple[str, str] | None:
+    """Split a CLI 'Heading:Body' section argument into (heading, body)."""
+    if not raw:
+        return None
+    heading, _, body = raw.partition(":")
+    return (heading, body)
+
+
 def cmd_update(args: argparse.Namespace) -> int:
     """Update note frontmatter or sections non-destructively."""
     vault = resolve_cli_vault(args)
@@ -213,15 +221,8 @@ def cmd_update(args: argparse.Namespace) -> int:
         else None
     )
 
-    append_sec = None
-    if args.append_section:
-        parts = args.append_section.split(":", 1)
-        append_sec = (parts[0], parts[1] if len(parts) > 1 else "")
-
-    replace_sec = None
-    if args.replace_section:
-        parts = args.replace_section.split(":", 1)
-        replace_sec = (parts[0], parts[1] if len(parts) > 1 else "")
+    append_sec = _parse_section_arg(args.append_section)
+    replace_sec = _parse_section_arg(args.replace_section)
 
     raw_edits = getattr(args, "edits", None)
     edits = (
@@ -266,9 +267,10 @@ def cmd_move(args: argparse.Namespace) -> int:
 
     verb = "Moved" if result["applied"] else "Would move"
     print(f"{verb} {result['from']} -> {result['to']}")
-    moved = result["moved_note"]
-    if moved["links_rewritten"] or moved["tier_before"] != moved["tier_after"]:
-        print(f"  {moved['cid']}: {moved['links_rewritten']} own link(s), {moved['tier_before']} -> {moved['tier_after']}")
+    moved_list = result.get("moved_notes") or [result["moved_note"]]
+    for moved in moved_list:
+        if len(moved_list) > 1 or moved["links_rewritten"] or moved["tier_before"] != moved["tier_after"]:
+            print(f"  {moved['cid']}: {moved['links_rewritten']} own link(s), {moved['tier_before']} -> {moved['tier_after']}")
     for n in result["notes"]:
         print(f"  {n['cid']}: {n['links_rewritten']} link(s), {n['tier_before']} -> {n['tier_after']}")
     for line in result["newly_resolved"]:

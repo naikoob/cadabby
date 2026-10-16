@@ -415,7 +415,10 @@ def _layout_findings(rel_path: str, domain_def: DomainDefinition) -> Iterator[Li
         yield _error(
             code="WIKI_NESTING_DISALLOWED",
             rel_path=rel_path,
-            message=f"Note is nested in '{parent}/'. The wiki domain must be completely flat.",
+            message=(
+                f"Note is nested in '{parent}/'. The wiki domain must be completely flat "
+                "(move to a top-level domain folder or flatten into 'wiki/' and group via an MOC)."
+            ),
         )
 
 

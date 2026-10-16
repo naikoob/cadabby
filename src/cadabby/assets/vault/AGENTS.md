@@ -7,14 +7,15 @@ This document is the **single canonical constitution** for AI agents working in 
 | If you are... | Read before the first write |
 | :--- | :--- |
 | Ingesting or re-reading a `raw/` source, writing or editing notes, linking, building MOCs, setting up a cognitive domain | `.agents/skills/librarian/SKILL.md` |
-| Fixing lint findings, dead links or orphans, paying down verification debt, moving or renaming notes, splitting or merging MOCs | `.agents/skills/technician/SKILL.md` |
+| Fixing lint findings, dead links or orphans, paying down verification debt, moving or renaming notes or folders, retiring work to `archive/`, splitting or merging MOCs | `.agents/skills/technician/SKILL.md` |
 | Writing note prose, titles, tags, or frontmatter | `STYLE.md` |
 
 ## 2. The Vault
 
 * **`raw/`**: sources the user curates. Read and cite them; never edit, rename, move, or delete anything in `raw/`.
-* **`wiki/`**: compiled synthesis, strictly flat (`wiki/*.md`). Topology is editorial, carried by Maps of Content (`type: moc`), never by folders.
-* **Cognitive domains**: every other non-reserved top-level folder (`customers/`, `projects/`), described by its own `{domain}/AGENTS.md` and free to nest. Reserved: `raw/`, `log/`, and dot or build folders (`.cadabby/`, `.obsidian/`, `.git/`, `.agents/`, `.claude/`, `node_modules/`, …).
+* **`wiki/`**: the evergreen concept graph, strictly flat (`wiki/*.md`). Cross-cutting concepts, entities, and syntheses live here; topology is editorial, carried by Maps of Content (`type: moc`), never by subfolders.
+* **Cognitive domains**: every other non-reserved top-level folder (`customers/`, `projects/`, `courses/`), described by its own `{domain}/AGENTS.md` and free to nest arbitrarily deep (`customers/acme/deals/`). Use a cognitive domain whenever notes belong to a bounded workspace, hierarchy, or external taxonomy rather than the flat `wiki/` graph. Reserved: `raw/`, `log/`, and dot or build folders (`.cadabby/`, `.obsidian/`, `.git/`, `.agents/`, `.claude/`, `node_modules/`, …).
+* **`archive/`**: the conventional retirement domain for completed courses, churned accounts, superseded projects, or retired notes. Notes and folder subtrees moved into `archive/` with `vault_move_note` keep their frontmatter, links, and trust tiers intact, rank below active domains by default (`ranking.domain.archive: 0.5` compounding with trust and status), yield stem resolution to `wiki/` and active domains, and drop out of `index.md` worklists.
 * **`index.md`**: the engine's gap report — MOC entry points, unfiled notes, unprocessed `raw/` sources, verification debt. Never hand-edit it; every row is a task. **`log.md`**: append-only ledger.
 
 ## 3. Trust Rules

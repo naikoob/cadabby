@@ -234,9 +234,9 @@ TOOLS = [
     {
         "name": "vault_move_note",
         "description": (
-            "Move or rename a note and repoint every link to it. Dry-run unless apply=true: the result "
-            "lists each note whose links change, its trust tier before and after, and a plan_token. Show "
-            "the user that plan and apply only once they agree, passing the plan_token with apply=true so "
+            "Move or rename a note or folder subtree and repoint every link to it. Dry-run unless apply=true: "
+            "the result lists each note whose links change, its trust tier before and after, and a plan_token. "
+            "Show the user that plan and apply only once they agree, passing the plan_token with apply=true so "
             "nothing is written if the vault changed since. Only links that would break or open a different "
             "note are rewritten. Refused when the move would retarget someone else's link, or would stale a "
             "human-reviewed note not named in approve_stale; report any warnings too. Never move note files "
@@ -248,14 +248,17 @@ TOOLS = [
                 "cid": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Note to move: CID, relative path, stem or wikilink (an ambiguous name is refused)",
+                    "description": (
+                        "Note or folder prefix to move: CID, relative path, stem, wikilink, or folder path "
+                        "(e.g. 'customers/northwind/' or 'cs244b/')"
+                    ),
                 },
                 "to": {
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "Destination vault-relative path (e.g. 'customers/acme/sizing'). A bare name renames "
-                        "in place; a trailing '/' (e.g. 'customers/acme/') moves the note into that folder"
+                        "Destination vault-relative path (e.g. 'customers/acme/sizing' or 'archive/cs244b/'). "
+                        "A bare name renames a note in place; a trailing '/' moves a note into that folder"
                     ),
                 },
                 "apply": {"type": "boolean", "default": False, "description": "Write the move; omit for a dry-run"},

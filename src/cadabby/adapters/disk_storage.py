@@ -7,10 +7,10 @@ and path conversions within the vault directory boundary.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 
-from cadabby.constants import BODY_HASH_PREFIX
 from cadabby.domain import Note
-from cadabby.fsutil import VaultConflictError, atomic_replace_checked, compute_bytes_sha256
+from cadabby.fsutil import atomic_replace_checked, check_expected_hash, compute_bytes_sha256
 from cadabby.indexer import append_vault_log
 from cadabby.ports import LedgerPort, NoteStoragePort
 from cadabby.vault import Vault, cid_to_path, path_to_cid
@@ -22,13 +22,20 @@ class DiskNoteStorage(NoteStoragePort):
     def __init__(self, vault: Vault) -> None:
         self.vault = vault
 
-    def get_note(self, cid_or_path: str) -> Note | None:
+    def _resolve_existing_file(self, cid_or_path: str) -> tuple[str, Path] | None:
         rel_path = cid_to_path(cid_or_path)
         if self.vault.note_path_violation(rel_path):
             return None  # e.g. index.md or raw/: a file, but never a note (§2.1)
         target = self.vault.abs_path(rel_path)
         if not target.is_relative_to(self.vault.root) or not target.is_file():
             return None
+        return rel_path, target
+
+    def get_note(self, cid_or_path: str) -> Note | None:
+        resolved = self._resolve_existing_file(cid_or_path)
+        if resolved is None:
+            return None
+        rel_path, target = resolved
 
         # The concurrency token is the hash of the bytes on disk, the same
         # thing atomic_replace_checked recomputes. Hashing decoded text instead
@@ -52,11 +59,7 @@ class DiskNoteStorage(NoteStoragePort):
         atomic_replace_checked(target, serialized, expected_hash=expected_hash)
 
     def note_exists(self, cid_or_path: str) -> bool:
-        rel_path = cid_to_path(cid_or_path)
-        if self.vault.note_path_violation(rel_path):
-            return False
-        target = self.vault.abs_path(rel_path)
-        return target.is_relative_to(self.vault.root) and target.is_file()
+        return self._resolve_existing_file(cid_or_path) is not None
 
     def delete_note(self, cid_or_path: str, expected_hash: str | None = None, *, prune_empty_dirs: bool = False) -> None:
         rel_path = cid_to_path(cid_or_path)
@@ -66,32 +69,24 @@ class DiskNoteStorage(NoteStoragePort):
         if not target.is_relative_to(self.vault.root) or not target.is_file():
             raise FileNotFoundError(f"Note not found: {rel_path}")
         if expected_hash is not None:
-            current = compute_bytes_sha256(target.read_bytes())
-            expected = expected_hash.removeprefix(BODY_HASH_PREFIX)
-            if current != expected:
-                raise VaultConflictError(
-                    f"VAULT_CONFLICT: {rel_path} was modified concurrently on disk "
-                    f"(expected {expected[:12]}, found {current[:12]})"
-                )
+            check_expected_hash(compute_bytes_sha256(target.read_bytes()), expected_hash, rel_path)
         # Unlink the path as named, not `target`: abs_path() resolves symlinks,
         # and deleting a symlinked note must remove the link, never the file
         # it points at.
         link = self.vault.root / rel_path
         link.unlink()
         if prune_empty_dirs:
+            protected = {self.vault.root, self.vault.wiki_dir, self.vault.raw_dir}
             parent = link.parent
-            while parent != self.vault.root and parent.is_relative_to(self.vault.root) and not any(parent.iterdir()):
+            while parent not in protected and parent.is_relative_to(self.vault.root) and not any(parent.iterdir()):
                 parent.rmdir()
                 parent = parent.parent
 
     def read_raw(self, cid_or_path: str) -> str | None:
-        rel_path = cid_to_path(cid_or_path)
-        if self.vault.note_path_violation(rel_path):
+        resolved = self._resolve_existing_file(cid_or_path)
+        if resolved is None:
             return None
-        target = self.vault.abs_path(rel_path)
-        if not target.is_relative_to(self.vault.root) or not target.is_file():
-            return None
-        return target.read_bytes().decode("utf-8", errors="replace")
+        return resolved[1].read_bytes().decode("utf-8", errors="replace")
 
     def list_note_cids(self) -> Sequence[str]:
         # rel_path() resolves symlinks, so a symlinked note and its target
