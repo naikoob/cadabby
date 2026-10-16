@@ -15,6 +15,7 @@ from typing import Any
 
 from cadabby.constants import (
     CONFIG_SCHEMA_VERSION,
+    DEFAULT_DOMAIN_MULTIPLIERS,
     DEFAULT_IGNORED_DIRS,
     DEFAULT_INTEGRITY,
     INTEGRITY_MODES,
@@ -126,6 +127,7 @@ def default_vault_config(vault_name: str = "vault") -> dict[str, Any]:
         "ranking": {
             "trust": dict(DEFAULT_TRUST_MULTIPLIERS),
             "status": dict(DEFAULT_STATUS_MULTIPLIERS),
+            "domain": dict(DEFAULT_DOMAIN_MULTIPLIERS),
         },
         "identities": {},
         "log_rotate_bytes": DEFAULT_LOG_ROTATE_BYTES,
@@ -237,7 +239,7 @@ def _check_config_values(cfg_file: Path, cfg: dict[str, Any]) -> None:
         fail("integrity", " or ".join(f"'{m}'" for m in INTEGRITY_MODES))
     if isinstance(cfg["log_rotate_bytes"], bool) or not isinstance(cfg["log_rotate_bytes"], int) or cfg["log_rotate_bytes"] < 1:
         fail("log_rotate_bytes", "a positive integer")
-    for table in ("trust", "status"):
+    for table in ("trust", "status", "domain"):
         for name, mult in cfg["ranking"][table].items():
             # json.loads accepts NaN and Infinity; neither renders as SQL.
             if isinstance(mult, bool) or not isinstance(mult, (int, float)) or not math.isfinite(mult):
@@ -339,7 +341,7 @@ def note_path_violation(rel_path: str, template_rel: str | None = None, *, for_w
     if name.startswith(".") or not name.endswith(".md"):
         return "a note is a visible .md file"
     if for_write and dirs[0] == DIR_WIKI and len(parts) > 2:
-        return "wiki/ is flat; nested folders are not allowed"
+        return "wiki/ is flat; nested folders are not allowed (use an MOC in wiki/ or a top-level domain folder)"
     return None
 
 

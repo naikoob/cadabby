@@ -844,6 +844,7 @@ class VaultCache:
              + ({FTS_FIELD_HIT_FLOOR} * ({field_hits})))
             * ({multiplier_expr("n.trust_tier", ranking_cfg["trust"])})
             * ({multiplier_expr("n.status", ranking_cfg["status"])})
+            * ({multiplier_expr("n.layer", ranking_cfg.get("domain", {}))})
         """
 
         where_clauses = [

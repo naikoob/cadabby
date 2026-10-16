@@ -11,6 +11,9 @@ The **technician** is responsible for vault structural integrity, cache synchron
 
 1. **Diagnostics & Status**:
    - Call `vault_status` to monitor distribution of epistemic trust tiers, unprocessed raw sources, and verification debt.
+   - **Audit vs. Lint Boundary**: Understand the strict functional distinction between audit and lint:
+     - `cadabby audit`: A cryptographic security tool validating Git commit author signatures against `.cadabby.json` identities for `human:*` attestations. It checks whether any human sign-off was committed by an unauthorized Git actor. It does not check note text, graph links, or verification debt.
+     - `vault_status` and `cadabby lint`: Verifies graph structure, schema conformity, missing sources, broken links, and tracks epistemic verification debt (`VERIFICATION_STALE` from content drift).
 
 2. **Linting & Self-Healing Playbook**:
    - Run `vault_status(lint=true)` to inspect the vault against all six normative gates. Without `lint`, `finding_counts` alone tells you whether there is anything to repair. Resolve errors systematically according to their diagnostic codes:
@@ -23,7 +26,7 @@ The **technician** is responsible for vault structural integrity, cache synchron
    - `TIMESTAMP_INVALID`: Correct date-time strings in frontmatter to standard ISO-8601 formatting.
 
    ### Gate 2: Layout Consistency
-   - `WIKI_NESTING_DISALLOWED`: Flatten nested notes inside `wiki/` with `vault_move_note` to `wiki/{stem}.md` (dry-run first; it repoints every link), then anchor each one into the MOC it belongs to so the structure the folder was carrying survives editorially. The wiki domain must be completely flat; subdirectories are disallowed. If the nesting was deliberate and the user needs it, propose a top-level cognitive domain instead of repeatedly flattening their work.
+   - `WIKI_NESTING_DISALLOWED`: Flatten nested notes inside `wiki/` with `vault_move_note` to `wiki/{stem}.md` (dry-run first; it repoints every link), then anchor each one into the MOC it belongs to so the structure the folder was carrying survives editorially. The wiki domain must be completely flat; subdirectories are disallowed. If the nesting was deliberate and the user needs folder hierarchy, propose moving the subfolder to a top-level cognitive domain (e.g. `wiki/cs182/` → `cs182/`) with `vault_move_note` instead of repeatedly flattening their work. When moving multiple notes or folders in separate steps, serialize the operations (`dry_run` then `apply` for each move before planning the next): applying a move rewrites graph edges across related notes, invalidating unapplied plan tokens.
 
    ### Gate 3: Link Integrity
    - `LINK_DEAD`: Use `vault_search` to find renamed stems and repoint the link with a `vault_update_note` `replace_text` edit (one call for every fix in the same note); scaffold the missing target only under the limits below; otherwise unlink or prune as follows:
@@ -36,7 +39,7 @@ The **technician** is responsible for vault structural integrity, cache synchron
 
    ### Gate 4: Source Grounding
    - `SOURCE_MISSING`: Ensure referenced source file exists in `raw/`; update the frontmatter `sources` list via `vault_update_note(patch_frontmatter={"sources": [...]})` if files were moved.
-  - `RAW_LINK_BROKEN`: An in-body Markdown citation does not resolve to a `raw/` file, almost always from a wrong `../` count. Apply the path the finding suggests with a `replace_text` edit. With no suggestion, remove the link if `sources:` already records the provenance, or ask the user. Never create, rename, or move files in `raw/` to make a link resolve.
+   - `RAW_LINK_BROKEN`: An in-body Markdown citation does not resolve to a `raw/` file, almost always from a wrong `../` count. Apply the path the finding suggests with a `replace_text` edit. With no suggestion, remove the link if `sources:` already records the provenance, or ask the user. Never create, rename, or move files in `raw/` to make a link resolve.
 
    ### Gate 5: Graph Connectivity
    - `NOTE_ORPHAN`: Query related notes with `vault_search` and add incoming `[[Wikilinks]]` using `vault_update_note` so every note is reachable from the graph. Check the host note's `trust_tier` first: never edit the body of a `human-reviewed` note without user confirmation (prefer linking from an MOC or non-`human-reviewed` note, or ask the user).
@@ -49,8 +52,10 @@ The **technician** is responsible for vault structural integrity, cache synchron
      - *Never prune the history* to clear this warning (`AGENTS.md` §3: attestations are append-only). A residual gate 6 warning is the correct report of an unpaid human re-review.
    - `VERIFICATION_UNBOUND`: The entry binds to nothing (no `of:`, or not a `by`/`at`/`of` mapping). Leave it in place and report it — attestation history is append-only, and the engine refuses `verified` in `patch_frontmatter`. If the content needs attesting, re-audit it against its sources and append a fresh, bound entry with `vault_verify_note`; never on a note whose latest attestation is `human:*` (see `VERIFICATION_STALE` above).
 
-3. **MOC Lifecycle & Topology Maintenance**:
+3. **MOC Lifecycle, Folder Moves, & Archive Maintenance**:
    - **Splitting Monolithic MOCs**: When an MOC exceeds ~25 outgoing links or encompasses ≥ 6 distinct subtopics, decompose it into modular child MOCs (e.g. `storage-moc` → `relational-storage-moc`, `vector-storage-moc`). Retain the parent MOC as a high-level router linking to the child MOCs.
    - **Merging Anemic or Redundant MOCs**: When an MOC has ≤ 2 links (anemic hub) or has > 50% link overlap with a neighboring MOC, consolidate their entries into a single cohesive MOC and retire or redirect the redundant hub.
-   - **Clearing the Unfiled Queue**: `index.md` lists every wiki note no MOC reaches by forward link at any depth. Work that list down by linking each note from the MOC it belongs to -- scaffolding a new MOC when a note introduces a cluster that none of the existing hubs covers. Note that the lint gates will not flag these: a note that links outward has edges, so gate 5 sees no orphan.
+   - **Clearing the Unfiled Queue**: `index.md` lists every active wiki note no MOC reaches by forward link at any depth. Work that list down by linking each note from the MOC it belongs to -- scaffolding a new MOC when a note introduces a cluster that none of the existing hubs covers. Note that the lint gates will not flag these: a note that links outward has edges, so gate 5 sees no orphan.
+   - **Moving Notes & Folder Subtrees**: `vault_move_note` moves either a single note or an entire folder prefix (e.g. `customers/northwind/` → `customers/apollo/northwind/`), preserving relative links between co-moving notes (and their `human-reviewed` trust tiers), rewriting outbound `../raw/` and cross-domain relative links for the new depth, and pruning vacated source folders.
+   - **Retiring Notes & Domains to `archive/`**: Move completed courses, churned accounts, or superseded work into `archive/` (`cs244b/` → `archive/cs244b/`) via `vault_move_note`, or patch `status` to `deprecated` or `abandoned` via `vault_update_note` (a frontmatter-only edit that preserves `human-reviewed` attestations). Retired notes rank below active notes and drop out of `index.md` unfiled and verification-debt worklists.
 

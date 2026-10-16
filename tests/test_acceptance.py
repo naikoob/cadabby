@@ -844,6 +844,13 @@ class TestHarnessShimsStayThin(unittest.TestCase):
         self.assertNotIn("remove invalid verification blocks", technician)
         self.assertIn("**Never edit or delete the entry**", technician)
         self.assertIn("plan_token", agents_md)
+        # 8. Technician runbook enhancements: audit vs lint distinction and serialized move guidance.
+        self.assertIn("Audit vs. Lint Boundary", technician)
+        self.assertIn("serialize the operations", technician)
+        # 9. Flat wiki/ vs hierarchical domains and archive/ retirement lifecycle guidance.
+        self.assertIn("**`archive/`**: the conventional retirement domain", agents_md)
+        self.assertIn("Retiring work to `archive/`", librarian)
+        self.assertIn("Retiring Notes & Domains to `archive/`", technician)
 
 
 class TestSpecReadingMap(unittest.TestCase):

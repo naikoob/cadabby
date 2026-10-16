@@ -51,6 +51,27 @@ def sanitize_filename(title: str) -> str:
     return slug or "untitled"
 
 
+def _strip_dot_slash(text: str) -> str:
+    """Normalize backslashes to '/' and strip leading './' prefixes."""
+    raw = text.strip().replace("\\", "/")
+    while raw.startswith("./"):
+        raw = raw[2:]
+    return raw
+
+
+def _parse_relative_target(raw_input: str, *, absolute_error: str) -> tuple[str, list[str]]:
+    """Validate and split a vault-relative target path into (normalized_raw, parts)."""
+    if not isinstance(raw_input, str) or not raw_input.strip():
+        raise ValueError(absolute_error)
+    raw = raw_input.replace("\\", "/").strip()
+    if raw.startswith("/") or Path(raw).is_absolute():
+        raise ValueError(absolute_error)
+    parts = [p for p in raw.strip("/").split("/") if p]
+    if not parts or any(p in (".", "..") for p in parts):
+        raise ValueError(f"Path traversal detected in '{raw_input}': must not contain '.' or '..'")
+    return raw, parts
+
+
 def resolve_note_cid(
     storage: NoteStoragePort,
     cid_or_path: str,
@@ -68,9 +89,7 @@ def resolve_note_cid(
     """
     if not isinstance(cid_or_path, str) or not cid_or_path.strip():
         raise ValueError("Note CID or path must be a non-empty string")
-    raw = cid_or_path.strip().replace("\\", "/")
-    while raw.startswith("./"):
-        raw = raw[2:]
+    raw = _strip_dot_slash(cid_or_path)
     if raw.startswith("/") or Path(raw).is_absolute() or ".." in raw.split("/"):
         raise FileNotFoundError(f"Note not found: {cid_or_path.strip()} (names must be vault-relative)")
 
@@ -134,6 +153,7 @@ def _check_new_location(
     *,
     verb: str,
     replacing: str | None = None,
+    replacing_group: frozenset[str] = frozenset(),
 ) -> None:
     """Refuse a path no note may be created at (§2.1, §2.2, §5.1, §7.5).
 
@@ -166,7 +186,8 @@ def _check_new_location(
             )
 
     cid = path_to_cid(rel_path)
-    others = [c for c in storage.list_note_cids() if c != replacing]
+    excluded = replacing_group | ({replacing} if replacing is not None else set())
+    others = [c for c in storage.list_note_cids() if c not in excluded]
     if cid in others:
         raise FileExistsError(f"Note already exists at {rel_path}")
     clash = next((c for c in others if c.casefold() == cid.casefold()), None)
@@ -176,7 +197,7 @@ def _check_new_location(
         )
     # The listing walks real folders only; the storage also sees files reached
     # through a symlinked folder, which a write would otherwise overwrite.
-    own_spelling = replacing is not None and cid.casefold() == replacing.casefold()
+    own_spelling = any(cid.casefold() == r.casefold() for r in excluded)
     if not own_spelling and storage.note_exists(cid):
         raise FileExistsError(f"Note already exists at {rel_path}")
 
@@ -229,12 +250,10 @@ class ScaffoldNoteUseCase:
         # An empty path is the same as none: some clients send "" for every
         # optional string they were not given.
         if path is not None and path.strip():
-            raw_path = path.replace("\\", "/").strip()
-            if raw_path.startswith("/") or Path(raw_path).is_absolute():
-                raise ValueError(f"Path traversal detected in '{path}': absolute paths are forbidden")
-            parts = [p for p in raw_path.strip("/").split("/") if p]
-            if not parts or any(p in (".", "..") for p in parts):
-                raise ValueError(f"Path traversal detected in '{path}': must not contain '.' or '..'")
+            raw_path, parts = _parse_relative_target(
+                path,
+                absolute_error=f"Path traversal detected in '{path}': absolute paths are forbidden",
+            )
             if raw_path.endswith("/"):
                 # A trailing slash names a folder, as in vault_move_note.
                 parts.append(sanitize_filename(title))
@@ -490,6 +509,13 @@ class _Rewrite:
 
 
 @dataclass
+class _MovedNote:
+    source: Note
+    destination: Note
+    links: int = 0
+
+
+@dataclass
 class MovePlan:
     """Everything a move would write, computed from the notes as they are now (§5.1).
 
@@ -497,13 +523,26 @@ class MovePlan:
     passes it back is refused if the plan it recomputes is any different.
     """
 
-    source: Note
-    destination: Note
-    moved_links: int = 0
+    moved: list[_MovedNote]
+    from_target: str = ""
+    to_target: str = ""
+    is_folder: bool = False
     rewrites: list[_Rewrite] = field(default_factory=list)
     blocked: list[str] = field(default_factory=list)
     newly_resolved: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+
+    @property
+    def source(self) -> Note:
+        return self.moved[0].source
+
+    @property
+    def destination(self) -> Note:
+        return self.moved[0].destination
+
+    @property
+    def moved_links(self) -> int:
+        return sum(m.links for m in self.moved)
 
     @property
     def links_rewritten(self) -> int:
@@ -516,26 +555,45 @@ class MovePlan:
         def digest(text: str) -> str:
             return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-        state = {
-            "source": [self.source.cid, str(self.source.source_hash)],
-            "destination": [self.destination.cid, digest(self.destination.serialize())],
+        base: dict[str, Any] = {
             "rewrites": sorted(
                 [r.original.cid, str(r.original.source_hash), digest(r.updated.serialize())] for r in self.rewrites
             ),
             "blocked": sorted(self.blocked),
         }
+        if not self.is_folder and len(self.moved) == 1:
+            state = {
+                **base,
+                "source": [self.source.cid, str(self.source.source_hash)],
+                "destination": [self.destination.cid, digest(self.destination.serialize())],
+            }
+        else:
+            state = {
+                **base,
+                "from": self.from_target,
+                "to": self.to_target,
+                "moved": [
+                    [m.source.cid, str(m.source.source_hash), m.destination.cid, digest(m.destination.serialize())]
+                    for m in self.moved
+                ],
+            }
         return digest(json.dumps(state, sort_keys=True))[:32]
 
     def to_dict(self, *, applied: bool) -> dict[str, Any]:
         def impact(cid: str, links: int, before: Note, after: Note) -> dict[str, Any]:
             return {"cid": cid, "links_rewritten": links, "tier_before": before.trust_tier, "tier_after": after.trust_tier}
 
+        first = self.moved[0]
         return {
-            "from": self.source.cid,
-            "to": self.destination.cid,
+            "from": self.from_target or self.source.cid,
+            "to": self.to_target or self.destination.cid,
             "applied": applied,
             "plan_token": self.token,
-            "moved_note": impact(self.destination.cid, self.moved_links, self.source, self.destination),
+            "moved_note": impact(first.destination.cid, first.links, first.source, first.destination),
+            "moved_notes": [
+                {**impact(m.destination.cid, m.links, m.source, m.destination), "from": m.source.cid}
+                for m in self.moved
+            ],
             "notes": [impact(r.original.cid, r.links, r.original, r.updated) for r in self.rewrites],
             "blocked": list(self.blocked),
             "newly_resolved": list(self.newly_resolved),
@@ -544,11 +602,11 @@ class MovePlan:
 
 
 class MoveNoteUseCase:
-    """Driving use case for moving or renaming a note and repointing every link to it (§5.1).
+    """Driving use case for moving or renaming a note or folder subtree and repointing every link to it (§5.1).
 
     Only links that would otherwise break or open a different note are
     rewritten, because each rewrite changes a body and so unbinds that note's
-    attestations. The moved note keeps its tier unless its own relative paths
+    attestations. Moved notes keep their tier unless their own relative paths
     must change: verification binds to content, not to the path (§3.4).
     """
 
@@ -560,24 +618,48 @@ class MoveNoteUseCase:
     def plan(self, cid_or_path: str, to: str, approve_stale: Sequence[str] = ()) -> MovePlan:
         cids = list(self.storage.list_note_cids())
         before = LinkTargetIndex(cids)
-        source = load_existing_note(self.storage, cid_or_path, before)
-        new_rel = self._destination(source, to, cids)
-        new_cid = path_to_cid(new_rel)
-        plan = MovePlan(source=source, destination=replace(source, cid=new_cid, rel_path=new_rel))
-        after = LinkTargetIndex([c for c in cids if c != source.cid] + [new_cid])
-        approved = self._approvals(approve_stale, source.cid, new_cid, before)
+        folder_prefix = self._folder_prefix(cid_or_path, cids)
+        if folder_prefix is not None:
+            src_prefix, folder_cids = folder_prefix
+            dst_prefix, moved_items = self._folder_destinations(src_prefix, folder_cids, to)
+            plan = MovePlan(
+                moved=moved_items,
+                from_target=f"{src_prefix}/",
+                to_target=f"{dst_prefix}/",
+                is_folder=True,
+            )
+            leftover = self._leftover_folder_files(src_prefix, folder_cids)
+            if leftover:
+                sample = ", ".join(leftover[:3])
+                more = f" (+{len(leftover) - 3} more)" if len(leftover) > 3 else ""
+                plan.warnings.append(
+                    f"Non-note files under '{src_prefix}/' are not moved and will remain in place: {sample}{more}"
+                )
+        else:
+            source = load_existing_note(self.storage, cid_or_path, before)
+            new_rel = self._destination(source, to, cids)
+            new_cid = path_to_cid(new_rel)
+            plan = MovePlan(
+                moved=[_MovedNote(source=source, destination=replace(source, cid=new_cid, rel_path=new_rel))]
+            )
+
+        moved_by_cid = {m.source.cid: m for m in plan.moved}
+        moves = {m.source.cid: m.destination.cid for m in plan.moved}
+        after = LinkTargetIndex([c for c in cids if c not in moves] + list(moves.values()))
+        approved = self._approvals(approve_stale, moves, before)
 
         for cid in cids:
-            note = source if cid == source.cid else self._read(cid, plan, before, after)
+            moving_item = moved_by_cid.get(cid)
+            note = moving_item.source if moving_item is not None else self._read(cid, plan, moves, before, after)
             if note is None:
                 continue
-            edits = self._link_edits(note, source.cid, new_cid, before, after, plan)
+            edits = self._link_edits(note, moves, before, after, plan.newly_resolved, plan.blocked)
             if not edits:
                 continue
             body = _apply_spans(note.body, edits)
-            if cid == source.cid:
-                plan.destination = replace(plan.destination, body=body)
-                plan.moved_links = len(edits)
+            if moving_item is not None:
+                moving_item.destination = replace(moving_item.destination, body=body)
+                moving_item.links = len(edits)
             else:
                 plan.rewrites.append(_Rewrite(original=note, updated=replace(note, body=body), links=len(edits)))
             if note.trust_tier == "human-reviewed" and cid not in approved:
@@ -591,24 +673,28 @@ class MoveNoteUseCase:
         """Write the plan destination-first, so a crash leaves a duplicate, never a lost note."""
         if plan.blocked:
             raise ValueError("Move refused: " + "; ".join(plan.blocked))
-        source, destination = plan.source, plan.destination
-        # On a case-insensitive filesystem both spellings are one file, so
-        # write-then-delete would delete it: retire the old name first instead.
-        case_only = source.cid.casefold() == destination.cid.casefold()
+        dest_folded = {m.destination.cid.casefold() for m in plan.moved}
         undo: list[Callable[[], None]] = []
         try:
-            if case_only:
-                self.storage.delete_note(source.cid, expected_hash=source.source_hash)
-                undo.append(lambda: self.storage.save_note(source))
-            if self.storage.note_exists(destination.cid):
-                raise FileExistsError(f"Note already exists at {destination.rel_path}")
-            self.storage.save_note(destination)
-            undo.append(self._undo_create(destination.cid))
+            # On a case-insensitive filesystem or an overlapping subtree shift,
+            # any source whose path collides with a destination path must be
+            # retired before destinations are written so write-then-delete never
+            # trips FileExistsError or deletes a newly written note.
+            for item in plan.moved:
+                if item.source.cid.casefold() in dest_folded:
+                    self._retire_source(item.source, undo)
+            for item in plan.moved:
+                destination = item.destination
+                if self.storage.note_exists(destination.cid):
+                    raise FileExistsError(f"Note already exists at {destination.rel_path}")
+                self.storage.save_note(destination)
+                undo.append(self._undo_create(destination.cid))
             for rw in plan.rewrites:
                 self.storage.save_note(rw.updated, expected_hash=rw.original.source_hash)
                 undo.append(self._undo_rewrite(rw))
-            if not case_only:
-                self.storage.delete_note(source.cid, expected_hash=source.source_hash)
+            for item in plan.moved:
+                if item.source.cid.casefold() not in dest_folded:
+                    self._retire_source(item.source, undo)
         except Exception as exc:
             failures = []
             for step in reversed(undo):
@@ -620,22 +706,116 @@ class MoveNoteUseCase:
                 raise RuntimeError(f"{exc}; rollback incomplete, check by hand: {'; '.join(failures)}") from exc
             raise
 
-        touched = len(plan.rewrites) + (1 if plan.moved_links else 0)
-        self.ledger.append(
-            f"Moved {source.rel_path} -> {destination.rel_path} "
-            f"(rewrote {plan.links_rewritten} links in {touched} notes)",
-            actor=actor,
+        touched = len(plan.rewrites) + sum(1 for m in plan.moved if m.links)
+        if plan.is_folder:
+            self.ledger.append(
+                f"Moved {plan.from_target} -> {plan.to_target} "
+                f"({len(plan.moved)} notes; rewrote {plan.links_rewritten} links in {touched} notes)",
+                actor=actor,
+            )
+        else:
+            self.ledger.append(
+                f"Moved {plan.source.rel_path} -> {plan.destination.rel_path} "
+                f"(rewrote {plan.links_rewritten} links in {touched} notes)",
+                actor=actor,
+            )
+
+    def _retire_source(self, source: Note, undo: list[Callable[[], None]]) -> None:
+        self.storage.delete_note(source.cid, expected_hash=source.source_hash, prune_empty_dirs=True)
+        undo.append(lambda s=source: self.storage.save_note(s))
+
+    @staticmethod
+    def _parse_destination_path(to: str) -> tuple[str, list[str]]:
+        return _parse_relative_target(
+            to,
+            absolute_error=f"Move destination must be a vault-relative path, got '{to}'",
         )
 
-    def _destination(self, source: Note, to: str, cids: Sequence[str]) -> str:
-        if not isinstance(to, str) or not to.strip():
-            raise ValueError(f"Move destination must be a vault-relative path, got '{to}'")
-        raw = to.replace("\\", "/").strip()
+    @staticmethod
+    def _folder_prefix(cid_or_path: str, cids: Sequence[str]) -> tuple[str, list[str]] | None:
+        if not isinstance(cid_or_path, str) or not cid_or_path.strip():
+            return None
+        raw = _strip_dot_slash(cid_or_path)
         if raw.startswith("/") or Path(raw).is_absolute():
-            raise ValueError(f"Move destination must be a vault-relative path, got '{to}'")
-        raw_parts = [p for p in raw.strip("/").split("/") if p]
-        if not raw_parts or any(p in (".", "..") for p in raw_parts):
-            raise ValueError(f"Path traversal detected in '{to}': must not contain '.' or '..'")
+            return None
+        parts = [p for p in raw.strip("/").split("/") if p]
+        if not parts or any(p in (".", "..") for p in parts):
+            return None
+        prefix = "/".join(parts)
+        if not raw.endswith("/"):
+            if raw.lower().endswith(".md"):
+                return None
+            exact = path_to_cid(cid_to_path(raw))
+            if exact in cids or any(c.casefold() == exact.casefold() for c in cids):
+                return None
+        matches = sorted(c for c in cids if c.startswith(prefix + "/"))
+        if matches:
+            return prefix, matches
+        folded = sorted(c for c in cids if c.casefold().startswith(prefix.casefold() + "/"))
+        if folded:
+            depth = len(parts)
+            real_prefixes = sorted({"/".join(c.split("/")[:depth]) for c in folded})
+            if len(real_prefixes) == 1:
+                return real_prefixes[0], folded
+            raise AmbiguousNoteError(cid_or_path.strip(), folded)
+        if raw.endswith("/"):
+            raise FileNotFoundError(f"Note not found: {cid_or_path.strip()} (no notes under '{prefix}/')")
+        return None
+
+    def _leftover_folder_files(self, src_prefix: str, folder_cids: Sequence[str]) -> list[str]:
+        if self.vault is None:
+            return []
+        src_dir = self.vault.root / src_prefix
+        if not src_dir.is_dir():
+            return []
+        moving_rels = {cid_to_path(c).casefold() for c in folder_cids}
+        leftover: list[str] = []
+        for path in sorted(src_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(self.vault.root).as_posix()
+            if any(part.startswith(".") for part in rel.split("/")):
+                continue
+            if rel.casefold() not in moving_rels:
+                leftover.append(rel)
+        return leftover
+
+    def _folder_destinations(self, src_prefix: str, folder_cids: list[str], to: str) -> tuple[str, list[_MovedNote]]:
+        raw, raw_parts = self._parse_destination_path(to)
+        if raw.lower().endswith(".md"):
+            raise ValueError(f"Cannot move folder '{src_prefix}/' to a single file '{to}'")
+        dst_prefix = "/".join(raw_parts)
+        if dst_prefix == src_prefix:
+            raise ValueError(f"'{src_prefix}/' is already at '{dst_prefix}/'")
+
+        moving_set = frozenset(folder_cids)
+        moved_items: list[_MovedNote] = []
+        for old_cid in folder_cids:
+            src_note = self.storage.get_note(old_cid)
+            if src_note is None:
+                raise FileNotFoundError(f"Note not found: {cid_to_path(old_cid)}")
+            suffix = old_cid[len(src_prefix) + 1 :]
+            new_rel = cid_to_path(f"{dst_prefix}/{suffix}")
+            new_cid = path_to_cid(new_rel)
+            _check_new_location(
+                self.storage,
+                self.vault,
+                new_rel,
+                src_note.type,
+                verb="move",
+                replacing=old_cid,
+                replacing_group=moving_set,
+            )
+            moved_items.append(
+                _MovedNote(
+                    source=src_note,
+                    destination=replace(src_note, cid=new_cid, rel_path=new_rel),
+                )
+            )
+        return dst_prefix, moved_items
+
+    def _destination(self, source: Note, to: str, cids: Sequence[str]) -> str:
+        raw, raw_parts = self._parse_destination_path(to)
         if raw.endswith("/"):
             raw_parts.append(posixpath.basename(source.rel_path))
         else:
@@ -658,23 +838,41 @@ class MoveNoteUseCase:
         _check_new_location(self.storage, self.vault, rel, source.type, verb="move", replacing=source.cid)
         return rel
 
-    def _approvals(self, items: Sequence[str], source_cid: str, new_cid: str, resolver: LinkTargetIndex) -> set[str]:
-        """The CIDs the user agreed may go stale. The moved note may be named by where it is going."""
+    def _approvals(self, items: Sequence[str], moves: dict[str, str], resolver: LinkTargetIndex) -> set[str]:
+        """The CIDs the user agreed may go stale. Moved notes or folders may be named by where they are going."""
         approved: set[str] = set()
+        new_to_old = {v: k for k, v in moves.items()}
         for item in items:
             if not isinstance(item, str) or not item.strip():
                 raise ValueError("approve_stale entries must be non-empty note names")
-            named = normalize_link_target(item.strip().replace("\\", "/"))
-            while named.startswith("./"):
-                named = named[2:]
-            if named and path_to_cid(cid_to_path(named)) == new_cid:
-                approved.add(source_cid)
-            else:
-                approved.add(resolve_note_cid(self.storage, item, resolver))
+            named = _strip_dot_slash(normalize_link_target(item.strip()))
+            dest_cid = path_to_cid(cid_to_path(named)) if named else ""
+            if dest_cid in new_to_old:
+                approved.add(new_to_old[dest_cid])
+                continue
+            pfx = named.strip("/")
+            if pfx:
+                folder_hits = [
+                    old_cid
+                    for old_cid, new_cid in moves.items()
+                    if old_cid.casefold().startswith(pfx.casefold() + "/")
+                    or new_cid.casefold().startswith(pfx.casefold() + "/")
+                ]
+                if folder_hits:
+                    approved.update(folder_hits)
+                    continue
+            approved.add(resolve_note_cid(self.storage, item, resolver))
         return approved
 
-    def _read(self, cid: str, plan: MovePlan, before: LinkTargetIndex, after: LinkTargetIndex) -> Note | None:
-        """The note, or None. An unparseable note blocks only if its raw text links to the moved note."""
+    def _read(
+        self,
+        cid: str,
+        plan: MovePlan,
+        moves: dict[str, str],
+        before: LinkTargetIndex,
+        after: LinkTargetIndex,
+    ) -> Note | None:
+        """The note, or None. An unparseable note blocks only if its raw text links to a moved note."""
         try:
             return self.storage.get_note(cid)
         except Exception as exc:  # noqa: BLE001 -- an unreadable note never aborts the plan
@@ -690,60 +888,74 @@ class MoveNoteUseCase:
                 _, body = split_frontmatter(raw)
             except FrontmatterParseError:
                 body = raw
-            scratch = MovePlan(source=plan.source, destination=plan.destination)
+            scratch_blocked: list[str] = []
             probe = Note(cid=cid, rel_path=rel, body=body)
-            if self._link_edits(probe, plan.source.cid, plan.destination.cid, before, after, scratch) or scratch.blocked:
+            if self._link_edits(probe, moves, before, after, [], scratch_blocked) or scratch_blocked:
                 plan.blocked.append(f"{rel} cannot be parsed ({exc}) and links to the moved note; fix it first")
             else:
                 plan.warnings.append(f"{rel} cannot be parsed ({exc}); read as raw text, none of its links change")
             return None
 
     @staticmethod
+    def _expected_relative_target(
+        old_cid: str,
+        raw_target: str,
+        old_paths_to_new: dict[str, str],
+    ) -> str | None:
+        target = resolve_relative_path(old_cid, raw_target)
+        if target is None:
+            return None
+        return old_paths_to_new.get(target, target)
+
+    @staticmethod
     def _link_edits(
         note: Note,
-        old_cid: str,
-        new_cid: str,
+        moves: dict[str, str],
         before: LinkTargetIndex,
         after: LinkTargetIndex,
-        plan: MovePlan,
+        newly_resolved: list[str],
+        blocked: list[str],
     ) -> list[tuple[LinkSpan, str]]:
         """The target rewrites a move makes in `note`, each checked to read back as the same link."""
         raw_edits: list[tuple[LinkSpan, str]] = []
-        moving = note.cid == old_cid
+        moving = note.cid in moves
+        old_paths_to_new = {cid_to_path(k): cid_to_path(v) for k, v in moves.items()}
+        new_cids = frozenset(moves.values())
+
         for span in (*iter_link_spans(note.body), *iter_relative_path_spans(note.body)):
             if span.kind == LINK_KIND_WIKI:
                 was, will = before.resolve(span.target), after.resolve(span.target)
-                if was == old_cid:
-                    if will != new_cid:
-                        text = _shortest_wiki_target(new_cid, after)
+                if was in moves:
+                    expected_cid = moves[was]
+                    if will != expected_cid:
+                        text = _shortest_wiki_target(expected_cid, after)
                         if span.embed and is_attachment_target(text):
                             text += ".md"  # `![[v1.5]]` reads as an attachment, `![[v1.5.md]]` as the note
                         raw_edits.append((span, text))
                 elif was != will and was is None:
-                    plan.newly_resolved.append(f"{note.rel_path}: [[{span.target}]] was dead and would open {new_cid}")
+                    newly_resolved.append(f"{note.rel_path}: [[{span.target}]] was dead and would open {will}")
                 elif was != will:
-                    plan.blocked.append(
+                    blocked.append(
                         f"{note.rel_path}: [[{span.target}]] opens {was} today but would open {will} after the move"
                     )
             elif moving:
-                # The moved note's own relative paths keep naming the same file from the new folder.
+                # A moved note's own relative paths keep naming the same file from the new folder.
+                old_cid = note.cid
+                new_cid = moves[old_cid]
                 if not span.target or posixpath.normpath(span.target) == ".":
                     continue
-                target = resolve_relative_path(old_cid, span.target)
-                if target is None:
-                    continue
-                if target == cid_to_path(old_cid):
-                    target = cid_to_path(new_cid)
-                if resolve_relative_path(new_cid, span.target) == target:
+                target = MoveNoteUseCase._expected_relative_target(old_cid, span.target, old_paths_to_new)
+                if target is None or resolve_relative_path(new_cid, span.target) == target:
                     continue
                 text = posixpath.relpath(target, posixpath.dirname(cid_to_path(new_cid)) or ".")
                 raw_edits.append((span, _markdown_path_text(text, span.angle)))
             elif span.kind != LINK_KIND_IMAGE and span.target.lower().endswith(".md") and not is_raw_path(span.target):
                 target_cid = resolve_markdown_target(note.cid, span.target_raw)
-                if target_cid == old_cid:
-                    raw_edits.append((span, _markdown_path_text(relative_note_path(note.cid, new_cid), span.angle)))
-                elif target_cid == new_cid:
-                    plan.newly_resolved.append(f"{note.rel_path}: ({span.target}) was dead and would open {new_cid}")
+                if target_cid in moves:
+                    dest_cid = moves[target_cid]
+                    raw_edits.append((span, _markdown_path_text(relative_note_path(note.cid, dest_cid), span.angle)))
+                elif target_cid in new_cids:
+                    newly_resolved.append(f"{note.rel_path}: ({span.target}) was dead and would open {target_cid}")
 
         edits: list[tuple[LinkSpan, str]] = []
         cursor = 0
@@ -753,32 +965,43 @@ class MoveNoteUseCase:
             edits.append((span, text))
             cursor = span.end
         for span, text in edits:
-            if not MoveNoteUseCase._reads_back(note, span, text, old_cid, new_cid, after):
-                plan.blocked.append(
+            if not MoveNoteUseCase._reads_back(note, span, text, moves, old_paths_to_new, before, after):
+                blocked.append(
                     f"{note.rel_path}: '{span.target_raw}' rewritten as '{text}' would no longer open the same file; "
                     f"choose a destination name links can carry"
                 )
         return edits
 
     @staticmethod
-    def _reads_back(note: Note, span: LinkSpan, text: str, old_cid: str, new_cid: str, after: LinkTargetIndex) -> bool:
+    def _reads_back(
+        note: Note,
+        span: LinkSpan,
+        text: str,
+        moves: dict[str, str],
+        old_paths_to_new: dict[str, str],
+        before: LinkTargetIndex,
+        after: LinkTargetIndex,
+    ) -> bool:
         """Whether the rewritten link still parses as one link of its kind, naming what it should."""
         probe = _reparse(span, text)
         if probe is None:
             return False
         if span.kind == LINK_KIND_WIKI:
-            return after.resolve(probe.target) == new_cid
-        if note.cid == old_cid:
-            expected = resolve_relative_path(old_cid, span.target)
-            if expected == cid_to_path(old_cid):
-                expected = cid_to_path(new_cid)
+            was = before.resolve(span.target)
+            return was in moves and after.resolve(probe.target) == moves[was]
+        if note.cid in moves:
+            old_cid = note.cid
+            new_cid = moves[old_cid]
+            expected = MoveNoteUseCase._expected_relative_target(old_cid, span.target, old_paths_to_new)
             return resolve_relative_path(new_cid, probe.target) == expected and (
                 is_raw_path(probe.target) == is_raw_path(span.target)
             )
+        old_target = resolve_markdown_target(note.cid, span.target_raw)
         return (
-            probe.target.lower().endswith(".md")
+            old_target in moves
+            and probe.target.lower().endswith(".md")
             and not is_raw_path(probe.target)
-            and resolve_markdown_target(note.cid, probe.target_raw) == new_cid
+            and resolve_markdown_target(note.cid, probe.target_raw) == moves[old_target]
         )
 
     def _undo_create(self, cid: str) -> Callable[[], None]:

@@ -8,9 +8,8 @@ from __future__ import annotations
 import copy
 from collections.abc import Sequence
 
-from cadabby.constants import BODY_HASH_PREFIX
 from cadabby.domain import Note
-from cadabby.fsutil import VaultConflictError, compute_bytes_sha256
+from cadabby.fsutil import check_expected_hash, compute_bytes_sha256
 from cadabby.ports import LedgerPort, NoteStoragePort
 from cadabby.vault import cid_to_path, note_path_violation, path_to_cid
 
@@ -30,11 +29,14 @@ class InMemoryNoteStorage(NoteStoragePort):
             for n in initial_notes:
                 self.save_note(n)
 
-    def get_note(self, cid_or_path: str) -> Note | None:
+    def _lookup_existing(self, cid_or_path: str) -> Note | None:
         rel_path = cid_to_path(cid_or_path)
         if note_path_violation(rel_path):
             return None
-        note = self._notes.get(path_to_cid(rel_path))
+        return self._notes.get(path_to_cid(rel_path))
+
+    def get_note(self, cid_or_path: str) -> Note | None:
+        note = self._lookup_existing(cid_or_path)
         if note is None:
             return None
         copied = copy.deepcopy(note)
@@ -52,13 +54,7 @@ class InMemoryNoteStorage(NoteStoragePort):
         existing = self._notes.get(cid)
 
         if expected_hash is not None and existing is not None:
-            existing_hash = _content_hash(existing)
-            norm_expected = expected_hash.removeprefix(BODY_HASH_PREFIX)
-            if existing_hash != norm_expected:
-                raise VaultConflictError(
-                    f"VAULT_CONFLICT: {rel_path} was modified concurrently in memory "
-                    f"(expected {norm_expected[:12]}, found {existing_hash[:12]})"
-                )
+            check_expected_hash(_content_hash(existing), expected_hash, rel_path, where="in memory")
 
         # Round-trip through serialize() -> Note.from_raw() so tag canonicalization,
         # key ordering, and empty-collection omission match DiskNoteStorage 1:1.
@@ -72,10 +68,7 @@ class InMemoryNoteStorage(NoteStoragePort):
         )
 
     def note_exists(self, cid_or_path: str) -> bool:
-        rel_path = cid_to_path(cid_or_path)
-        if note_path_violation(rel_path):
-            return False
-        return path_to_cid(rel_path) in self._notes
+        return self._lookup_existing(cid_or_path) is not None
 
     def delete_note(self, cid_or_path: str, expected_hash: str | None = None, *, prune_empty_dirs: bool = False) -> None:
         # `prune_empty_dirs` is accepted for port parity; memory has no folders.
@@ -87,20 +80,11 @@ class InMemoryNoteStorage(NoteStoragePort):
         if existing is None:
             raise FileNotFoundError(f"Note not found: {rel_path}")
         if expected_hash is not None:
-            current = _content_hash(existing)
-            expected = expected_hash.removeprefix(BODY_HASH_PREFIX)
-            if current != expected:
-                raise VaultConflictError(
-                    f"VAULT_CONFLICT: {rel_path} was modified concurrently in memory "
-                    f"(expected {expected[:12]}, found {current[:12]})"
-                )
+            check_expected_hash(_content_hash(existing), expected_hash, rel_path, where="in memory")
         del self._notes[cid]
 
     def read_raw(self, cid_or_path: str) -> str | None:
-        rel_path = cid_to_path(cid_or_path)
-        if note_path_violation(rel_path):
-            return None
-        note = self._notes.get(path_to_cid(rel_path))
+        note = self._lookup_existing(cid_or_path)
         return note.serialize() if note is not None else None
 
     def list_note_cids(self) -> Sequence[str]:

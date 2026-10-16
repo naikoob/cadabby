@@ -71,6 +71,22 @@ def atomic_write(target_path: Path | str, content: str | bytes, encoding: str = 
         raise
 
 
+def check_expected_hash(
+    current_hash: str,
+    expected_hash: str,
+    label: str,
+    *,
+    where: str = "on disk",
+) -> None:
+    """Raise VaultConflictError if current_hash disagrees with expected_hash (§8)."""
+    expected = expected_hash.removeprefix(BODY_HASH_PREFIX)
+    if current_hash != expected:
+        raise VaultConflictError(
+            f"VAULT_CONFLICT: {label} was modified concurrently {where} "
+            f"(expected {expected[:12]}, found {current_hash[:12]})"
+        )
+
+
 def atomic_replace_checked(
     target_path: Path | str,
     new_content: str | bytes,
@@ -85,13 +101,7 @@ def atomic_replace_checked(
     target = Path(target_path).resolve()
 
     if expected_hash is not None and target.exists():
-        normalized_expected = expected_hash.removeprefix(BODY_HASH_PREFIX)
-        current_hash = compute_file_sha256(target)
-        if current_hash != normalized_expected:
-            raise VaultConflictError(
-                f"VAULT_CONFLICT: {target.name} was modified concurrently on disk "
-                f"(expected {normalized_expected[:12]}, found {current_hash[:12]})"
-            )
+        check_expected_hash(compute_file_sha256(target), expected_hash, target.name)
 
     atomic_write(target, new_content, encoding=encoding)
 

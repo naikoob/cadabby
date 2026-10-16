@@ -79,11 +79,16 @@ DEFAULT_LOG_ROTATE_BYTES = 262144  # 256 KB
 # Directory & file conventions
 DIR_RAW = "raw"
 DIR_WIKI = "wiki"
+DIR_ARCHIVE = "archive"
 DIR_LOG = "log"
 DIR_DOT_CADABBY = ".cadabby"
 DIR_AGENTS = ".agents"
 DIR_CLAUDE = ".claude"
 DIR_OBSIDIAN = ".obsidian"
+
+DEFAULT_DOMAIN_MULTIPLIERS = {
+    DIR_ARCHIVE: 0.5,
+}
 
 DEFAULT_IGNORED_DIRS = frozenset({
     ".git",

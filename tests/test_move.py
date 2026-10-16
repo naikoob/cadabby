@@ -539,6 +539,162 @@ class TestMoveNote(unittest.TestCase):
         self.assertNotEqual(fresh, token)
         self.assertTrue(move_note(self.vault, "wiki/target-note", "renamed-note", apply=True, plan_token=fresh)["applied"])
 
+    def test_folder_move_preserves_comoving_links_and_prunes_empty_dirs(self):
+        """§2.6, §5.1, §10 C54: Moving a folder prefix preserves co-moving relative links, updates external links, and prunes empty dirs."""
+        self._write(
+            "customers/northwind/README.md",
+            _fm("Northwind Hub", type_="moc") + "# Northwind\nSee [deal](deal.md) and [[deal]].\n",
+        )
+        self._write(
+            "customers/northwind/deal.md",
+            _fm("Northwind Deal")
+            + "# Deal\nBack to [README](README.md) and source [gist](../../raw/karpathy-llm-wiki-gist.md).\n",
+        )
+        self._write(
+            "wiki/overview.md",
+            _fm("Overview") + "# Overview\nTrack [deal](../customers/northwind/deal.md) and [[customers/northwind/README]].\n",
+        )
+        # Human-verify README.md, which only links relatively to co-moving deal.md (no ../raw/ link that changes depth)
+        verify_note(self.vault, "customers/northwind/README", actor="human:alice", is_human_authorized=True)
+
+        # Moving from depth 2 (customers/northwind/*) to depth 3 (customers/enterprise/northwind/*)
+        # README.md's body has [deal](deal.md) which is co-moving and unchanged! So README.md stays human-reviewed without approve_stale.
+        res = move_note(
+            self.vault,
+            "customers/northwind/",
+            "customers/enterprise/northwind/",
+            apply=True,
+            actor="agent:test",
+        )
+        self.assertTrue(res["applied"])
+        self.assertEqual(len(res["moved_notes"]), 2)
+        self.assertFalse((self.root / "customers/northwind").exists())
+        self.assertTrue((self.root / "customers/enterprise/northwind/README.md").exists())
+        self.assertTrue((self.root / "customers/enterprise/northwind/deal.md").exists())
+
+        # Co-moving relative link [deal](deal.md) is byte-for-byte untouched, preserving human-reviewed trust
+        readme_after = (self.root / "customers/enterprise/northwind/README.md").read_text("utf-8")
+        self.assertIn("[deal](deal.md)", readme_after)
+        with VaultCache(self.vault) as cache:
+            cache.scan()
+            row = cache.get_connection().execute(
+                "SELECT trust_tier FROM notes WHERE cid = 'customers/enterprise/northwind/README';"
+            ).fetchone()
+            self.assertEqual(row["trust_tier"], "human-reviewed")
+
+        # Outbound raw/ link in deal.md was rewritten for the deeper folder depth
+        deal_after = (self.root / "customers/enterprise/northwind/deal.md").read_text("utf-8")
+        self.assertIn("[README](README.md)", deal_after)
+        self.assertIn("[gist](../../../raw/karpathy-llm-wiki-gist.md)", deal_after)
+
+        # External referrer in wiki/overview.md was updated for both markdown and qualified wikilink
+        overview_after = (self.root / "wiki/overview.md").read_text("utf-8")
+        self.assertIn("[deal](../customers/enterprise/northwind/deal.md)", overview_after)
+        self.assertIn("[[README]]", overview_after)
+        self.assertEqual([f for f in run_vault_lint(self.vault) if f.severity == "error"], [])
+
+    def test_folder_move_into_archive_retires_subtree_atomically(self):
+        """§2.2, §2.6, §5.1, §10 C53, C54: Moving an active domain folder into archive/ retires the subtree and preserves co-moving human-reviewed notes."""
+        self._write(
+            "cs244b/README.md",
+            _fm("CS244B Hub", type_="moc") + "# CS244B\n- [raft](lectures/raft.md)\n",
+        )
+        self._write(
+            "cs244b/lectures/raft.md",
+            _fm("Raft Lecture") + "# Raft\nPart of [CS244B](../README.md).\n",
+        )
+        verify_note(self.vault, "cs244b/README", actor="human:alice", is_human_authorized=True)
+        verify_note(self.vault, "cs244b/lectures/raft", actor="human:alice", is_human_authorized=True)
+
+        # Dry-run plan shows 2 subtree moves and no blocked notes because co-moving relative links do not change
+        plan = move_note(self.vault, "cs244b", "archive/cs244b", apply=False)
+        self.assertEqual(len(plan["moved_notes"]), 2)
+        self.assertEqual(plan["blocked"], [])
+
+        applied = move_note(
+            self.vault,
+            "cs244b",
+            "archive/cs244b",
+            apply=True,
+            plan_token=plan["plan_token"],
+            actor="agent:test",
+        )
+        self.assertTrue(applied["applied"])
+        self.assertFalse((self.root / "cs244b").exists())
+        self.assertTrue((self.root / "archive/cs244b/README.md").exists())
+        self.assertTrue((self.root / "archive/cs244b/lectures/raft.md").exists())
+
+        with VaultCache(self.vault) as cache:
+            cache.scan()
+            rows = cache.get_connection().execute(
+                "SELECT cid, layer, trust_tier FROM notes WHERE layer = 'archive' ORDER BY cid;"
+            ).fetchall()
+            self.assertEqual(
+                [(r["cid"], r["layer"], r["trust_tier"]) for r in rows],
+                [
+                    ("archive/cs244b/README", "archive", "human-reviewed"),
+                    ("archive/cs244b/lectures/raft", "archive", "human-reviewed"),
+                ],
+            )
+        self.assertEqual([f for f in run_vault_lint(self.vault) if f.severity == "error"], [])
+
+    def test_folder_move_edge_cases_overlapping_shift_casefold_and_leftovers(self):
+        """§5.1, §10 C54: Overlapping parent/child subtree shift, case-folded folder prefix, folder approve_stale, and leftover non-note warnings."""
+        # 1. Overlapping parent/child subtree shift: moving customers/acme/sub/ -> customers/acme/
+        # where both sub/deal.md and sub/sub/deal.md exist (item 1's destination equals item 0's source).
+        self._write("customers/acme/sub/deal.md", _fm("Outer Deal") + "# Outer\n")
+        self._write("customers/acme/sub/sub/deal.md", _fm("Inner Deal") + "# Inner\n")
+        plan = move_note(self.vault, "customers/acme/sub/", "customers/acme/", apply=False)
+        move_note(
+            self.vault,
+            "customers/acme/sub/",
+            "customers/acme/",
+            apply=True,
+            plan_token=plan["plan_token"],
+            actor="agent:test",
+        )
+        self.assertIn("# Outer", (self.root / "customers/acme/deal.md").read_text("utf-8"))
+        self.assertIn("# Inner", (self.root / "customers/acme/sub/deal.md").read_text("utf-8"))
+        self.assertFalse((self.root / "customers/acme/sub/sub").exists())
+
+        # 2. Case-insensitive source folder prefix + folder prefix in approve_stale + leftover non-note warning
+        self._write(
+            "cs244b/AGENTS.md",
+            "---\ndomain: cs244b\ndescription: Distributed systems.\n---\n# CS244B\n",
+        )
+        self._write(
+            "cs244b/notes.md",
+            _fm("Notes") + "# Notes\nSee [gist](../raw/karpathy-llm-wiki-gist.md).\n",
+        )
+        verify_note(self.vault, "cs244b/notes", actor="human:alice", is_human_authorized=True)
+
+        # Case-folded source folder prefix ("CS244B/") resolves to "cs244b/" and warns about cs244b/AGENTS.md
+        blocked_plan = move_note(self.vault, "CS244B/", "archive/cs244b/", apply=False)
+        self.assertEqual(blocked_plan["from"], "cs244b/")
+        self.assertEqual(len(blocked_plan["blocked"]), 1)
+        self.assertTrue(any("cs244b/AGENTS.md" in w for w in blocked_plan["warnings"]))
+
+        # Approving via the folder prefix unblocks all moved notes under that prefix
+        ok_plan = move_note(
+            self.vault,
+            "CS244B/",
+            "archive/cs244b/",
+            approve_stale=["cs244b/"],
+            apply=False,
+        )
+        self.assertEqual(ok_plan["blocked"], [])
+        move_note(
+            self.vault,
+            "CS244B/",
+            "archive/cs244b/",
+            approve_stale=["cs244b/"],
+            apply=True,
+            plan_token=ok_plan["plan_token"],
+            actor="agent:test",
+        )
+        self.assertTrue((self.root / "archive/cs244b/notes.md").exists())
+        self.assertTrue((self.root / "cs244b/AGENTS.md").exists())
+
 
 class TestMoveNoteInMemory(unittest.TestCase):
     """Hexagonal parity: the use case runs with no vault on disk."""

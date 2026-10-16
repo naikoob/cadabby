@@ -300,6 +300,16 @@ class TestLinkTargetIndex(unittest.TestCase):
         self.assertIsNone(resolver.resolve("apollo/Architcture"))
         self.assertIsNone(resolver.resolve("customers/acmee/Architecture"))
 
+    def test_stem_resolution_prefers_active_domains_over_archive(self):
+        """§2.5, §10 C53: Stem resolution order is wiki/ -> active domains -> archive/."""
+        resolver = LinkTargetIndex(["archive/old/Architecture", "projects/apollo/Architecture"])
+        self.assertEqual(resolver.resolve("Architecture"), "projects/apollo/Architecture")
+        self.assertEqual(resolver.resolve("old/Architecture"), "archive/old/Architecture")
+
+        with_wiki = LinkTargetIndex(["archive/old/Architecture", "projects/apollo/Architecture", "wiki/Architecture"])
+        self.assertEqual(with_wiki.resolve("Architecture"), "wiki/Architecture")
+
+
 class TestMarkdownNoteLinkExtraction(unittest.TestCase):
     """§4.4, §10 C29. Relative `.md` links are note-link candidates; nothing else is."""
 

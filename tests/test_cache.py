@@ -856,6 +856,35 @@ class TestVaultCacheRanking(unittest.TestCase):
             row2 = conn.execute("SELECT target_cid FROM links WHERE source_cid = 'wiki/Caller';").fetchone()
             self.assertEqual(row2["target_cid"], "wiki/Shared")
 
+    def test_archive_domain_ranking_multiplier_compounds_with_trust_and_status(self):
+        """§4.4, §10 C53: ranking.domain.archive (default 0.5) compounds with trust and status multipliers."""
+        (self.vault.root / "cs244b").mkdir(parents=True, exist_ok=True)
+        (self.vault.root / "archive" / "cs244b").mkdir(parents=True, exist_ok=True)
+
+        active_domain_note = self.vault.root / "cs244b" / "raft-consensus.md"
+        archived_note = self.vault.root / "archive" / "cs244b" / "raft-consensus.md"
+
+        body = (
+            "---\ntype: concept\ntitle: Raft Consensus\ndescription: Leader election\n"
+            "status: completed\n---\n# Raft Consensus\nUniquequorumtoken for leader election.\n"
+        )
+        active_domain_note.write_text(body, "utf-8")
+        archived_note.write_text(body, "utf-8")
+
+        with VaultCache(self.vault) as cache:
+            cache.scan()
+            results = cache.search("Uniquequorumtoken", limit=10)
+            by_cid = {r.cid: r for r in results}
+            self.assertIn("cs244b/raft-consensus", by_cid)
+            self.assertIn("archive/cs244b/raft-consensus", by_cid)
+            # Both are unverified (1.0) and completed (0.85); archive/ compounds by 0.5 -> 0.425 (exact 2:1 ratio)
+            self.assertEqual(results[0].cid, "cs244b/raft-consensus")
+            self.assertAlmostEqual(
+                by_cid["cs244b/raft-consensus"].score / by_cid["archive/cs244b/raft-consensus"].score,
+                2.0,
+                places=5,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
