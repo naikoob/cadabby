@@ -26,7 +26,7 @@ from cadabby.domain import (
     extract_markdown_section,
     split_markdown_sections,
 )
-from cadabby.errors import AmbiguousNoteError, HumanAttestationRefusedError, VaultConflictError
+from cadabby.errors import AmbiguousNoteError, HumanAttestationRefusedError, VaultConflictError, classify
 from cadabby.frontmatter import FrontmatterParseError, serialize_frontmatter, split_frontmatter
 from cadabby.graph import (
     LINK_KIND_IMAGE,
@@ -80,10 +80,27 @@ def _parse_relative_target(raw_input: str, *, absolute_error: str) -> tuple[str,
     return raw, parts
 
 
+def _match_listed_path(cids: Sequence[str], raw: str, shown: str) -> str | None:
+    """The listed CID `raw` names as a path -- exactly, else uniquely ignoring case (§5.1 steps 1-2).
+
+    None when neither matches; AmbiguousNoteError when several notes differ
+    from it only by letter case.
+    """
+    exact = path_to_cid(cid_to_path(raw))
+    if exact in cids:
+        return exact
+    folded = sorted(c for c in cids if c.casefold() == exact.casefold())
+    if len(folded) > 1:
+        raise AmbiguousNoteError(shown, folded)
+    return folded[0] if folded else None
+
+
 def resolve_note_cid(
     storage: NoteStoragePort,
     cid_or_path: str,
     resolver: LinkTargetIndex | None = None,
+    *,
+    cids: Sequence[str] | None = None,
 ) -> str:
     """The canonical CID of an existing note named by path, stem, or wikilink (§5.1).
 
@@ -93,31 +110,27 @@ def resolve_note_cid(
     note after the caller's spelling. Order: the exact path (so a filename
     containing `#` or `|` still resolves), a unique letter-case-insensitive
     path, then the name read as a wikilink. A name that could mean several
-    notes raises AmbiguousNoteError rather than picking one.
+    notes raises AmbiguousNoteError rather than picking one. Callers resolving
+    many names pass `cids` (and `resolver`) once instead of relisting per name.
     """
     if not isinstance(cid_or_path, str) or not cid_or_path.strip():
         raise ValueError("Note CID or path must be a non-empty string")
+    shown = cid_or_path.strip()
     raw = _strip_dot_slash(cid_or_path)
     if raw.startswith("/") or Path(raw).is_absolute() or ".." in raw.split("/"):
-        raise FileNotFoundError(f"Note not found: {cid_or_path.strip()} (names must be vault-relative)")
+        raise FileNotFoundError(f"Note not found: {shown} (names must be vault-relative)")
 
-    cids = list(storage.list_note_cids())
-    exact = path_to_cid(cid_to_path(raw))
-    if exact in cids:
-        return exact
-    folded = sorted(c for c in cids if c.casefold() == exact.casefold())
-    if len(folded) == 1:
-        return folded[0]
-    if folded:
-        raise AmbiguousNoteError(cid_or_path.strip(), folded)
+    listed = list(cids) if cids is not None else list(storage.list_note_cids())
+    if (hit := _match_listed_path(listed, raw, shown)) is not None:
+        return hit
 
     clean = normalize_link_target(raw)
-    found = (resolver if resolver is not None else LinkTargetIndex(cids)).candidates(clean) if clean else []
+    found = (resolver if resolver is not None else LinkTargetIndex(listed)).candidates(clean) if clean else []
     if len(found) == 1:
         return found[0]
     if found:
-        raise AmbiguousNoteError(cid_or_path.strip(), found)
-    raise FileNotFoundError(f"Note not found: {cid_or_path.strip()}")
+        raise AmbiguousNoteError(shown, found)
+    raise FileNotFoundError(f"Note not found: {shown}")
 
 
 def load_existing_note(
@@ -524,6 +537,50 @@ class _MovedNote:
     links: int = 0
 
 
+def _write_steps(moved: list[_MovedNote]) -> list[tuple[str, _MovedNote]]:
+    """Order a move's ("write" | "retire", item) steps so no note is ever absent from disk (§5.1).
+
+    A destination still occupied by another moving note's source is written only
+    after that source has been copied to its own destination and retired, so each
+    collision chain of an overlapping subtree shift (`a/` -> `a/b/`) runs from its
+    tail. The one retire-first step is a case-only rename, whose source and
+    destination are a single file on a case-insensitive filesystem (§5.1 allows
+    it). Sources that block nothing are retired later, after the rewrites.
+    Paths compare case-insensitively, as the filesystem may. A cycle cannot arise
+    from a prefix shift; one would raise here, before anything is written.
+    """
+    def fold(note: Note) -> str:
+        return note.cid.casefold()
+
+    dest_keys = {fold(m.destination) for m in moved}
+    pending = list(moved)
+    live_sources = {fold(m.source): m for m in moved}
+    steps: list[tuple[str, _MovedNote]] = []
+    while pending:
+        progressed = False
+        for item in list(pending):
+            occupant = live_sources.get(fold(item.destination))
+            if occupant is not None and occupant is not item:
+                continue  # its destination still holds another note's only copy
+            if occupant is item:  # case-only rename: one file, so retire, then write
+                steps.append(("retire", item))
+                live_sources.pop(fold(item.source))
+            steps.append(("write", item))
+            if fold(item.source) in live_sources and fold(item.source) in dest_keys:
+                # Now copied, its old path is someone's destination: free it.
+                steps.append(("retire", item))
+                live_sources.pop(fold(item.source))
+            pending.remove(item)
+            progressed = True
+        if not progressed:
+            raise ValueError(
+                "Move refused: destinations form a cycle ("
+                + ", ".join(f"{m.source.cid} -> {m.destination.cid}" for m in pending)
+                + "); move in two steps through a temporary name"
+            )
+    return steps
+
+
 @dataclass
 class MovePlan:
     """Everything a move would write, computed from the notes as they are now (§5.1).
@@ -627,7 +684,23 @@ class MoveNoteUseCase:
     def plan(self, cid_or_path: str, to: str, approve_stale: Sequence[str] = ()) -> MovePlan:
         cids = list(self.storage.list_note_cids())
         before = LinkTargetIndex(cids)
-        folder_prefix = self._folder_prefix(cid_or_path, cids)
+        # §5.1 order: exact path, case-insensitive path, wikilink reading, and
+        # only then a folder prefix -- so `move projects` means the note
+        # `wiki/projects` when there is one, as it does for update and verify.
+        # A trailing '/' always names a folder.
+        source: Note | None = None
+        folder_prefix = None
+        if isinstance(cid_or_path, str) and cid_or_path.rstrip().endswith("/"):
+            folder_prefix = self._folder_prefix(cid_or_path, cids)
+            if folder_prefix is None:
+                raise FileNotFoundError(f"Note not found: {cid_or_path.strip()} (names must be vault-relative)")
+        else:
+            try:
+                source = load_existing_note(self.storage, cid_or_path, before)
+            except FileNotFoundError:
+                folder_prefix = self._folder_prefix(cid_or_path, cids)
+                if folder_prefix is None:
+                    raise
         if folder_prefix is not None:
             src_prefix, folder_cids = folder_prefix
             dst_prefix, moved_items = self._folder_destinations(src_prefix, folder_cids, to)
@@ -645,7 +718,7 @@ class MoveNoteUseCase:
                     f"Non-note files under '{src_prefix}/' are not moved and will remain in place: {sample}{more}"
                 )
         else:
-            source = load_existing_note(self.storage, cid_or_path, before)
+            assert source is not None
             new_rel = self._destination(source, to, cids)
             new_cid = path_to_cid(new_rel)
             plan = MovePlan(
@@ -682,17 +755,15 @@ class MoveNoteUseCase:
         """Write the plan destination-first, so a crash leaves a duplicate, never a lost note."""
         if plan.blocked:
             raise ValueError("Move refused: " + "; ".join(plan.blocked))
-        dest_folded = {m.destination.cid.casefold() for m in plan.moved}
+        steps = _write_steps(plan.moved)  # computed before any write; raises on a cycle
         undo: list[Callable[[], None]] = []
+        retired: set[str] = set()
         try:
-            # On a case-insensitive filesystem or an overlapping subtree shift,
-            # any source whose path collides with a destination path must be
-            # retired before destinations are written so write-then-delete never
-            # trips FileExistsError or deletes a newly written note.
-            for item in plan.moved:
-                if item.source.cid.casefold() in dest_folded:
+            for action, item in steps:
+                if action == "retire":
                     self._retire_source(item.source, undo)
-            for item in plan.moved:
+                    retired.add(item.source.cid)
+                    continue
                 destination = item.destination
                 if self.storage.note_exists(destination.cid):
                     raise FileExistsError(f"Note already exists at {destination.rel_path}")
@@ -702,7 +773,7 @@ class MoveNoteUseCase:
                 self.storage.save_note(rw.updated, expected_hash=rw.original.source_hash)
                 undo.append(self._undo_rewrite(rw))
             for item in plan.moved:
-                if item.source.cid.casefold() not in dest_folded:
+                if item.source.cid not in retired:
                     self._retire_source(item.source, undo)
         except Exception as exc:
             failures = []
@@ -1073,106 +1144,129 @@ class GroundNotesUseCase:
         self.cache = cache
         self.vault = vault
 
-    def _lookup_note(self, target: str, resolver: LinkTargetIndex) -> Note | None:
-        """Resolve `target` by exact CID first, then via `resolver` (§4.4, §5.1)."""
-        if not target:
-            return None
-        note = self.storage.get_note(path_to_cid(target))
-        if note is not None:
-            return note
-        resolved = resolver.resolve(target)
-        return self.storage.get_note(resolved) if resolved else None
+    def _load(self, cid: str) -> Note:
+        note = self.storage.get_note(cid)
+        if note is None:
+            raise FileNotFoundError(f"Note not found: {cid_to_path(cid)}")
+        return note
 
     def _resolve_target_and_anchor(
-        self, raw_target: str, resolver: LinkTargetIndex
-    ) -> tuple[Note | None, str | None]:
-        """Resolve `raw_target` into `(note, anchor)`, trying literal `#` filenames before anchor splitting (§5.1)."""
-        unwrapped = strip_link_wrapper(raw_target)
-        if not unwrapped:
-            return None, None
+        self, raw_target: str, cids: Sequence[str], index: LinkTargetIndex
+    ) -> tuple[Note, str | None]:
+        """The note `raw_target` names and its `#anchor`, by the same rules as the write tools (§5.1).
 
-        # Try exact or stem match with '#' intact first so a legacy note whose
-        # filename literally contains '#' (e.g. 'wiki/C#-Basics.md', §5.1)
-        # resolves as a whole note before splitting '#' as a section anchor.
-        if "#" in unwrapped:
-            literal_note = self._lookup_note(unwrapped, resolver)
-            if literal_note is not None:
-                return literal_note, None
-
-        clean, anchor = split_link_target_and_anchor(raw_target)
-        note = self._lookup_note(clean, resolver)
-        if note is None and unwrapped.count("#") > 1:
-            alt_clean, alt_anchor = unwrapped.rsplit("#", 1)
-            note = self._lookup_note(alt_clean.strip(), resolver)
-            if note is not None:
-                anchor = alt_anchor.strip() or None
-        return note, anchor
+        A filename that literally contains '#' (`wiki/C#-Basics.md`) is tried as a
+        whole path before any '#' is read as an anchor. Raises FileNotFoundError,
+        AmbiguousNoteError, or FrontmatterParseError (naming the file), exactly as
+        update, verify and move do for the same name.
+        """
+        unwrapped = _strip_dot_slash(strip_link_wrapper(raw_target))
+        if "#" in unwrapped and (literal := _match_listed_path(cids, unwrapped, raw_target.strip())):
+            return self._load(literal), None
+        clean, anchor = split_link_target_and_anchor(unwrapped)
+        try:
+            cid = resolve_note_cid(self.storage, clean, index, cids=cids)
+        except FileNotFoundError:
+            if unwrapped.count("#") < 2:
+                raise
+            head, _, tail = unwrapped.rpartition("#")  # 'wiki/C#-Basics#Intro'
+            cid = resolve_note_cid(self.storage, head, index, cids=cids)
+            anchor = tail.strip() or None
+        return self._load(cid), anchor
 
     @staticmethod
-    def _apply_section_anchor(note: Note, anchor: str | None) -> tuple[Note, str | None]:
-        """Slice `note.body` to the requested ATX `#anchor` section when `anchor` is given (§5.1)."""
+    def _apply_section_anchor(note: Note, anchor: str | None) -> tuple[Note, str | None, str | None]:
+        """`(note_to_return, matched_heading, section_error)` for an optional `#anchor` (§5.1).
+
+        A heading that no longer exists is not a failure: the note resolved, as
+        lint's ANCHOR_MISSING warning recognizes (§6.3), so the whole note comes
+        back with `section_error` naming the headings it does have.
+        """
         if anchor is None:
-            return note, None
+            return note, None, None
         extracted = extract_markdown_section(note.body, anchor)
         if extracted is None:
             headings = extract_headings(note.body)
             available = ", ".join(f"'{h}'" for h in headings) if headings else "none"
-            raise ValueError(
-                f"Section '#{anchor}' not found in '{note.cid}' (available headings: {available})"
-            )
+            return note, None, f"Section '#{anchor}' not found in '{note.cid}' (available headings: {available})"
         matched_section, section_text = extracted
-        return replace(note, body=section_text, raw_text=None), matched_section
+        return replace(note, body=section_text, raw_text=None), matched_section, None
+
+    def _grounded(
+        self,
+        raw_target: str,
+        note: Note,
+        anchor: str | None,
+        budget_tokens: int | None,
+        domains: dict[str, Any],
+    ) -> dict[str, Any]:
+        note_for_budget, matched_section, section_error = self._apply_section_anchor(note, anchor)
+        domain_name = path_to_layer(note.rel_path)
+        domain_def = domains.get(domain_name)
+        if self.cache is not None:
+            links, backlinks, sources = self.cache.get_note_neighborhood(note.cid)
+        else:
+            links, backlinks, sources = [], [], []
+        content_to_return, truncated = _truncate_to_budget(note_for_budget, budget_tokens)
+        item: dict[str, Any] = {
+            "target": raw_target,
+            "cid": note.cid,
+            "domain": domain_name,
+            "title": note.title or Path(note.rel_path).stem,
+            "type": note.type,
+            "status": note.status,
+            "trust_tier": note.trust_tier,
+            "section": matched_section,
+            "directives": domain_def.directives_markdown if domain_def is not None else "",
+            "content": content_to_return,
+            "links": links,
+            "backlinks": backlinks,
+            "sources": sources,
+            "truncated": truncated,
+        }
+        if section_error is not None:
+            item["section_error"] = section_error
+        return item
 
     def execute(
         self,
         cids: Sequence[str],
         budget_tokens: int | None = None,
     ) -> list[dict[str, Any]]:
-        grounded: list[dict[str, Any]] = []
+        """One entry per target, in order: the grounded note, or `{"target", "error"}` (§5.1).
+
+        A target that cannot be grounded is reported in its place, classified
+        exactly as any other failure (§5.4), so one stale link does not cost the
+        caller the rest of the batch. If nothing at all could be grounded the
+        call fails with the first target's error, which makes a single-target
+        call behave like update, verify and move.
+        """
+        if isinstance(cids, str) or not cids:
+            raise ValueError("cids must be a non-empty list of note names")
         domains = self.vault.discover_domains() if self.vault is not None else {}
-        resolver = (
-            self.cache.get_link_resolver()
-            if self.cache is not None
-            else LinkTargetIndex(self.storage.list_note_cids())
-        )
+        # Names resolve against what storage lists, not the search index, so a
+        # note whose frontmatter is broken is named in its error rather than the
+        # name silently resolving to another note with the same stem.
+        listed = list(self.storage.list_note_cids())
+        index = LinkTargetIndex(listed)
 
+        results: list[dict[str, Any]] = []
+        failures: list[Exception] = []
         for raw_target in cids:
-            note, anchor = self._resolve_target_and_anchor(raw_target, resolver)
-            if note is None:
+            try:
+                note, anchor = self._resolve_target_and_anchor(raw_target, listed, index)
+            except Exception as exc:  # noqa: BLE001 -- classified per target, §5.4
+                info = classify(exc)
+                failures.append(exc)
+                results.append(
+                    {"target": raw_target, "error": {"code": info.code, "message": info.message, "retryable": info.retryable}}
+                )
                 continue
+            results.append(self._grounded(raw_target, note, anchor, budget_tokens, domains))
 
-            note_for_budget, matched_section = self._apply_section_anchor(note, anchor)
-            cid = note.cid
-            domain_name = path_to_layer(note.rel_path)
-            domain_def = domains.get(domain_name)
-            directives = domain_def.directives_markdown if domain_def is not None else ""
-
-            if self.cache is not None:
-                links, backlinks, sources = self.cache.get_note_neighborhood(cid)
-            else:
-                links, backlinks, sources = [], [], []
-
-            content_to_return, truncated = _truncate_to_budget(note_for_budget, budget_tokens)
-
-            grounded.append(
-                {
-                    "cid": cid,
-                    "domain": domain_name,
-                    "title": note.title or Path(note.rel_path).stem,
-                    "type": note.type,
-                    "status": note.status,
-                    "trust_tier": note.trust_tier,
-                    "section": matched_section,
-                    "directives": directives,
-                    "content": content_to_return,
-                    "links": links,
-                    "backlinks": backlinks,
-                    "sources": sources,
-                    "truncated": truncated,
-                }
-            )
-
-        return grounded
+        if failures and len(failures) == len(results):
+            raise failures[0]
+        return results
 
 
 # ============================================================================

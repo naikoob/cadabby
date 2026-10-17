@@ -491,15 +491,33 @@ class TestMcpServer(unittest.TestCase):
         self.assertEqual(grounded[0]["section"], "Epistemic Trust Tiers")
         self.assertTrue(all("trust_tier" in l and "title" in l for l in grounded[0]["links"]))
 
-        # 4. vault_ground with missing #section returns INVALID_ARGUMENT naming available headings
+        # 4. vault_ground with a missing #section returns the full note with section_error naming the headings
         res_bad_sec = self.server.handle_tools_call(
             "vault_ground",
             {"cids": ["wiki/epistemic-trust-tiers#NoSuchHeading"]},
         )
-        self.assertTrue(res_bad_sec["isError"])
-        sec_err = json.loads(res_bad_sec["content"][0]["text"])["error"]
-        self.assertEqual(sec_err["code"], "INVALID_ARGUMENT")
-        self.assertIn("Epistemic Trust Tiers", sec_err["message"])
+        self.assertFalse(res_bad_sec["isError"])
+        item = json.loads(res_bad_sec["content"][0]["text"])[0]
+        self.assertIsNone(item["section"])
+        self.assertIn("Epistemic Trust Tiers", item["section_error"])
+        self.assertIn("# Epistemic Trust Tiers", item["content"])
+
+    def test_mcp_ground_partial_results(self):
+        """§5.1, §10 C58: a bad target comes back as an error entry in place; isError only when nothing grounds."""
+        res = self.server.handle_tools_call("vault_ground", {"cids": ["sqlite", "no-such-note"]})
+        self.assertFalse(res["isError"])
+        entries = json.loads(res["content"][0]["text"])
+        self.assertEqual([e["target"] for e in entries], ["sqlite", "no-such-note"])
+        self.assertEqual(entries[0]["cid"], "wiki/sqlite")
+        self.assertEqual(entries[1]["error"]["code"], "NOT_FOUND")
+
+        only_bad = self.server.handle_tools_call("vault_ground", {"cids": ["no-such-note"]})
+        self.assertTrue(only_bad["isError"])
+        self.assertEqual(json.loads(only_bad["content"][0]["text"])["error"]["code"], "NOT_FOUND")
+
+        empty = self.server.handle_tools_call("vault_ground", {"cids": []})
+        self.assertTrue(empty["isError"])
+        self.assertEqual(json.loads(empty["content"][0]["text"])["error"]["code"], "INVALID_ARGUMENT")
 
 
 if __name__ == "__main__":

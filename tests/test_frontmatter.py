@@ -38,6 +38,16 @@ class TestFrontmatterParser(unittest.TestCase):
         with self.assertRaises(FrontmatterParseError):
             parse_scalar("'it's bad'", 1)
 
+    def test_leading_bom_is_ignored(self):
+        """§3.2: a UTF-8 byte-order mark does not hide the frontmatter, and never reaches the body."""
+        for text in ("\ufeff---\ntitle: T\n---\nBody\n", "\ufeff---\r\ntitle: T\r\n---\r\nBody\r\n"):
+            with self.subTest(text=text):
+                fm, body = parse_frontmatter(text)
+                self.assertEqual(fm, {"title": "T"})
+                self.assertEqual(body.strip(), "Body")
+        fm, body = parse_frontmatter("\ufeff# No frontmatter\n")
+        self.assertEqual((fm, body), ({}, "# No frontmatter\n"))
+
     def test_valid_okf_frontmatter(self):
         sample = """---
 type: concept

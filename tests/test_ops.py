@@ -14,7 +14,7 @@ from cadabby.adapters.memory_storage import InMemoryLedger, InMemoryNoteStorage
 from cadabby.cache import VaultCache
 from cadabby.domain import Note
 from cadabby.errors import AmbiguousNoteError, HumanAttestationRefusedError
-from cadabby.frontmatter import FrontmatterSerializeError, parse_frontmatter
+from cadabby.frontmatter import FrontmatterParseError, FrontmatterSerializeError, parse_frontmatter
 from cadabby.fsutil import VaultConflictError, compute_file_sha256
 from cadabby.lint import run_vault_lint
 from cadabby.mcp import McpServer
@@ -279,8 +279,103 @@ class TestOps(unittest.TestCase):
         self.assertEqual(note.frontmatter["zz_note"], payload)
         self.assertFalse(any(str(v.get("by", "")).startswith("human:") for v in note.frontmatter["verified"]))
 
+    def _readme_hubs(self) -> None:
+        for rel in ("customers/acme/README.md", "projects/apollo/README.md"):
+            path = self.vault_root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("---\ntype: moc\ntitle: Hub\ndescription: d\nstatus: active\n---\n# Hub\n", "utf-8")
+
+    def test_ground_reports_each_failed_target_in_place(self):
+        """§5.1, §10 C58: one entry per target in order; the call fails only when nothing grounds."""
+        self._readme_hubs()
+        out = ground_notes(self.vault, ["sqlite", "no-such-note", "README"])
+        self.assertEqual([e["target"] for e in out], ["sqlite", "no-such-note", "README"])
+        self.assertEqual(out[0]["cid"], "wiki/sqlite")
+        self.assertEqual(out[1]["error"]["code"], "NOT_FOUND")
+        self.assertFalse(out[1]["error"]["retryable"])
+        self.assertEqual(out[2]["error"]["code"], "INVALID_ARGUMENT")
+        self.assertIn("customers/acme/README", out[2]["error"]["message"])
+        self.assertIn("projects/apollo/README", out[2]["error"]["message"])
+
+        with self.assertRaises(FileNotFoundError):
+            ground_notes(self.vault, ["no-such-note"])
+        with self.assertRaises(AmbiguousNoteError):
+            ground_notes(self.vault, ["README", "also-missing"])
+        with self.assertRaises(ValueError):
+            ground_notes(self.vault, [])
+
+    def test_ground_resolves_names_like_the_write_tools(self):
+        """§5.1, §10 C58: vault_ground and update/verify/move agree on what a name means."""
+        (self.vault_root / "wiki" / "C#-Basics.md").write_text(
+            "---\ntype: concept\ntitle: C# Basics\ndescription: d\nstatus: active\n---\n# C# Basics\n\n## Intro\n\nHi.\n",
+            "utf-8",
+        )
+        cases = {
+            "./wiki/sqlite": ("wiki/sqlite", None),
+            "wiki/SQLite": ("wiki/sqlite", None),
+            "[[sqlite|The DB]]": ("wiki/sqlite", None),
+            "wiki/C#-Basics": ("wiki/C#-Basics", None),
+            "wiki/C#-Basics#Intro": ("wiki/C#-Basics", "Intro"),
+        }
+        for target, (cid, section) in cases.items():
+            with self.subTest(target=target):
+                item = ground_notes(self.vault, [target])[0]
+                self.assertEqual((item["cid"], item["section"]), (cid, section))
+                if section is None and "#" not in target:
+                    self.assertEqual(resolve_note_cid(DiskNoteStorage(self.vault), target), cid)
+
+    def test_ground_unparseable_target_is_named_not_fatal(self):
+        """§5.1, §10 C58: a broken note is reported by name; the rest of the batch still grounds."""
+        (self.vault_root / "wiki" / "broken.md").write_text("---\ntags: [flow]\n---\nBroken.\n", "utf-8")
+        out = ground_notes(self.vault, ["wiki/sqlite", "wiki/broken"])
+        self.assertEqual(out[0]["cid"], "wiki/sqlite")
+        self.assertEqual(out[1]["error"]["code"], "FRONTMATTER_UNPARSEABLE")
+        self.assertIn("wiki/broken.md", out[1]["error"]["message"])
+        with self.assertRaises(FrontmatterParseError) as ctx:
+            update_note(self.vault, "wiki/broken", frontmatter_patch={"status": "draft"})
+        self.assertIn("wiki/broken.md", str(ctx.exception))
+
+    def test_concurrent_delete_is_a_conflict(self):
+        """§8, §10 C31: a note deleted between read and write is VAULT_CONFLICT and stays deleted."""
+        target = self.vault_root / "wiki" / "sqlite.md"
+        storage = DiskNoteStorage(self.vault)
+        real_get = storage.get_note
+
+        def get_then_delete(cid):
+            note = real_get(cid)
+            if note is not None and cid.endswith("sqlite"):
+                target.unlink()
+            return note
+
+        storage.get_note = get_then_delete
+        with self.assertRaises(VaultConflictError):
+            update_note(self.vault, "wiki/sqlite", frontmatter_patch={"status": "draft"}, storage=storage)
+        self.assertFalse(target.exists())
+
+        for adapter in (DiskNoteStorage(self.vault), InMemoryNoteStorage()):
+            with self.subTest(adapter=type(adapter).__name__):
+                note = Note(cid="wiki/gone", rel_path="wiki/gone.md", frontmatter={"title": "Gone"}, body="x\n")
+                with self.assertRaises(VaultConflictError):
+                    adapter.save_note(note, expected_hash="sha256:" + "0" * 64)
+                self.assertFalse(adapter.note_exists("wiki/gone"))
+
+    def test_bom_prefixed_note_parses_and_updates_cleanly(self):
+        """§3.2, §10 C31: a leading UTF-8 BOM is ignored; an update leaves exactly one frontmatter block."""
+        path = self.vault_root / "wiki" / "bom-note.md"
+        path.write_text(
+            "\ufeff---\ntype: concept\ntitle: BOM Note\ndescription: d\nstatus: active\n---\n# BOM Note\n", "utf-8"
+        )
+        note = DiskNoteStorage(self.vault).get_note("wiki/bom-note")
+        self.assertEqual(note.title, "BOM Note")
+        update_note(self.vault, "wiki/bom-note", frontmatter_patch={"status": "draft"})
+        text = path.read_text("utf-8")
+        self.assertFalse(text.startswith("\ufeff"))
+        self.assertEqual(text.count("\n---\n"), 1)  # closing fence only once: one block
+        self.assertIn('title: "BOM Note"', text)
+        self.assertIn("status: draft", text)
+
     def test_ground_notes_section_anchor_extracts_target_section_and_subsections(self):
-        """§5.1, §10 C56: #section grounding extracts matching ATX heading and nested subsections, ignores fenced headings, and rejects missing anchors."""
+        """§5.1, §10 C56: #section grounding extracts matching ATX heading and nested subsections, ignores fenced headings, and returns the whole note with section_error for a missing anchor."""
         note_path = self.vault_root / "wiki" / "storage-engine.md"
         note_path.write_text(
             "---\n"
@@ -326,11 +421,12 @@ class TestOps(unittest.TestCase):
         self.assertNotIn("B-Tree body text.", sub_grounded[0]["content"])
         self.assertNotIn("## Write-Ahead Log", sub_grounded[0]["content"])
 
-        # 3. Missing anchor raises ValueError (INVALID_ARGUMENT) naming available headings
-        with self.assertRaises(ValueError) as ctx:
-            ground_notes(self.vault, ["wiki/storage-engine#Nonexistent"])
-        self.assertIn("B-Tree Indexes (v2)", str(ctx.exception))
-        self.assertIn("Write-Ahead Log", str(ctx.exception))
+        # 3. A missing anchor returns the whole note, with section_error naming the available headings
+        missing = ground_notes(self.vault, ["wiki/storage-engine#Nonexistent"])[0]
+        self.assertIsNone(missing["section"])
+        self.assertIn("Overview paragraph.", missing["content"])
+        self.assertIn("B-Tree Indexes (v2)", missing["section_error"])
+        self.assertIn("Write-Ahead Log", missing["section_error"])
 
         # 4. Legacy filename containing literal '#' still resolves as full note before anchor splitting
         csharp_path = self.vault_root / "wiki" / "C#-Basics.md"

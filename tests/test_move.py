@@ -695,6 +695,63 @@ class TestMoveNote(unittest.TestCase):
         self.assertTrue((self.root / "archive/cs244b/notes.md").exists())
         self.assertTrue((self.root / "cs244b/AGENTS.md").exists())
 
+    def test_move_prefers_the_note_reading_over_a_folder(self):
+        """§5.1, §10 C59: a name resolves as a note before it is read as a folder prefix; a trailing '/' means the folder."""
+        self._write("wiki/projects.md", _fm("Projects") + "# Projects\n")
+        self._write("projects/alpha.md", _fm("Alpha") + "# Alpha\n")
+
+        as_note = move_note(self.vault, "projects", "archive/", apply=False)
+        self.assertEqual([m["from"] for m in as_note["moved_notes"]], ["wiki/projects"])
+
+        as_folder = move_note(self.vault, "projects/", "archive/projects/", apply=False)
+        self.assertEqual([m["from"] for m in as_folder["moved_notes"]], ["projects/alpha"])
+
+        # With no note of that name, the bare form still falls back to the folder.
+        (self.root / "wiki/projects.md").unlink()
+        fallback = move_note(self.vault, "projects", "archive/projects", apply=False)
+        self.assertEqual([m["from"] for m in fallback["moved_notes"]], ["projects/alpha"])
+
+    def test_overlapping_folder_shift_never_retires_an_unwritten_source(self):
+        """§5.1, §10 C59: every delete comes after its note's content exists at its destination."""
+        for src, dst, files in (
+            ("projects/a/", "projects/a/b/", {"projects/a/x.md": "# Outer", "projects/a/b/x.md": "# Inner"}),
+            ("customers/acme/sub/", "customers/acme/", {"customers/acme/sub/deal.md": "# Outer", "customers/acme/sub/sub/deal.md": "# Inner"}),
+        ):
+            with self.subTest(src=src, dst=dst):
+                for rel, heading in files.items():
+                    self._write(rel, _fm(heading.strip("# ")) + heading + "\n")
+                storage = DiskNoteStorage(self.vault)
+                events: list[tuple[str, str, str]] = []  # (op, cid, heading)
+                real_save, real_delete = storage.save_note, storage.delete_note
+
+                def save(note, expected_hash=None, _save=real_save):
+                    events.append(("save", note.cid, note.body.strip().splitlines()[0]))
+                    return _save(note, expected_hash=expected_hash)
+
+                def delete(cid, expected_hash=None, *, prune_empty_dirs=False, _delete=real_delete, _s=storage):
+                    events.append(("delete", cid, _s.get_note(cid).body.strip().splitlines()[0]))
+                    return _delete(cid, expected_hash=expected_hash, prune_empty_dirs=prune_empty_dirs)
+
+                storage.save_note, storage.delete_note = save, delete
+                uc = MoveNoteUseCase(storage, FileLedger(self.vault), vault=self.vault)
+                uc.apply(uc.plan(src, dst), actor="agent:test")
+
+                # Each note's content (its heading) is saved somewhere before its old copy is deleted.
+                for i, (op, _cid, heading) in enumerate(events):
+                    if op == "delete":
+                        self.assertIn(("save", heading), [(o, h) for o, _, h in events[:i]], events)
+                self.assertEqual(sorted(h for o, _, h in events if o == "save"), ["# Inner", "# Outer"])
+                for rel in files:
+                    (self.root / rel).unlink(missing_ok=True)
+
+    def test_write_steps_case_only_rename_still_retires_first(self):
+        """§5.1: the one retire-first step is a case-only rename (one file on case-insensitive disks)."""
+        from cadabby.ops import _MovedNote, _write_steps
+
+        src = Note.from_raw("wiki/Target", "wiki/Target.md", _fm("T") + "# T\n")
+        item = _MovedNote(source=src, destination=Note.from_raw("wiki/target", "wiki/target.md", _fm("T") + "# T\n"))
+        self.assertEqual([a for a, _ in _write_steps([item])], ["retire", "write"])
+
 
 class TestMoveNoteInMemory(unittest.TestCase):
     """Hexagonal parity: the use case runs with no vault on disk."""

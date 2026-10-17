@@ -87,7 +87,10 @@ TOOLS = [
         "description": (
             "Retrieve note markdown content (full note or a specific '#heading' section), domain directives, "
             "and 1-hop link/backlink/source graph with neighbor metadata (title, type, status, trust_tier, "
-            "description) for specified CIDs, note stems, or wikilinks."
+            "description) for specified CIDs, note stems, or wikilinks. Returns one entry per target, in order; "
+            "a target that cannot be grounded (not found, ambiguous, unparseable) comes back as "
+            "{target, error: {code, message, retryable}} in its place, and the call fails only if none can be. "
+            "A '#heading' that no longer exists returns the whole note with 'section_error' listing its headings."
         ),
         "inputSchema": {
             "type": "object",
@@ -95,6 +98,7 @@ TOOLS = [
                 "cids": {
                     "type": "array",
                     "items": {"type": "string"},
+                    "minItems": 1,
                     "description": (
                         "List of note CIDs, bare stems (e.g. 'raft-consensus'), relative paths, or wikilinks "
                         "to retrieve; append '#heading' (or '[[Note#Heading]]') to ground only that section "
@@ -334,6 +338,8 @@ def _schema_violation(name: str, value: Any, schema: dict[str, Any]) -> str | No
         return f"'{name}' must be at least {schema['minimum']}"
     if "minLength" in schema and len(value) < schema["minLength"]:
         return f"'{name}' must not be empty"
+    if "minItems" in schema and len(value) < schema["minItems"]:
+        return f"'{name}' must have at least {schema['minItems']} item(s)"
     if expected == "array" and "items" in schema:
         for i, item in enumerate(value):
             if why := _schema_violation(f"{name}[{i}]", item, schema["items"]):

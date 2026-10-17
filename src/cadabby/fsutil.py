@@ -96,11 +96,16 @@ def atomic_replace_checked(
     """Atomically replace target_path with read-modify-write concurrency safety.
 
     If expected_hash is provided, checks that the existing file's sha256 matches.
-    If the file has changed on disk since expected_hash was computed, raises VaultConflictError.
+    If the file has changed on disk since expected_hash was computed, or has been
+    deleted, raises VaultConflictError.
     """
     target = Path(target_path).resolve()
 
-    if expected_hash is not None and target.exists():
+    if expected_hash is not None:
+        if not target.exists():
+            # The caller read this file; it is gone now. Recreating it would undo
+            # someone else's delete -- a change since the operation began (§8).
+            raise VaultConflictError(f"VAULT_CONFLICT: {target.name} was deleted concurrently")
         check_expected_hash(compute_file_sha256(target), expected_hash, target.name)
 
     atomic_write(target, new_content, encoding=encoding)

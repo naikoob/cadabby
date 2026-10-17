@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from cadabby.domain import Note
+from cadabby.frontmatter import FrontmatterParseError
 from cadabby.fsutil import atomic_replace_checked, check_expected_hash, compute_bytes_sha256
 from cadabby.indexer import append_vault_log
 from cadabby.ports import LedgerPort, NoteStoragePort
@@ -42,12 +43,17 @@ class DiskNoteStorage(NoteStoragePort):
         # made every CRLF note fail verify/update with VAULT_CONFLICT (C31).
         data = target.read_bytes()
         cid = path_to_cid(rel_path)
-        return Note.from_raw(
-            cid=cid,
-            rel_path=rel_path,
-            raw_text=data.decode("utf-8"),
-            source_hash=compute_bytes_sha256(data),
-        )
+        try:
+            return Note.from_raw(
+                cid=cid,
+                rel_path=rel_path,
+                raw_text=data.decode("utf-8"),
+                source_hash=compute_bytes_sha256(data),
+            )
+        except FrontmatterParseError as exc:
+            # The parser knows the line, not the file; every caller (update,
+            # verify, move, ground) would otherwise report a pathless error.
+            raise FrontmatterParseError(f"{exc.message} (in {rel_path})", exc.line_number) from None
 
     def save_note(self, note: Note, expected_hash: str | None = None) -> None:
         target = self.vault.abs_path(note.rel_path)

@@ -161,7 +161,7 @@ class TestCli(unittest.TestCase):
         # 4. Ground
         args_ground = DummyArgs(
             vault=str(vault_root),
-            cids=["wiki/entities/SQLite"],
+            cids=["wiki/sqlite"],
             budget_tokens=None,
             json=True,
         )
@@ -1072,6 +1072,21 @@ class TestStatusAndMoveCommands(unittest.TestCase):
         )
         self.assertEqual(code_g, 0)
         self.assertIn("[Section: Epistemic Trust Tiers]", out_g)
+
+    def test_cli_ground_reports_failed_targets_and_keeps_the_rest(self):
+        """§5.3, §10 C58: unresolvable targets print as errors on stderr; the rest still print; all-bad exits 3."""
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code, out = self._run(cmd_ground, cids=["sqlite", "no-such-note"], budget_tokens=None, json=False)
+        self.assertEqual(code, 0)
+        self.assertIn("CID: wiki/sqlite", out)
+        self.assertIn("Error [NOT_FOUND] no-such-note", err.getvalue())
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            exit_code = _run_like_main(
+                cmd_ground, DummyArgs(vault=str(self.vault_root), cids=["no-such-note"], budget_tokens=None, json=False)
+            )
+        self.assertEqual(exit_code, EXIT_ENVIRONMENT)
 
 
 if __name__ == "__main__":

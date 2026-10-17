@@ -154,10 +154,15 @@ def _split_mapping(text: str) -> tuple[str, str] | None:
 def split_frontmatter(content: str) -> tuple[str | None, str]:
     """Split markdown text into raw frontmatter and body.
 
+    A leading UTF-8 byte-order mark is ignored (§3.2). Editors on Windows write
+    one, and treating `\\ufeff---` as "no frontmatter" made the next update emit
+    a second block above the original, losing every field in it.
+
     Returns:
         (raw_frontmatter_text, body_text), or (None, content) when the text
         does not open with a frontmatter fence.
     """
+    content = content.removeprefix("\ufeff")
     if not content.startswith("---\n") and not content.startswith("---\r\n") and content != "---":
         return None, content
 
@@ -181,7 +186,7 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     """
     raw_fm, body = split_frontmatter(content)
     if raw_fm is None:
-        return {}, content
+        return {}, body  # `content` minus any leading BOM
 
     data: dict[str, Any] = {}
     lines = split_lines(raw_fm)

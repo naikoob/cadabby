@@ -9,7 +9,7 @@ import copy
 from collections.abc import Sequence
 
 from cadabby.domain import Note
-from cadabby.fsutil import check_expected_hash, compute_bytes_sha256
+from cadabby.fsutil import VaultConflictError, check_expected_hash, compute_bytes_sha256
 from cadabby.ports import LedgerPort, NoteStoragePort
 from cadabby.vault import cid_to_path, note_path_violation, path_to_cid
 
@@ -53,7 +53,11 @@ class InMemoryNoteStorage(NoteStoragePort):
         cid = path_to_cid(rel_path)
         existing = self._notes.get(cid)
 
-        if expected_hash is not None and existing is not None:
+        if expected_hash is not None:
+            if existing is None:
+                # Same rule as atomic_replace_checked: never recreate a note
+                # someone deleted after the caller read it (§8).
+                raise VaultConflictError(f"VAULT_CONFLICT: {rel_path} was deleted concurrently in memory")
             check_expected_hash(_content_hash(existing), expected_hash, rel_path, where="in memory")
 
         # Round-trip through serialize() -> Note.from_raw() so tag canonicalization,

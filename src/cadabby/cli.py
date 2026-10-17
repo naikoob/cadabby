@@ -156,9 +156,17 @@ def cmd_ground(args: argparse.Namespace) -> int:
         return EXIT_OK
 
     for item in grounded:
+        if "error" in item:
+            # A target that could not be grounded is reported in place (§5.1);
+            # the others still print. Nothing grounded at all raised above.
+            err = item["error"]
+            print(f"Error [{err['code']}] {item['target']}: {err['message']}", file=sys.stderr)
+            continue
         print("=" * 80)
         sec_suffix = f" [Section: {item['section']}]" if item.get("section") else ""
         print(f"CID: {item['cid']} ({item['trust_tier']}){sec_suffix}")
+        if item.get("section_error"):
+            print(f"Note: {item['section_error']}; showing the whole note.")
         print(f"Title: {item['title']} | Type: {item['type']} | Status: {item['status']}")
         print(f"Links ({len(item['links'])}): {', '.join(l['target'] for l in item['links'])}")
         print(f"Backlinks ({len(item['backlinks'])}): {', '.join(b['source_cid'] for b in item['backlinks'])}")
