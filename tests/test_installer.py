@@ -119,6 +119,38 @@ class TestInstaller(unittest.TestCase):
         self.assertTrue(ok)
         self.assertFalse(plugin_dest.exists())
 
+    def test_force_and_uninstall_never_delete_a_non_cadabby_directory(self):
+        """§7.6, §10 C22: --force overwrites a Cadabby plugin; it never rmtrees an arbitrary --path."""
+        precious = self.root / "precious"
+        precious.mkdir()
+        thesis = precious / "thesis.txt"
+        thesis.write_bytes(b"years of work\n")
+        vault = self.root / "some-vault"
+
+        attempts = {
+            "unbound --force": lambda dry: install_antigravity(dest_path=precious, force=True, dry_run=dry),
+            "bound --force": lambda dry: install_antigravity(dest_path=precious, vault_path=vault, force=True, dry_run=dry),
+            "uninstall": lambda dry: uninstall_antigravity(dest_path=precious, dry_run=dry),
+        }
+        for label, attempt in attempts.items():
+            for dry in (True, False):
+                with self.subTest(attempt=label, dry_run=dry):
+                    ok, msg = attempt(dry)
+                    self.assertFalse(ok, msg)
+                    self.assertIn("not a Cadabby plugin directory", msg)
+                    self.assertFalse(precious.is_symlink())
+                    self.assertEqual(sorted(p.name for p in precious.iterdir()), ["thesis.txt"])
+                    self.assertEqual(thesis.read_bytes(), b"years of work\n")
+
+        # A real plugin copy and an empty directory are still replaceable and removable.
+        empty = self.root / "empty-plugin-dir"
+        empty.mkdir()
+        ok, _ = install_antigravity(dest_path=empty, vault_path=vault, force=True)
+        self.assertTrue(ok)
+        ok, _ = uninstall_antigravity(dest_path=empty)
+        self.assertTrue(ok)
+        self.assertFalse(empty.exists())
+
     def test_run_install_all_and_uninstall(self):
         claude_cfg = self.root / "run_all.json"
         claude_cfg.write_text('{"existing": true}\n', "utf-8")

@@ -9,14 +9,21 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from cadabby.constants import BODY_HASH_PREFIX, SCHEMA_KEY_ORDER
+from cadabby.constants import SCHEMA_KEY_ORDER
 from cadabby.errors import CadabbyError
 from cadabby.errors import FRONTMATTER_UNPARSEABLE as _CODE_UNPARSEABLE
 from cadabby.errors import FRONTMATTER_UNSERIALIZABLE as _CODE_UNSERIALIZABLE
-from cadabby.okf import RE_TIMESTAMP, canonicalize_tags, split_lines
+from cadabby.okf import canonicalize_tags, split_lines
 
 RE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 RE_BARE_SAFE = re.compile(r"^[A-Za-z0-9._\-/]+$")
+
+# The only values the writer emits single-quoted (§3.1/§3.2), matched with
+# fullmatch. Single-quoted output is not escaped, so both shapes are restricted
+# to characters that can never close the quote or start a new line.
+_RE_SINGLE_QUOTABLE = re.compile(
+    r"sha256:[0-9A-Za-z]+|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z"
+)
 
 
 class FrontmatterParseError(CadabbyError, ValueError):
@@ -359,20 +366,21 @@ def format_scalar(val: Any) -> str:
     if not val_str:
         return '""'
 
-    # RFC 3339 timestamps must be single-quoted per §3.1/§3.2
-    if RE_TIMESTAMP.match(val_str):
-        return f"'{val_str}'"
-
-    # Hashes and sha256 references
-    if val_str.startswith(BODY_HASH_PREFIX):
+    # RFC 3339 timestamps and body hashes are single-quoted per §3.1/§3.2, but
+    # only when the WHOLE value is exactly that shape. Single-quoted output is
+    # not escaped at all, so a value that merely started like a hash (or matched
+    # a `$`-anchored pattern before a trailing newline) could carry a `'` and
+    # newlines out of the scalar and write new keys -- a forged `verified:`.
+    if _RE_SINGLE_QUOTABLE.fullmatch(val_str):
         return f"'{val_str}'"
 
     # Keywords that would be ambiguously parsed as booleans or null
     if val_str in ("true", "false", "null", "~", "yes", "no", "on", "off"):
         return f'"{val_str}"'
 
-    # Safe bare scalars (alphanumeric, dots, underscores, dashes, slashes)
-    if RE_BARE_SAFE.match(val_str) and not val_str.startswith("-"):
+    # Safe bare scalars (alphanumeric, dots, underscores, dashes, slashes).
+    # fullmatch, not match: `$` also matches before a trailing newline.
+    if RE_BARE_SAFE.fullmatch(val_str) and not val_str.startswith("-"):
         return val_str
 
     # Everything else double-quoted with escaped characters
@@ -476,8 +484,46 @@ def serialize_frontmatter(data: dict[str, Any], body: str = "") -> str:
     lines.append("---")
     fm_text = "\n".join(lines) + "\n"
 
+    # The writer must be the parser's exact inverse. A value that would read
+    # back as anything else -- an extra key, a split or truncated string -- is
+    # refused here rather than written: that is how an escaping bug would
+    # otherwise forge a `verified:` entry or leave a file the parser rejects.
+    try:
+        reparsed, _ = parse_frontmatter(fm_text)
+    except FrontmatterParseError as exc:
+        raise FrontmatterSerializeError(
+            f"Refusing to write frontmatter the parser would reject ({exc}) (§3.2)"
+        ) from None
+    expected = _as_written(data, all_keys)
+    if reparsed != expected:
+        changed = sorted(k for k in set(reparsed) | set(expected) if reparsed.get(k) != expected.get(k))
+        raise FrontmatterSerializeError(
+            f"Refusing to write frontmatter that would not read back as the same values "
+            f"(keys affected: {', '.join(changed)}) (§3.2)"
+        )
+
     if body:
         if not body.startswith("\n"):
             return fm_text + body
         return fm_text + body.lstrip("\n")
     return fm_text
+
+
+def _normalize_written(val: Any) -> Any:
+    """A value as the writer emits it: CR and CRLF become LF, collections recursively."""
+    if isinstance(val, str):
+        return val.replace("\r\n", "\n").replace("\r", "\n")
+    if isinstance(val, list):
+        return [_normalize_written(v) for v in val]
+    if isinstance(val, dict):
+        return {k: _normalize_written(v) for k, v in val.items()}
+    return val
+
+
+def _as_written(data: dict[str, Any], keys: list[str]) -> dict[str, Any]:
+    """What parsing the serialized `data` must return: empty collections are omitted."""
+    return {
+        k: _normalize_written(data[k])
+        for k in keys
+        if not (isinstance(data[k], (list, dict)) and not data[k])
+    }

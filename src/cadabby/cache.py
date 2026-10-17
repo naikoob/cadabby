@@ -377,9 +377,23 @@ class VaultCache:
             CREATE INDEX IF NOT EXISTS idx_sources_raw ON sources(raw_path);
             CREATE INDEX IF NOT EXISTS idx_sources_resolved ON sources(resolved_path);
 
+            -- Each FTS table's content is exactly the rows it indexes, mirroring
+            -- the insert gate in upsert_note(): the layer picks the table, and
+            -- only parsed rows are indexed. That is what lets integrity-check
+            -- compare index against content (rank = 1); pointed at all of
+            -- `notes`, every raw or unparseable row reads as corruption of the
+            -- other index, so only the structural check was usable -- and it
+            -- passes on a stale index (§4.2).
+            CREATE VIEW IF NOT EXISTS notes_fts_content AS
+                SELECT id, title, description, body, tags FROM notes
+                WHERE layer != 'raw' AND parse_error IS NULL;
+            CREATE VIEW IF NOT EXISTS raw_fts_content AS
+                SELECT id, title, description, body, tags FROM notes
+                WHERE layer = 'raw' AND parse_error IS NULL;
+
             CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
                 title, description, body, tags,
-                content = 'notes',
+                content = 'notes_fts_content',
                 content_rowid = 'id',
                 tokenize = 'porter unicode61'
             );
@@ -394,7 +408,7 @@ class VaultCache:
             -- documents it actually ranks.
             CREATE VIRTUAL TABLE IF NOT EXISTS raw_fts USING fts5(
                 title, description, body, tags,
-                content = 'notes',
+                content = 'raw_fts_content',
                 content_rowid = 'id',
                 tokenize = 'porter unicode61'
             );
@@ -1088,18 +1102,21 @@ class VaultCache:
         }
 
     def check_fts_integrity(self) -> bool:
-        """Run FTS5 internal integrity check over both indexes.
+        """Check both FTS5 indexes against their content, not only their structure (§4.2).
 
-        Both, because a mismatched retraction corrupts one index while leaving
-        the other clean, and checking only the curated one would report health
-        while raw search silently returns wrong rows.
+        `rank = 1` makes FTS5 compare every indexed term with the content view,
+        which is what catches a missed or mis-targeted retraction; the plain form
+        only checks the index's internal consistency and passes on a stale index.
+        Both tables, because a mismatched retraction corrupts one index while
+        leaving the other clean, and checking only the curated one would report
+        health while raw search silently returns wrong rows.
         """
         conn = self.get_connection()
         try:
             for table in ("notes_fts", "raw_fts"):
-                conn.execute(f"INSERT INTO {table}({table}) VALUES('integrity-check');")
+                conn.execute(f"INSERT INTO {table}({table}, rank) VALUES('integrity-check', 1);")
             return True
-        except sqlite3.OperationalError:
+        except sqlite3.DatabaseError:  # FTS5 reports an index/content mismatch as SQLITE_CORRUPT
             return False
 
     def close(self) -> None:

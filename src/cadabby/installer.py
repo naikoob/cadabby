@@ -362,6 +362,33 @@ def _wrong_kind(dest: Path, want: str) -> str | None:
     return None
 
 
+def _is_replaceable_plugin_dir(dest: Path) -> bool:
+    """Whether `dest` is a real directory Cadabby may delete: empty, or a Cadabby plugin.
+
+    `--force` means "overwrite the Cadabby thing you found" (§7.6) and
+    `--uninstall` "removes exactly what install added". Neither may rmtree an
+    arbitrary directory that a mistyped --path happens to name, so a non-empty
+    directory qualifies only if its plugin.json names the cadabby plugin.
+    Symlinks are excluded: callers unlink those, which never touches the target.
+    """
+    if dest.is_symlink() or not dest.is_dir():
+        return False
+    if not any(dest.iterdir()):
+        return True
+    try:
+        manifest = json.loads((dest / "plugin.json").read_text("utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(manifest, dict) and manifest.get("name") == "cadabby"
+
+
+def _refuse_to_delete(dest: Path, action: str) -> str:
+    return (
+        f"Conflict: {dest} is not a Cadabby plugin directory (no plugin.json naming 'cadabby'); "
+        f"refusing to delete it{action}. Point --path at the plugin directory."
+    )
+
+
 def install_antigravity(
     dest_path: Path | None = None,
     vault_path: Path | str | None = None,
@@ -403,6 +430,8 @@ def install_antigravity(
                     pass
             if not force:
                 return False, f"Conflict: Directory already exists at {dest}. Use --force to overwrite."
+            if not _is_replaceable_plugin_dir(dest):
+                return False, _refuse_to_delete(dest, ", even with --force")
 
         if dry_run:
             return True, f"[dry-run] Would link {dest} -> {repo_plugin}"
@@ -468,6 +497,8 @@ def install_antigravity(
         else:
             if not force:
                 return False, f"Conflict: Directory already exists at {dest}. Use --force to overwrite."
+            if not _is_replaceable_plugin_dir(dest):
+                return False, _refuse_to_delete(dest, ", even with --force")
             if dry_run:
                 return True, f"[dry-run] Would configure Antigravity plugin at {dest} (vault: {resolved_vault})"
             shutil.rmtree(dest)
@@ -494,6 +525,8 @@ def uninstall_antigravity(
         return False, problem
     if not dest.exists() and not dest.is_symlink():
         return True, f"Antigravity plugin not found at {dest} (nothing to uninstall)."
+    if not dest.is_symlink() and not _is_replaceable_plugin_dir(dest):
+        return False, _refuse_to_delete(dest, "; nothing removed")
 
     if dry_run:
         return True, f"[dry-run] Would remove {dest}"

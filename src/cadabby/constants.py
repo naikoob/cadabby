@@ -9,7 +9,9 @@ from __future__ import annotations
 # mismatch forces a one-time rebuild.
 # 5 adds `sources.resolved_path`, so citations resolve against the indexed raw
 # set and `./raw/x` counts as citing `raw/x` (§4.3).
-SCHEMA_VERSION = 5
+# 6 backs each FTS table with a view of exactly the rows it indexes, so the
+# content-comparing integrity check can run at all (§4.2).
+SCHEMA_VERSION = 6
 
 # `.cadabby.json`'s "schema" (§2.6). Independent of SCHEMA_VERSION above: the
 # cache is disposable and rebuilds on mismatch, the config is user-owned and is

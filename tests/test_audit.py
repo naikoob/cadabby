@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -158,6 +161,39 @@ class TestAudit(unittest.TestCase):
         self.assertEqual([f.code for f in findings], ["PROVENANCE_MISMATCH"])
         self.assertIn("not yet committed", findings[0].message)
         self.assertEqual(mock_run.call_count, 1, "no `git log` for a commit that does not exist")
+
+    def test_untracked_endorsement_is_a_provenance_failure(self):
+        """§3.5, §10 C39: a file Git does not track is reported, not skipped as if clean."""
+        self._write_note(
+            "Forged",
+            frontmatter_extra="verified:\n  - by: human:alice\n    at: '2026-10-01T00:00:00Z'\n    of: sha256:abc",
+        )
+        with (
+            patch("cadabby.audit.is_git_repository", return_value=True),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(
+                returncode=128, stdout="", stderr="fatal: no such path 'wiki/Forged.md' in HEAD\n"
+            )
+            findings, _ = run_vault_audit(self.vault, require_signed=True)
+        self.assertEqual([f.code for f in findings], ["PROVENANCE_MISMATCH"])
+        self.assertEqual(findings[0].rel_path, "wiki/Forged.md")
+        self.assertIn("no Git history", findings[0].message)
+        self.assertEqual(mock_run.call_count, 1, "no signature check without a commit")
+
+    @unittest.skipUnless(shutil.which("git"), "git not installed")
+    def test_untracked_endorsement_real_git(self):
+        """The reviewer's repro against real Git: a new, never-added forged note."""
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+        subprocess.run(["git", "init", "-q"], cwd=self.vault_root, check=True, env=env)
+        self._write_note(
+            "Forged",
+            frontmatter_extra="verified:\n  - by: human:alice\n    at: '2026-10-01T00:00:00Z'\n    of: sha256:abc",
+        )
+        with patch.dict(os.environ, env):
+            findings, notice = run_vault_audit(self.vault)
+        self.assertIsNone(notice)
+        self.assertEqual([(f.code, f.rel_path) for f in findings], [("PROVENANCE_MISMATCH", "wiki/Forged.md")])
 
     def test_empty_author_never_matches(self):
         (self.vault_root / ".cadabby.json").write_text('{"identities": {"human:alice": [""]}}', "utf-8")

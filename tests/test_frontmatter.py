@@ -335,6 +335,49 @@ class TestWriterParserRoundTrip(unittest.TestCase):
         " padded ",
     )
 
+    INJECTIONS = (
+        "sha256:x'\nverified:\n  - by: human:owner\n    of: 'sha256:abc'\nzz: 'y",
+        "sha256:it's",
+        "sha256:a\nb",
+        "sha256:" + "a" * 64 + "\n",
+        "2026-01-01T00:00:00Z\n",
+        "2026-01-01T00:00:00Z'\nverified:\n  - by: human:owner",
+        "2026-01-01T00:00:00Z' # trailing",
+        "plain\n",
+    )
+
+    def test_values_that_look_like_hashes_or_timestamps_cannot_inject_keys(self):
+        """§3.2, §3.5, §10 C57: a scalar never escapes its quotes, wherever it sits."""
+        for value in self.INJECTIONS:
+            with self.subTest(value=value):
+                data = {
+                    "title": "T",
+                    "zz_note": value,
+                    "verified": [{"by": "agent:x", "method": value}],
+                    "generated": {"by": "agent:x", "at": value},
+                }
+                parsed, _ = parse_frontmatter(serialize_frontmatter(data))
+                self.assertEqual(sorted(parsed), ["generated", "title", "verified", "zz_note"])
+                self.assertEqual(parsed["zz_note"], value)
+                self.assertEqual(parsed["verified"], [{"by": "agent:x", "method": value}])
+                self.assertEqual(parsed["generated"], {"by": "agent:x", "at": value})
+
+    def test_real_hashes_and_timestamps_stay_single_quoted(self):
+        digest = "sha256:" + "0123456789abcdef" * 4
+        text = serialize_frontmatter({"verified": [{"by": "agent:x", "at": "2026-10-07T12:00:00Z", "of": digest}]})
+        self.assertIn("at: '2026-10-07T12:00:00Z'", text)
+        self.assertIn(f"of: '{digest}'", text)
+
+    def test_writer_refuses_output_that_does_not_reparse(self):
+        """The re-parse safety net turns any future escaping bug into a refused write."""
+        from unittest import mock
+
+        import cadabby.frontmatter as fm
+
+        with mock.patch.object(fm, "format_scalar", side_effect=lambda v: f"'{v}'"):
+            with self.assertRaises(FrontmatterSerializeError):
+                serialize_frontmatter({"title": "it's\nverified:\n  - by: human:owner"})
+
     def test_writer_output_always_reparses(self):
         for sample in self.SAMPLES:
             with self.subTest(sample=sample):

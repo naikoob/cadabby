@@ -51,6 +51,45 @@ class TestParallelRunner(unittest.TestCase):
         exit_code = main(["--quiet", "non_existent_target_filter_xyz123"])
         self.assertEqual(exit_code, 1)
 
+    def _import_failing_for(self, broken: str):
+        """Patch the runner's importer so `tests.<broken>` raises like a syntax/import error would."""
+        import importlib
+        from unittest import mock
+
+        real_import = importlib.import_module
+
+        def fake_import(name: str, *args, **kwargs):
+            if name == f"tests.{broken}":
+                raise ImportError(f"No module named 'definitely_missing_dependency' (in {name})")
+            return real_import(name, *args, **kwargs)
+
+        return mock.patch("tests.run_parallel.importlib.import_module", side_effect=fake_import)
+
+    def test_import_failure_is_recorded_not_skipped(self):
+        errors: list[str] = []
+        with self._import_failing_for("test_audit"):
+            targets = discover_targets(self.repo_root, granularity="class", import_errors=errors)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("tests.test_audit", errors[0])
+        self.assertFalse(any(t.startswith("tests.test_audit.") for t, _ in targets))
+
+    def test_import_failure_fails_the_run_even_when_other_targets_pass(self):
+        """A module that cannot be imported must not vanish from the gate while the run reports success."""
+        import contextlib
+        import io
+
+        stderr = io.StringIO()
+        with self._import_failing_for("test_audit"), contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+            exit_code = main(["--quiet", "test_audit", "test_frontmatter"])
+        self.assertEqual(exit_code, 1)
+        self.assertIn("IMPORT ERRORS", stderr.getvalue())
+        self.assertIn("tests.test_audit", stderr.getvalue())
+
+    def test_import_failure_outside_the_filter_does_not_fail_the_run(self):
+        with self._import_failing_for("test_audit"):
+            exit_code = main(["--quiet", "test_frontmatter"])
+        self.assertEqual(exit_code, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

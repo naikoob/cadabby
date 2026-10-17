@@ -33,8 +33,14 @@ def discover_targets(
     repo_root: Path,
     patterns: list[str] | None = None,
     granularity: str = "class",
+    import_errors: list[str] | None = None,
 ) -> list[tuple[str, int]]:
-    """Discover test targets (modules or classes) matching patterns."""
+    """Discover test targets (modules or classes) matching patterns.
+
+    A test module that fails to import is appended to `import_errors` (when
+    given) rather than skipped: skipping it silently removes every test in it
+    from the gate while the run still reports success.
+    """
     tests_dir = repo_root / "tests"
     test_files = sorted([f.stem for f in tests_dir.glob("test_*.py")])
 
@@ -56,7 +62,12 @@ def discover_targets(
         try:
             mod = importlib.import_module(f"tests.{mod_name}")
         except Exception as exc:
-            print(f"Warning: Failed to import tests.{mod_name}: {exc}", file=sys.stderr)
+            # A module the caller's filter selects (or every module, with no
+            # filter) that cannot be imported is a failure, never a warning.
+            if import_errors is not None and mod_matched:
+                import_errors.append(f"tests.{mod_name}: {type(exc).__name__}: {exc}")
+            else:
+                print(f"Warning: Failed to import tests.{mod_name}: {exc}", file=sys.stderr)
             continue
 
         if granularity == "module":
@@ -178,11 +189,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     repo_root = Path(__file__).resolve().parent.parent
+    import_errors: list[str] = []
     targets = discover_targets(
         repo_root=repo_root,
         patterns=args.patterns,
         granularity=args.granularity,
+        import_errors=import_errors,
     )
+
+    if import_errors:
+        print(f"IMPORT ERRORS ({len(import_errors)} test module(s) could not be imported):", file=sys.stderr)
+        for err in import_errors:
+            print(f"  {err}", file=sys.stderr)
 
     if not targets:
         print("No matching test targets discovered.", file=sys.stderr)
@@ -255,6 +273,13 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"FAILED: {len(failures)} failed, {completed_count - len(failures)} passed in "
             f"{wall_clock:.2f}s wall-clock (Cumulative CPU: {total_cpu_time:.2f}s)"
+        )
+        return 1
+
+    if import_errors:
+        print(
+            f"FAILED: {len(import_errors)} test module(s) could not be imported "
+            f"(listed above); {total_run_tests} tests in the other {completed_count} targets passed."
         )
         return 1
 

@@ -509,19 +509,28 @@ CREATE INDEX IF NOT EXISTS idx_sources_raw ON sources(raw_path);
 CREATE INDEX IF NOT EXISTS idx_sources_resolved ON sources(resolved_path);
 
 -- Contentless-external FTS5: the index is built, the text is not duplicated.
--- Two tables over the same content table, one per corpus: curated notes in
--- notes_fts, raw sources in raw_fts. A row belongs to exactly one of them,
--- chosen by its layer. See below for why this is not one table with a filter.
+-- Two tables, one per corpus: curated notes in notes_fts, raw sources in
+-- raw_fts. A row belongs to exactly one of them, chosen by its layer. See
+-- below for why this is not one table with a filter. Each table's content is
+-- a view holding exactly the rows it indexes, so integrity-check can compare
+-- the index with its content (see below).
+CREATE VIEW IF NOT EXISTS notes_fts_content AS
+    SELECT id, title, description, body, tags FROM notes
+    WHERE layer != 'raw' AND parse_error IS NULL;
+CREATE VIEW IF NOT EXISTS raw_fts_content AS
+    SELECT id, title, description, body, tags FROM notes
+    WHERE layer = 'raw' AND parse_error IS NULL;
+
 CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
     title, description, body, tags,
-    content = 'notes',
+    content = 'notes_fts_content',
     content_rowid = 'id',
     tokenize = 'porter unicode61'
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS raw_fts USING fts5(
     title, description, body, tags,
-    content = 'notes',
+    content = 'raw_fts_content',
     content_rowid = 'id',
     tokenize = 'porter unicode61'
 );
@@ -532,7 +541,7 @@ CREATE TABLE IF NOT EXISTS cache_meta (
 );
 ```
 
-**The `tags` column is load-bearing, not a convenience.** External-content FTS5 keeps only the inverted index and reads column values back from the content table, so every column declared in `notes_fts` must also exist in `notes`. Drop `tags` from `notes` and the failure is immediate and total rather than subtle: loading a row fails, so `snippet()` raises `SQL logic error` on *every* search — the query at §4.4 calls it unconditionally — and `INSERT INTO notes_fts(notes_fts) VALUES('rebuild')` fails with `no such column: T.tags`. The column earns its place twice over: holding tags space-joined also lets the `--tag` filter run as a SQL predicate, `instr(' ' || n.tags || ' ', ' ' || :tag || ' ') > 0`, instead of re-parsing `frontmatter_json` for every candidate row. That predicate is exact only because the tag grammar forbids whitespace (§3.1); without that rule `--tag machine` would match a note tagged solely `machine learning`. `instr` is case-sensitive, so the probe is lowercased at the call site — safe precisely because stored tags are canonically lowercase.
+**The `tags` column is load-bearing, not a convenience.** External-content FTS5 keeps only the inverted index and reads column values back from the content table, so every column declared in `notes_fts` must also exist in its content view, and so in `notes`. Drop `tags` from `notes` and the failure is immediate and total rather than subtle: loading a row fails, so `snippet()` raises `SQL logic error` on *every* search — the query at §4.4 calls it unconditionally — and `INSERT INTO notes_fts(notes_fts) VALUES('rebuild')` fails with `no such column: T.tags`. The column earns its place twice over: holding tags space-joined also lets the `--tag` filter run as a SQL predicate, `instr(' ' || n.tags || ' ', ' ' || :tag || ' ') > 0`, instead of re-parsing `frontmatter_json` for every candidate row. That predicate is exact only because the tag grammar forbids whitespace (§3.1); without that rule `--tag machine` would match a note tagged solely `machine learning`. `instr` is case-sensitive, so the probe is lowercased at the call site — safe precisely because stored tags are canonically lowercase.
 
 Because the index lives outside the content table, it must be maintained explicitly alongside every `notes` mutation:
 
@@ -545,11 +554,13 @@ INSERT INTO notes_fts(notes_fts, rowid, title, description, body, tags)
     VALUES('delete', :id, :old_title, :old_description, :old_body, :old_tags);
 ```
 
-This is the single sharpest edge in the cache layer, so it is confined to one `cache.upsert_note()` / `cache.delete_note()` pair; **no other code path may write `notes` directly**. `test_cache.py` asserts the retraction by rewriting a note's body and confirming the old term no longer matches, then running `INSERT INTO notes_fts(notes_fts) VALUES('integrity-check')` on both tables.
+This is the single sharpest edge in the cache layer, so it is confined to one `cache.upsert_note()` / `cache.delete_note()` pair; **no other code path may write `notes` directly**. `test_cache.py` asserts the retraction by rewriting a note's body and confirming the old term no longer matches, then running `INSERT INTO notes_fts(notes_fts, rank) VALUES('integrity-check', 1)` on both tables.
 
 With two indexes the retraction has a second way to go wrong: it must target **the table the row was written to**. Retracting against the wrong table leaves the real entry standing and corrupts the other, and like a retraction with the wrong values it fails silently. A single `_fts_table(layer)` mapping therefore serves every read and write, so no call site re-derives it. Note that a file never changes layer in place — the layer is a pure function of `rel_path`, so moving a file between `raw/` and a cognitive domain reaches the cache as a delete followed by an insert, not an update.
 
 The integrity check runs against **both** tables. A mismatched retraction damages one index while leaving the other clean, so checking only the curated one would report health while raw search returned wrong rows.
+
+**The check must compare the index with its content, and that is why each table's content is a view.** FTS5's plain `integrity-check` verifies only the index's internal structure; it passes on an index still holding a note's old terms, which is exactly the corruption a missed retraction leaves. With `rank = 1` FTS5 also re-tokenizes the content and compares, and reports a mismatch as `SQLITE_CORRUPT`. That form cannot run against a shared `content = 'notes'`: each index holds only some of the rows, so every raw row reads as missing from `notes_fts`, and every curated row as missing from `raw_fts`. The two views state each index's row set once, in the same terms as the insert gate in `upsert_note()` — the layer picks the table, and only rows that parsed are indexed — so the comparison is exact. Up to and including 0.4.2 the content was `notes` and the check was the structural one, so every retraction assertion built on it passed whatever the index held.
 
 `cache_meta` holds `schema_version` and the `raw_text_extensions` list the raw index was built with (§4.3). **There are no migrations**: a version mismatch deletes `cache.db` and rebuilds. This is a disposable cache, and that freedom is worth more than incremental upgrade paths.
 
@@ -1109,7 +1120,7 @@ A note on scope: the five-phase build order that used to open this section was r
 * **C11.** `wiki/sub/Note.md` raises `WIKI_NESTING_DISALLOWED`; `customers/acme/Q3/Note.md` at the same depth raises nothing. A customer note linking to an otherwise-isolated wiki concept keeps that concept off gate 5's orphan list. Both hold when the nested note's frontmatter does not parse: it reports `FRONTMATTER_UNPARSEABLE` and `WIKI_NESTING_DISALLOWED` together.
 * **C12.** Call `vault_verify_note` with any argument shaped to produce `by: human:*`: it fails with `HUMAN_ATTESTATION_REFUSED` and the note's bytes are unchanged. No MCP argument reaches the human tier. Run `cadabby verify` on a TTY with no flag: the entry is `process:cli`. Add `--human` and answer the prompt with anything but the printed token: the command exits 3 (`INVALID_ARGUMENT`) and the bytes are unchanged. No surface, MCP or use case, reports the refusal as `PERMISSION_DENIED`.
 * **C13.** `cadabby audit` detects a `human:owner` entry introduced by a commit authored by an unmapped email.
-* **C14.** A note renamed on disk leaves no stale row in `notes`, `links`, `sources`, or either FTS index, and `INSERT INTO <index>(<index>) VALUES('integrity-check')` passes afterward for both `notes_fts` and `raw_fts` (§4.2).
+* **C14.** A note renamed on disk leaves no stale row in `notes`, `links`, `sources`, or either FTS index, and `INSERT INTO <index>(<index>, rank) VALUES('integrity-check', 1)` passes afterward for both `notes_fts` and `raw_fts` (§4.2). Change a row's body with a raw `UPDATE notes` that skips retraction and the same check fails.
 * **C15.** A `human-reviewed` note outranks an identically-matching `unverified` note, and a `deprecated` one is pushed below both.
 * **C16.** `cadabby sync` run twice in a row produces no Git diff on the second run.
 * **C17.** On the clean demo vault, `index.md` names every MOC and no filed note. Add one unfiled note, one uncited `raw/` file, and one note edited since its attestation: exactly three sections appear. Resolve all three and the file returns to entry points alone. A vault with MOCs and no gaps renders its entry points followed by the "Nothing outstanding" line.
@@ -1117,7 +1128,7 @@ A note on scope: the five-phase build order that used to open this section was r
 * **C19.** After `init`, a full ingestion cycle, and `sync`, list every file under `customers/` and `projects/`: each one was written by an agent or a human. No `{domain}/index.md`, and nothing else engine-owned.
 * **C20.** Drop a file into `raw/` and run any command that scans — CLI, MCP tool, or `sync`: `index.md` lists it afterward, with no explicit sync call. Run the same command again with nothing changed and `index.md`'s bytes and mtime are untouched, the report never having been built.
 * **C21.** `cadabby init` into a directory with an existing `CLAUDE.md` leaves that file untouched and says so.
-* **C22.** `cadabby install --all` run twice changes no bytes on the second run; `--uninstall` restores the pre-install config exactly. Corrupt an installed `mcp_config.json` and re-run with `--force`: the install is refused and the file's bytes are unchanged.
+* **C22.** `cadabby install --all` run twice changes no bytes on the second run; `--uninstall` restores the pre-install config exactly. Corrupt an installed `mcp_config.json` and re-run with `--force`: the install is refused and the file's bytes are unchanged. Point `--antigravity --path` at a directory that is not a Cadabby plugin and run a `--force` install or `--uninstall`: both are refused and the directory is untouched.
 * **C23.** Grep any distinctive sentence from a persona runbook across the repository: it occurs once. The plugin's subagent manifests name `.agents/skills/<persona>/SKILL.md` instead of repeating it.
 * **C24.** Call an MCP tool with a required argument omitted, then with a stale `expected_hash`: the first reports `INVALID_ARGUMENT` naming the field, the second `VAULT_CONFLICT` with `retryable: true`. No failure in either surface produces a code absent from §5.4's table, and only the two race codes say retry.
 * **C25.** Point `.obsidian/templates.json` at a folder and put a stock Obsidian template in it: `lint` stays clean and no domain is reported for that folder. Delete the settings file and the same folder becomes an ordinary cognitive domain again. Nest it one level down and its parent keeps every note but the templates. Scaffold with `template:` and the note carries the template's headings with `{{title}}` substituted, engine-generated frontmatter, and nothing from the template's own.
@@ -1134,7 +1145,7 @@ A note on scope: the five-phase build order that used to open this section was r
 * **C36.** Set a ranking multiplier to `NaN`, `Infinity`, `"2.0"`, or `true` in `.cadabby.json`: every command fails with `CONFIG_INVALID` naming that multiplier. A `search` whose database is locked fails as a lock, never as zero results.
 * **C37.** On a TTY, run `scaffold`, `update`, and `log` without `--actor`: the note's `generated.by` and each ledger entry record `process:cli`, never `human:*`.
 * **C38.** Run `install` with no target, or with `--path` and two targets: it exits 3 and writes nothing. Point `--claude --path` at an unparseable config: it exits 3 with the bytes unchanged. `verify --human --agent x` is rejected by the parser (exit 2); `verify --human` with no TTY exits 3.
-* **C39.** Audit a `human:*` endorsement that is not yet committed: one `PROVENANCE_MISMATCH` saying so, and no `UNSIGNED_ENDORSEMENT` under `--require-signed`.
+* **C39.** Audit a `human:*` endorsement that is not yet committed: one `PROVENANCE_MISMATCH` saying so, and no `UNSIGNED_ENDORSEMENT` under `--require-signed`. An endorsement in a file Git does not track is reported the same way.
 * **C40.** Ground a note whose frontmatter omits `type` and `status`: both are reported empty, never as invented defaults.
 * **C41.** Put `raw/run.log` in a vault and run any command: `status` reports `{".log": 1}` under `filename_only_raw` and a term from its body is not found with `domain: "raw"`. Add `.log` to `raw_text_extensions` and, with the file untouched, `filename_only_raw` is empty and the same search finds it; remove it again and the hit is gone.
 * **C42.** Scaffold `"Flash Attention"` with no `path` in an empty vault: the file is `wiki/flash-attention.md`. In a vault that already holds `wiki/Flash-Attention.md`, the same call is refused and writes nothing.
@@ -1152,6 +1163,7 @@ A note on scope: the five-phase build order that used to open this section was r
 * **C54.** Call `vault_move_note` with a folder prefix (`customers/northwind/` → `customers/apollo/northwind/`, or `cs244b/` → `archive/cs244b/`): every note under the prefix moves atomically, relative links between co-moving `human-reviewed` notes stay byte-identical and keep their tier, depth-changed links to `raw/` or external notes are rewritten, and the vacated source folder is pruned.
 * **C55.** Call `vault_search` (or `cadabby search`) with no `query` and a filter (`trust: "human-reviewed"`, `domain: "wiki"`, or `tag: "attention"`): matching notes return ordered by `trust_mult * status_mult * domain_mult` then `cid ASC` with a non-empty snippet. Call `vault_search` or `cadabby search` with an empty `query` and no filters: it fails with `INVALID_ARGUMENT`.
 * **C56.** Call `vault_ground` with `"wiki/storage-engine#B-Tree Indexes (v2)"` or `"[[storage-engine#b-tree-indexes-v2]]"`: `content` contains that ATX heading and its nested `###` subsections (ignoring fenced `##` lines) and stops before the next `##`, with `"section": "B-Tree Indexes (v2)"`; a missing `#heading` fails with `INVALID_ARGUMENT` naming the note's available headings; and each resolved 1-hop entry in `links` and `backlinks` carries the neighbor's `title`, `type`, `status`, `trust_tier`, and `description`.
+* **C57.** Patch any frontmatter field through `vault_update_note` with a value that starts like a body hash or a timestamp and carries a quote, newlines and a `verified:` block: the value reads back as one string, no key is added, and the note's trust tier is unchanged. A writer that would emit frontmatter not reading back as the same values refuses with `FRONTMATTER_UNSERIALIZABLE` and writes nothing.
 
 ### Traceability
 
@@ -1172,7 +1184,7 @@ A criterion nobody can point to a test for is a wish. This table is the map, and
 | C11 | §2.2, §6.3 | `test_lint_layout_bypass_for_flexible_domains`, `test_gate2_layout_consistency_error`, `test_lint_cross_domain_orphan_prevention`, `test_gate2_reported_alongside_unparseable_frontmatter` |
 | C12 | §3.5, §5.1, §5.3 | `test_verify_note_human_refusal_and_machine_attestation`, `test_ac10_mcp_capabilities_and_human_refusal`, `test_flagless_verify_in_a_tty_stamps_process_cli`, `test_human_verify_requires_typed_token`, `test_human_verify_wrong_token_writes_nothing`, `test_use_case_human_refusal_code` |
 | C13 | §3.5 | `test_ac11_audit_provenance_mismatch` |
-| C14 | §4.2, §4.3 | `test_ac6_rename_leaves_no_stale_records`, `test_deletion_reconciliation_and_fts_retraction`, `test_moving_a_file_between_layers_retracts_from_the_right_index` |
+| C14 | §4.2, §4.3 | `test_ac6_rename_leaves_no_stale_records`, `test_deletion_reconciliation_and_fts_retraction`, `test_moving_a_file_between_layers_retracts_from_the_right_index`, `test_integrity_check_detects_an_unretracted_update`, `test_integrity_check_is_clean_with_raw_and_unparseable_rows` |
 | C15 | §4.4 | `test_ac7_epistemic_ranking_ordering`, `test_epistemic_ranking_boosts_and_status_penalty`, `test_small_vault_saturated_term_preserves_field_weight_hierarchy`, `test_multi_term_query_falls_back_to_or_when_implicit_and_returns_nothing` |
 | C16 | §4.3, §8 | `test_ac16_sync_zero_git_diff`, `test_sync_vault_index_stays_byte_idempotent` |
 | C17 | §2.5 | `test_entry_points_lists_every_moc`, `test_filed_notes_are_not_enumerated`, `test_unfiled_note_is_reported`, `test_reachability_is_transitive`, `test_deprecated_notes_are_not_unfiled_work`, `test_raw_queue_lists_only_unprocessed_sources`, `test_verification_debt_section_lists_stale_notes`, `test_a_healthy_vault_has_entry_points_and_no_gap_sections` |
@@ -1180,7 +1192,7 @@ A criterion nobody can point to a test for is a wish. This table is the map, and
 | C19 | §2.5 | `test_no_index_is_written_into_a_cognitive_domain` |
 | C20 | §4.3, §8 | `test_a_changed_scan_regenerates_without_an_explicit_sync`, `test_an_unchanged_scan_leaves_bytes_and_mtime_untouched`, `test_an_unchanged_scan_does_not_even_build_the_report`, `test_a_raw_file_a_human_dropped_in_reaches_the_queue` |
 | C21 | §5.3, §7.4 | `test_ac17_init_untouched_claude_notification`, `test_init_without_force_does_not_rewrite_existing_mcp_configs` |
-| C22 | §7.6 | `test_ac18_installer_idempotency_and_uninstall`, `test_run_install_all_and_uninstall`, `test_install_on_a_fresh_vault_is_a_no_op`, `test_antigravity_refuses_unparseable_mcp_config_bytes_unchanged` |
+| C22 | §7.6 | `test_ac18_installer_idempotency_and_uninstall`, `test_run_install_all_and_uninstall`, `test_install_on_a_fresh_vault_is_a_no_op`, `test_antigravity_refuses_unparseable_mcp_config_bytes_unchanged`, `test_force_and_uninstall_never_delete_a_non_cadabby_directory` |
 | C23 | §7.4, §9 | `test_ac19_single_definition_invariant`, `test_shims_point_at_vault_content_rather_than_restating_it`, `test_epistemic_anti_hallucination_guardrails_in_shipped_assets` |
 | C24 | §5.4 | `test_a_missing_required_argument_blames_the_caller`, `test_a_conflict_tells_the_caller_to_retry`, `test_a_failure_is_json_not_prose`, `test_only_races_are_retryable`, `test_spec_table_matches_the_module`, `test_spec_table_agrees_with_the_exit_map`, `test_spec_table_agrees_on_which_codes_retry` |
 | C25 | §2.2, §7.5 | `test_a_template_folder_does_not_turn_lint_red`, `test_a_declared_template_folder_is_not_a_cognitive_domain`, `test_without_the_setting_the_folder_is_an_ordinary_domain`, `test_a_nested_template_folder_is_pruned_but_its_parent_survives`, `test_the_template_body_seeds_the_note_with_the_title_substituted`, `test_the_templates_own_frontmatter_is_discarded`, `test_an_escaping_or_absolute_folder_is_refused` |
@@ -1197,7 +1209,7 @@ A criterion nobody can point to a test for is a wish. This table is the map, and
 | C36 | §2.6, §5.4 | `test_vault_cache_search_malformed_ranking_config`, `test_search_propagates_non_syntax_sqlite_errors`, `test_config_values_are_validated` |
 | C37 | §5.3, §3.5 | `test_cli_writes_default_to_process_cli_even_on_a_tty` |
 | C38 | §5.4 | `test_install_usage_errors_and_refusals_never_exit_findings`, `test_verify_mutually_exclusive_flags`, `test_human_verify_without_tty_is_invalid_argument` |
-| C39 | §3.5 | `test_uncommitted_endorsement_is_a_provenance_failure`, `test_empty_author_never_matches` |
+| C39 | §3.5 | `test_uncommitted_endorsement_is_a_provenance_failure`, `test_empty_author_never_matches`, `test_untracked_endorsement_is_a_provenance_failure`, `test_untracked_endorsement_real_git` |
 | C40 | §3.1 | `test_missing_type_and_status_read_as_missing` |
 | C41 | §2.4, §4.3, §4.5 | `test_extension_list_change_reaches_untouched_raw_files`, `test_status_filename_only_raw_distinguishes_skipped_extensions_from_empty_text_files`, `test_unchanged_extension_list_rescans_nothing` |
 | C42 | §5.1 | `test_default_stem_is_lowercase_kebab_case`, `test_scaffold_refuses_case_only_collision` |
@@ -1215,6 +1227,7 @@ A criterion nobody can point to a test for is a wish. This table is the map, and
 | C54 | §5.1 | `test_folder_move_preserves_comoving_links_and_prunes_empty_dirs`, `test_folder_move_into_archive_retires_subtree_atomically` |
 | C55 | §4.4, §5.1, §5.3 | `test_filter_only_search_orders_by_epistemic_multipliers_and_rejects_unfiltered_empty_query`, `test_mcp_filter_only_search_and_section_grounding`, `test_cli_filter_only_search_and_section_grounding` |
 | C56 | §5.1, §5.3 | `test_ground_notes_section_anchor_extracts_target_section_and_subsections`, `test_ground_notes_enriches_one_hop_links_and_backlinks_with_neighbor_metadata`, `test_mcp_filter_only_search_and_section_grounding`, `test_cli_filter_only_search_and_section_grounding` |
+| C57 | §3.2, §3.5 | `test_values_that_look_like_hashes_or_timestamps_cannot_inject_keys`, `test_real_hashes_and_timestamps_stay_single_quoted`, `test_writer_refuses_output_that_does_not_reparse`, `test_patch_frontmatter_cannot_forge_a_human_attestation` |
 
 C17-C20 were unmet together for several releases -- all four were the §2.5 gap report, specified and never built, while an older catalog occupied the file. They were closed as a group, since each depended on the same two queries. C2 and C4 followed: C2 needed the `status` payload asserted rather than only the tier behind it, and C4 needed a fixture seeding one instance of every lint code, which turned the taxonomy itself into something a test can hold. C1 was closed by adding `n.cid ASC` as the secondary sort key in §4.4, making equal-scoring search rows across domains deterministic regardless of insertion order. C24 arrived last and in the opposite order from the rest: §5.4 was written because the surface it describes was already shipped and undocumented, with one code living inside a message string and every other failure flattened to prose at the boundary. The criterion exists to keep that from recurring, which is why it checks the shape of a failure rather than any particular one.
 

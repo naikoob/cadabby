@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from cadabby.cache import VaultCache, or_fallback_fts5_query, sanitize_fts5_query
+from cadabby.cache import VaultCache, or_fallback_fts5_query, reset_cache_files, sanitize_fts5_query
 from cadabby.indexer import generate_index_markdown
 from cadabby.vault import Vault, VaultConfigError
 from tests.helpers import copy_demo_vault
@@ -95,6 +95,34 @@ class TestVaultCache(unittest.TestCase):
         self.assertEqual(cur.fetchone()[0], 0)
 
         # Verify FTS5 integrity check passes after retraction
+        self.assertTrue(self.cache.check_fts_integrity())
+
+    def test_integrity_check_detects_an_unretracted_update(self):
+        """§4.2, §10 C14: the check compares index with content, so a skipped retraction is caught.
+
+        The structural form passed on exactly this corruption, which made every
+        retraction assertion built on it vacuous.
+        """
+        for cid in ("wiki/epistemic-trust-tiers", "raw/karpathy-llm-wiki-gist.md"):
+            with self.subTest(cid=cid):
+                self.cache.scan(force=True)
+                self.assertTrue(self.cache.check_fts_integrity())
+                conn = self.cache.get_connection()
+                # Bypass upsert_note on purpose: the one thing §4.2 forbids.
+                conn.execute("UPDATE notes SET body = 'qqzz unretracted' WHERE cid = ?;", (cid,))
+                self.assertFalse(self.cache.check_fts_integrity())
+                # Restore a consistent cache for the next subtest.
+                self.cache.close()
+                reset_cache_files(self.vault.cache_db_path)
+                self.cache = VaultCache(self.vault)
+
+    def test_integrity_check_is_clean_with_raw_and_unparseable_rows(self):
+        """Raw rows and parse-error rows belong to neither index's content and never read as corruption."""
+        (self.vault.wiki_dir / "broken-frontmatter.md").write_text("---\ntags: [flow]\n---\nbody\n", "utf-8")
+        self.cache.scan()
+        conn = self.cache.get_connection()
+        self.assertGreater(conn.execute("SELECT COUNT(*) FROM notes WHERE layer = 'raw';").fetchone()[0], 0)
+        self.assertGreater(conn.execute("SELECT COUNT(*) FROM notes WHERE parse_error IS NOT NULL;").fetchone()[0], 0)
         self.assertTrue(self.cache.check_fts_integrity())
 
     def test_drift_downgrades_to_stale_verified(self):
@@ -622,8 +650,7 @@ class TestRawSourceSearch(unittest.TestCase):
         self.cache.scan()
         self.assertEqual(self.cache.get_status()["filename_only_raw"], {".log": 1})
         self.assertEqual(self.cache.search("zzqx42", domain="raw"), [], "narrowed list left stale text")
-        conn = self.cache.get_connection()
-        conn.execute("INSERT INTO raw_fts(raw_fts) VALUES('integrity-check');")
+        self.assertTrue(self.cache.check_fts_integrity())
 
     def test_status_filename_only_raw_distinguishes_skipped_extensions_from_empty_text_files(self):
         """C41 (§2.4, §4.5). An empty .md file has body == '' in SQLite, but its extension is

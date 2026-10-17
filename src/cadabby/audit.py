@@ -108,6 +108,25 @@ def run_vault_audit(vault: Vault, require_signed: bool = False) -> tuple[list[Au
                 continue
 
             if blame_res.returncode != 0 or not blame_res.stdout:
+                # Git has no history for this line: the file is untracked or
+                # ignored, which is exactly where the cheapest forgery lives (a
+                # new file carrying `by: human:...`). An endorsement with no
+                # author to check is a mismatch, as for an uncommitted line (§3.5).
+                reason = (blame_res.stderr or "").strip().splitlines()[:1]
+                findings.append(
+                    AuditFinding(
+                        code="PROVENANCE_MISMATCH",
+                        rel_path=rel_path,
+                        line=line_no,
+                        actor=actor,
+                        commit="",
+                        message=(
+                            f"'{actor}' attestation has no Git history (file untracked or ignored"
+                            + (f": {reason[0]}" if reason else "")
+                            + "); commit it to make its provenance auditable"
+                        ),
+                    )
+                )
                 continue
 
             # Parse git blame porcelain output
