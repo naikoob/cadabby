@@ -419,5 +419,16 @@ class TestLinkSpans(unittest.TestCase):
         self.assertEqual(idx.candidates("missing"), [])
 
 
+class TestDottedEmbedsAreAttachments(unittest.TestCase):
+    """§2.5 decides it: an embed whose last segment has a non-`.md` extension is an attachment."""
+
+    def test_dotted_stem_embed_is_an_attachment_and_md_suffix_is_a_note(self):
+        from cadabby.graph import is_attachment_target
+
+        self.assertTrue(is_attachment_target("Node.js"))
+        self.assertFalse(is_attachment_target("Node.js.md"))
+        self.assertFalse(is_attachment_target("Node"))
+
+
 if __name__ == "__main__":
     unittest.main()

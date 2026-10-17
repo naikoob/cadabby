@@ -1036,6 +1036,42 @@ class TestCacheSelfHealing(unittest.TestCase):
             cache.close()
 
 
+class TestSearchOperators(unittest.TestCase):
+    """C65: the sanitizer keeps what the caller's operators meant."""
+
+    def test_and_not_keeps_its_negation(self):
+        self.assertEqual(sanitize_fts5_query("sqlite AND NOT duckdb"), "sqlite NOT duckdb")
+
+    def test_phrase_prefix_is_kept(self):
+        self.assertEqual(sanitize_fts5_query('"flash atten"*'), '"flash atten"*')
+
+    def test_a_stray_quote_separates_words(self):
+        self.assertEqual(sanitize_fts5_query('foo"bar'), 'foo "bar"')
+
+    def test_and_not_excludes_matching_notes(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        vault = Vault(copy_demo_vault(Path(tmp.name) / "demo-vault"))
+        with VaultCache(vault) as cache:
+            cache.scan()
+            both = {r.cid for r in cache.search("sqlite")}
+            negated = {r.cid for r in cache.search("sqlite AND NOT duckdb")}
+        self.assertIn("wiki/sqlite-vs-duckdb", both)
+        self.assertNotIn("wiki/sqlite-vs-duckdb", negated)
+
+    def test_an_unsearchable_query_with_a_filter_falls_back_to_the_filter(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        vault = Vault(copy_demo_vault(Path(tmp.name) / "demo-vault"))
+        with VaultCache(vault) as cache:
+            cache.scan()
+            filtered = {r.cid for r in cache.search(None, trust="human-reviewed")}
+            dashed = {r.cid for r in cache.search("---", trust="human-reviewed")}
+            self.assertEqual(cache.search("---"), [])
+        self.assertTrue(filtered)
+        self.assertEqual(dashed, filtered)
+
+
 if __name__ == "__main__":
     unittest.main()
 

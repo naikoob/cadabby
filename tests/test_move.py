@@ -281,9 +281,12 @@ class TestMoveNote(unittest.TestCase):
     def test_destination_rejects_traversal_and_supports_trailing_slash_folder_move(self):
         """§5.1. '.'/'..' segments are refused; a trailing slash moves the note into that folder."""
         self._write("wiki/target-note.md", _fm("Target") + "# Target\n")
-        for bad in ("wiki/../customers/x", "./x"):
+        for bad in ("wiki/../customers/x", "wiki/./x"):
             with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "Path traversal"):
                 move_note(self.vault, "wiki/target-note", bad)
+        # A leading './' is read the same way everywhere a name is typed (§5.1).
+        plan = move_note(self.vault, "wiki/target-note", "./customers/x")
+        self.assertEqual(plan["to"], "customers/x")
         for bad in ("   ", "///"):
             with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "vault-relative"):
                 move_note(self.vault, "wiki/target-note", bad)

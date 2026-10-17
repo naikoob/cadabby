@@ -6,6 +6,7 @@ Implements the Driving Use Cases layer in Hexagonal Architecture.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import posixpath
@@ -67,17 +68,41 @@ def _strip_dot_slash(text: str) -> str:
     return raw
 
 
+def _vault_name_parts(text: str) -> tuple[str, list[str]] | None:
+    """`(normalized, segments)` for a vault-relative name, or None if it is absolute or climbs.
+
+    The one reading of a name the caller typed, shared by note resolution,
+    folder resolution and destinations: backslashes become '/', leading `./`
+    is dropped, and a trailing '/' survives in `normalized` (it means "folder").
+    """
+    raw = _strip_dot_slash(text)
+    if not raw or raw.startswith("/") or Path(raw).is_absolute():
+        return None
+    parts = [p for p in raw.strip("/").split("/") if p]
+    if not parts or any(p in (".", "..") for p in parts):
+        return None
+    return raw, parts
+
+
 def _parse_relative_target(raw_input: str, *, absolute_error: str) -> tuple[str, list[str]]:
     """Validate and split a vault-relative target path into (normalized_raw, parts)."""
     if not isinstance(raw_input, str) or not raw_input.strip():
         raise ValueError(absolute_error)
-    raw = raw_input.replace("\\", "/").strip()
-    if raw.startswith("/") or Path(raw).is_absolute():
+    stripped = _strip_dot_slash(raw_input)
+    if stripped.startswith("/") or Path(stripped).is_absolute():
         raise ValueError(absolute_error)
-    parts = [p for p in raw.strip("/").split("/") if p]
-    if not parts or any(p in (".", "..") for p in parts):
+    parsed = _vault_name_parts(raw_input)
+    if parsed is None:
         raise ValueError(f"Path traversal detected in '{raw_input}': must not contain '.' or '..'")
-    return raw, parts
+    return parsed
+
+
+def with_md_suffix(name: str) -> str:
+    """`name` as a note path: a `.md` suffix in any letter case becomes `.md`, else one is added.
+
+    `Foo.MD` would otherwise become `Foo.MD.md`, or a file the scan ignores.
+    """
+    return f"{name[:-3]}.md" if name.lower().endswith(".md") else f"{name}.md"
 
 
 def _match_listed_path(cids: Sequence[str], raw: str, shown: str) -> str | None:
@@ -116,9 +141,10 @@ def resolve_note_cid(
     if not isinstance(cid_or_path, str) or not cid_or_path.strip():
         raise ValueError("Note CID or path must be a non-empty string")
     shown = cid_or_path.strip()
-    raw = _strip_dot_slash(cid_or_path)
-    if raw.startswith("/") or Path(raw).is_absolute() or ".." in raw.split("/"):
+    parsed = _vault_name_parts(cid_or_path)
+    if parsed is None:
         raise FileNotFoundError(f"Note not found: {shown} (names must be vault-relative)")
+    raw = parsed[0]
 
     listed = list(cids) if cids is not None else list(storage.list_note_cids())
     if (hit := _match_listed_path(listed, raw, shown)) is not None:
@@ -239,7 +265,10 @@ class ScaffoldNoteUseCase:
     @staticmethod
     def _resolve_scaffold_destination(title: str, domain: str, path: str | None) -> tuple[str, str]:
         """Resolve `(rel_path, cid)` for a newly scaffolded note (§5.1)."""
-        target_domain = domain or DIR_WIKI
+        # An empty domain is the default, like an empty path: the CLI passes ""
+        # for an omitted --domain, which used to build `/name.md`.
+        domain = domain or DIR_WIKI
+        target_domain = domain
         # An empty path is the same as none: some clients send "" for every
         # optional string they were not given.
         if path is not None and path.strip():
@@ -255,7 +284,7 @@ class ScaffoldNoteUseCase:
                 clean_path = f"{target_domain}/{clean_path}"
             elif parts[0] != target_domain and domain != DIR_WIKI:
                 clean_path = f"{domain}/{clean_path}"
-            rel_path = clean_path if clean_path.endswith(".md") else f"{clean_path}.md"
+            rel_path = with_md_suffix(clean_path)
             return rel_path, path_to_cid(rel_path)
 
         stem = sanitize_filename(title)
@@ -408,6 +437,7 @@ class UpdateNoteUseCase:
         _validate_frontmatter_patch(frontmatter_patch)
 
         note = load_existing_note(self.storage, cid_or_path)
+        before = (copy.deepcopy(note.frontmatter), note.body)
 
         if frontmatter_patch:
             note.patch_frontmatter(frontmatter_patch)
@@ -421,6 +451,15 @@ class UpdateNoteUseCase:
                 note.replace_section(edit["heading"], edit["body"])
             else:
                 note.append_section(edit["heading"], edit["body"])
+
+        if (note.frontmatter, note.body) == before:
+            # Writing anyway would canonicalize the file and log an "Updated"
+            # that changed nothing -- a retried call would look like two edits.
+            raise ValueError(
+                f"Nothing to update in {note.rel_path}: the note already has these values"
+                if validated or frontmatter_patch
+                else "Nothing to update: pass patch_frontmatter or edits"
+            )
 
         effective_expected = expected_hash if expected_hash is not None else note.source_hash
         self.storage.save_note(note, expected_hash=effective_expected)
@@ -709,12 +748,13 @@ class MoveNoteUseCase:
                     raise
         if folder_prefix is not None:
             src_prefix, folder_cids = folder_prefix
-            dst_prefix, moved_items = self._folder_destinations(src_prefix, folder_cids, to)
+            dst_prefix, moved_items, unreadable = self._folder_destinations(src_prefix, folder_cids, to)
             plan = MovePlan(
                 moved=moved_items,
                 from_target=f"{src_prefix}/",
                 to_target=f"{dst_prefix}/",
                 is_folder=True,
+                blocked=unreadable,
             )
             leftover = self._leftover_folder_files(src_prefix, folder_cids)
             if leftover:
@@ -821,12 +861,10 @@ class MoveNoteUseCase:
     def _folder_prefix(cid_or_path: str, cids: Sequence[str]) -> tuple[str, list[str]] | None:
         if not isinstance(cid_or_path, str) or not cid_or_path.strip():
             return None
-        raw = _strip_dot_slash(cid_or_path)
-        if raw.startswith("/") or Path(raw).is_absolute():
+        parsed = _vault_name_parts(cid_or_path)
+        if parsed is None:
             return None
-        parts = [p for p in raw.strip("/").split("/") if p]
-        if not parts or any(p in (".", "..") for p in parts):
-            return None
+        raw, parts = parsed
         prefix = "/".join(parts)
         if not raw.endswith("/"):
             if raw.lower().endswith(".md"):
@@ -866,7 +904,15 @@ class MoveNoteUseCase:
                 leftover.append(rel)
         return leftover
 
-    def _folder_destinations(self, src_prefix: str, folder_cids: list[str], to: str) -> tuple[str, list[_MovedNote]]:
+    def _folder_destinations(
+        self, src_prefix: str, folder_cids: list[str], to: str
+    ) -> tuple[str, list[_MovedNote], list[str]]:
+        """Each note's destination, plus a blocker per note whose frontmatter does not parse (§5.1).
+
+        A note that cannot be parsed is never written (§3.2), so it cannot be
+        moved; reporting it as a blocker lets the dry run list it beside every
+        other reason instead of failing on the first such file.
+        """
         raw, raw_parts = self._parse_destination_path(to)
         if raw.lower().endswith(".md"):
             raise ValueError(f"Cannot move folder '{src_prefix}/' to a single file '{to}'")
@@ -876,8 +922,13 @@ class MoveNoteUseCase:
 
         moving_set = frozenset(folder_cids)
         moved_items: list[_MovedNote] = []
+        unreadable: list[str] = []
         for old_cid in folder_cids:
-            src_note = self.storage.get_note(old_cid)
+            try:
+                src_note = self.storage.get_note(old_cid)
+            except FrontmatterParseError as exc:
+                unreadable.append(f"{cid_to_path(old_cid)} cannot be parsed ({exc}); fix it or move it out first")
+                continue
             if src_note is None:
                 raise FileNotFoundError(f"Note not found: {cid_to_path(old_cid)}")
             suffix = old_cid[len(src_prefix) + 1 :]
@@ -898,7 +949,7 @@ class MoveNoteUseCase:
                     destination=replace(src_note, cid=new_cid, rel_path=new_rel),
                 )
             )
-        return dst_prefix, moved_items
+        return dst_prefix, moved_items, unreadable
 
     def _destination(self, source: Note, to: str, cids: Sequence[str]) -> str:
         raw, raw_parts = self._parse_destination_path(to)
@@ -918,7 +969,7 @@ class MoveNoteUseCase:
                     f"'{to}' is an existing folder: end it with '/' to move the note into it, "
                     f"or add '.md' to name a file"
                 )
-        rel = cid_to_path("/".join(raw_parts))
+        rel = with_md_suffix("/".join(raw_parts))
         if path_to_cid(rel) == source.cid:
             raise ValueError(f"'{source.rel_path}' is already at '{rel}'")
         _check_new_location(self.storage, self.vault, rel, source.type, verb="move", replacing=source.cid)

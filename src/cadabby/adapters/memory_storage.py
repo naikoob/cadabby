@@ -22,8 +22,10 @@ def _content_hash(note: Note) -> str:
 class InMemoryNoteStorage(NoteStoragePort):
     """Secondary adapter storing notes purely in memory."""
 
-    def __init__(self, initial_notes: Sequence[Note] | None = None) -> None:
+    def __init__(self, initial_notes: Sequence[Note] | None = None, *, template_rel: str | None = None) -> None:
+        """`template_rel` plays the vault's Obsidian template folder (§7.5), as on disk."""
         self._notes: dict[str, Note] = {}
+        self._template_rel = template_rel
 
         if initial_notes:
             for n in initial_notes:
@@ -31,7 +33,7 @@ class InMemoryNoteStorage(NoteStoragePort):
 
     def _lookup_existing(self, cid_or_path: str) -> Note | None:
         rel_path = cid_to_path(cid_or_path)
-        if note_path_violation(rel_path):
+        if note_path_violation(rel_path, self._template_rel):
             return None
         return self._notes.get(path_to_cid(rel_path))
 
@@ -48,7 +50,7 @@ class InMemoryNoteStorage(NoteStoragePort):
         if raw.startswith("/") or ".." in raw.split("/"):
             raise ValueError(f"Cannot save note outside vault root: {note.rel_path or note.cid}")
         rel_path = cid_to_path(note.rel_path or note.cid)
-        if why := note_path_violation(rel_path):
+        if why := note_path_violation(rel_path, self._template_rel):
             raise ValueError(f"Cannot save note at '{rel_path}': {why}")
         cid = path_to_cid(rel_path)
         existing = self._notes.get(cid)
@@ -77,7 +79,7 @@ class InMemoryNoteStorage(NoteStoragePort):
     def delete_note(self, cid_or_path: str, expected_hash: str | None = None, *, prune_empty_dirs: bool = False) -> None:
         # `prune_empty_dirs` is accepted for port parity; memory has no folders.
         rel_path = cid_to_path(cid_or_path)
-        if why := note_path_violation(rel_path):
+        if why := note_path_violation(rel_path, self._template_rel):
             raise ValueError(f"Cannot delete '{rel_path}': {why}")
         cid = path_to_cid(rel_path)
         existing = self._notes.get(cid)

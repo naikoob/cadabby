@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Any
@@ -113,11 +114,24 @@ def _cell(value: Any, fallback: str = "") -> str:
     return str(value or fallback).replace("\n", " ").replace("|", "\\|")
 
 
+# Characters a wikilink target cannot carry: `#` and `^` open an anchor, `|` an
+# alias, and `]` closes the link -- `[[C#]]` would point at note `C`.
+_WIKILINK_UNSAFE = frozenset("#|]^[")
+
+
+def _note_link(stem: str, rel_path: str) -> str:
+    """A table-cell link to a note: `[[stem]]`, or a Markdown link when the stem cannot be a wikilink."""
+    if not _WIKILINK_UNSAFE.intersection(stem):
+        return f"[[{stem}]]"
+    label = stem.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]").replace("|", "\\|")
+    return f"[{label}]({urllib.parse.quote(rel_path)})"
+
+
 def _entry_points(conn: sqlite3.Connection) -> list[str]:
     """Section 1: every MOC, linked. The human's starting page (§2.5)."""
     rows = conn.execute(
         """
-        SELECT stem, description FROM notes
+        SELECT stem, rel_path, description FROM notes
         WHERE layer = 'wiki' AND type = ? AND parse_error IS NULL
         ORDER BY stem ASC;
         """,
@@ -126,7 +140,7 @@ def _entry_points(conn: sqlite3.Connection) -> list[str]:
     if not rows:
         return []
     lines = ["## Entry Points", "", "| Map of Content | Description |", "| :--- | :--- |"]
-    lines += [f"| [[{r['stem']}]] | {_cell(r['description'])} |" for r in rows]
+    lines += [f"| {_note_link(r['stem'], r['rel_path'])} | {_cell(r['description'])} |" for r in rows]
     return lines + [""]
 
 
@@ -154,7 +168,7 @@ def _unfiled(conn: sqlite3.Connection) -> list[str]:
             JOIN filed f ON l.source_cid = f.cid
             WHERE l.target_cid IS NOT NULL
         )
-        SELECT stem, description FROM notes
+        SELECT stem, rel_path, description FROM notes
         WHERE layer = 'wiki'
           AND parse_error IS NULL
           AND COALESCE(status, 'active') NOT IN ('deprecated', 'abandoned')
@@ -173,7 +187,7 @@ def _unfiled(conn: sqlite3.Connection) -> list[str]:
         "| Note | Description |",
         "| :--- | :--- |",
     ]
-    lines += [f"| [[{r['stem']}]] | {_cell(r['description'])} |" for r in rows]
+    lines += [f"| {_note_link(r['stem'], r['rel_path'])} | {_cell(r['description'])} |" for r in rows]
     return lines + [""]
 
 

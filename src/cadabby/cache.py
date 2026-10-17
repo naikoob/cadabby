@@ -141,7 +141,9 @@ def sanitize_fts5_query(query: str) -> str:
       preventing SQLite FTS5 from treating '-' as column selectors or unary NOT operators.
     - Preserves uppercase boolean operators (AND, OR, NOT) while stripping invalid leading, trailing, or consecutive operator sequences.
     - Supports prefix matching (e.g. term* -> term* or "phrase"*).
-    - Cleans unclosed quotes and non-syntax characters gracefully.
+    - Cleans unclosed quotes and non-syntax characters gracefully; a stray
+      quote inside a word separates it (foo"bar -> foo "bar").
+    - `a AND NOT b` keeps its meaning: FTS5's NOT is binary, so the AND is dropped.
     """
     query = query.strip()
     if not query:
@@ -151,20 +153,20 @@ def sanitize_fts5_query(query: str) -> str:
         query = query + '"'
 
     tokens: list[str] = []
-    pattern = re.compile(r"\"([^\"]*)\"|(\S+)")
+    pattern = re.compile(r"\"([^\"]*)\"(\*?)|([^\s\"]+)")
     for match in pattern.finditer(query):
-        quoted, bare = match.groups()
+        quoted, star, bare = match.groups()
         if quoted is not None:
             clean_quoted = quoted.strip()  # the group cannot contain '"'
             if clean_quoted and any(c.isalnum() for c in clean_quoted):
-                tokens.append(f'"{clean_quoted}"')
+                tokens.append(f'"{clean_quoted}"{star}')
         elif bare is not None:
             if bare in ("AND", "OR", "NOT"):
                 tokens.append(bare)
             else:
                 has_prefix = bare.endswith("*") and len(bare) > 1
                 base = bare[:-1] if has_prefix else bare
-                clean_base = base.replace('"', "")
+                clean_base = base  # the bare group cannot contain '"'
                 if not clean_base or not any(c.isalnum() for c in clean_base):
                     continue
                 if re.search(r"[^\w]", clean_base):
@@ -181,6 +183,9 @@ def sanitize_fts5_query(query: str) -> str:
     clean_tokens: list[str] = []
     for t in tokens:
         if t in ("AND", "OR", "NOT"):
+            if t == "NOT" and clean_tokens and clean_tokens[-1] == "AND":
+                clean_tokens[-1] = "NOT"  # `a AND NOT b` is FTS5's `a NOT b`
+                continue
             if not clean_tokens or clean_tokens[-1] in ("AND", "OR", "NOT"):
                 continue
             clean_tokens.append(t)
@@ -1044,7 +1049,11 @@ class VaultCache:
 
         clean_query = "" if filter_only else sanitize_fts5_query(raw_query)
         if not filter_only and not clean_query:
-            return []
+            # Nothing searchable survived (`---`, `"*"`): with a filter the
+            # caller still said what they want, so answer that rather than `[]`.
+            if not any((type_, status, trust, tag, domain)):
+                return []
+            filter_only = True
 
         # A pure read like every getter here: entry points scan first (§4.3).
         conn = self.get_connection()

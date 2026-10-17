@@ -766,9 +766,11 @@ class TestUpdateNoteEdits(unittest.TestCase):
 
     def test_scaffold_rejects_dot_segment_and_collapses_double_slashes(self):
         uc = ScaffoldNoteUseCase(InMemoryNoteStorage(), InMemoryLedger())
-        for bad_path in ("./Note", "customers/./Note", "  /abs/Note"):
+        for bad_path in ("customers/./Note", "  /abs/Note"):
             with self.subTest(bad_path=bad_path), self.assertRaisesRegex(ValueError, "Path traversal"):
                 uc.execute(title="Dot", type_="concept", description="d", path=bad_path)
+        # A leading './' is dropped, as when naming an existing note (§5.1).
+        self.assertEqual(uc.execute(title="Dot", type_="concept", description="d", path="./Note").rel_path, "wiki/Note.md")
         with self.assertRaisesRegex(ValueError, "path must be a string"):
             uc.execute(title="Typed", type_="concept", description="d", path=5)  # type: ignore[arg-type]
 
@@ -802,6 +804,67 @@ class TestUpdateNoteEdits(unittest.TestCase):
         self.assertEqual(updated, self.note)
         res = verify_note(self.vault, cid_or_path="Edits-Fixture", actor="agent:test")
         self.assertEqual(res["cid"], "wiki/Edits-Fixture")
+
+
+class TestOpsErgonomics(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.vault_root = copy_demo_vault(Path(self.tmp_dir.name) / "demo-vault")
+        self.vault = Vault(self.vault_root)
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def test_empty_domain_means_wiki(self):
+        uc = ScaffoldNoteUseCase(InMemoryNoteStorage(), InMemoryLedger())
+        note = uc.execute(title="Empty Domain", type_="concept", description="d", domain="", path="a/b")
+        self.assertEqual(note.rel_path, "a/b.md")
+        note = uc.execute(title="Empty Domain", type_="concept", description="d", domain="")
+        self.assertEqual(note.rel_path, "wiki/empty-domain.md")
+
+    def test_uppercase_md_suffix_is_the_extension(self):
+        uc = ScaffoldNoteUseCase(InMemoryNoteStorage(), InMemoryLedger())
+        note = uc.execute(title="Upper", type_="concept", description="d", path="Upper.MD")
+        self.assertEqual(note.rel_path, "wiki/Upper.md")
+
+    def test_an_update_that_changes_nothing_writes_nothing(self):
+        path = self.vault_root / "wiki" / "sqlite.md"
+        before = path.read_bytes()
+        log_before = self.vault.log_path.read_bytes() if self.vault.log_path.exists() else b""
+        status = parse_frontmatter(before.decode())[0]["status"]
+        with self.assertRaisesRegex(ValueError, "Nothing to update"):
+            update_note(self.vault, "wiki/sqlite", frontmatter_patch={"status": status}, actor="agent:test")
+        with self.assertRaisesRegex(ValueError, "Nothing to update"):
+            update_note(self.vault, "wiki/sqlite", actor="agent:test")
+        self.assertEqual(path.read_bytes(), before)
+        log_after = self.vault.log_path.read_bytes() if self.vault.log_path.exists() else b""
+        self.assertEqual(log_after, log_before)
+
+    def test_folder_move_lists_an_unparseable_note_as_a_blocker(self):
+        from cadabby.ops import move_note
+
+        folder = self.vault_root / "customers" / "zeta"
+        folder.mkdir(parents=True)
+        (folder / "good.md").write_text(
+            "---\ntype: concept\ntitle: Good\ndescription: d\nstatus: active\n---\n# Good\n", "utf-8"
+        )
+        (folder / "broken.md").write_text("---\ntitle: [unclosed\n---\n# Broken\n", "utf-8")
+        plan = move_note(self.vault, "customers/zeta/", "customers/omega/")
+        self.assertTrue(any("customers/zeta/broken.md" in b for b in plan["blocked"]), plan["blocked"])
+        with self.assertRaisesRegex(ValueError, "Move refused"):
+            move_note(self.vault, "customers/zeta/", "customers/omega/", apply=True)
+        self.assertTrue((folder / "good.md").is_file())
+
+    def test_memory_twin_honours_the_template_folder(self):
+        note = Note(
+            cid="templates/daily",
+            rel_path="templates/daily.md",
+            frontmatter={"type": "concept", "title": "T", "description": "d", "status": "draft"},
+            body="# T\n",
+        )
+        InMemoryNoteStorage().save_note(note)  # no template folder: an ordinary domain note
+        with self.assertRaisesRegex(ValueError, "Cannot save note"):
+            InMemoryNoteStorage(template_rel="templates").save_note(note)
 
 
 if __name__ == "__main__":

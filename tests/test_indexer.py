@@ -361,6 +361,18 @@ class TestIndexSyncUnderLock(IndexerFixture):
         self.assertEqual(seen, [True])
 
 
+class TestIndexLinksForUnsafeStems(IndexerFixture):
+    def test_a_stem_with_hash_is_linked_by_markdown_path(self):
+        self._note("C#")
+        self._note("plain")
+        with VaultCache(self.vault) as cache:
+            cache.scan(regenerate_index=False)
+            text = generate_index_markdown(self.vault, cache=cache)
+        self.assertNotIn("[[C#]]", text)
+        self.assertIn("[C#](wiki/C%23.md)", text)
+        self.assertIn("[[plain]]", text)
+
+
 if __name__ == "__main__":
     unittest.main()
 
