@@ -26,6 +26,14 @@ _RE_SINGLE_QUOTABLE = re.compile(
 )
 
 
+_YAML_KEYWORDS = frozenset(("true", "false", "null", "~", "yes", "no", "on", "off", "y", "n"))
+_RE_YAML_NON_STRING = re.compile(
+    r"[-+]?(?:\.?[0-9][0-9_.:]*(?:e[-+]?[0-9]+)?|0x[0-9a-f_]+|0o[0-7_]+|0b[01_]+|\.inf|\.nan)"
+    r"|\d{4}-\d{1,2}-\d{1,2}(?:[Tt ].*)?",
+    re.IGNORECASE,
+)
+
+
 class FrontmatterParseError(CadabbyError, ValueError):
     """Raised when frontmatter violates the restricted YAML subset.
 
@@ -42,8 +50,14 @@ class FrontmatterParseError(CadabbyError, ValueError):
         super().__init__(f"Line {line_number}: {message}")
 
 
+# What may precede an opening quote: indentation, an optional `- ` item marker
+# and an optional `key: `. A quote anywhere else is a literal character of a
+# bare scalar (`it's`), and must not hide the comment that follows it.
+_RE_QUOTE_OPENER = re.compile(r"[ ]*(?:-[ ]+)?(?:[A-Za-z0-9_-]+:[ ]+)?")
+
+
 def split_comment(line: str) -> tuple[str, str | None]:
-    """Split a line into content and trailing comment, respecting quotes."""
+    """Split a line into content and trailing comment, respecting quoted scalars."""
     in_single = False
     in_double = False
     escaped = False
@@ -56,10 +70,12 @@ def split_comment(line: str) -> tuple[str, str | None]:
             escaped = True
             continue
         if ch == "'" and not in_double:
-            in_single = not in_single
+            if in_single or _RE_QUOTE_OPENER.fullmatch(line, 0, i):
+                in_single = not in_single
             continue
         if ch == '"' and not in_single:
-            in_double = not in_double
+            if in_double or _RE_QUOTE_OPENER.fullmatch(line, 0, i):
+                in_double = not in_double
             continue
         if ch == "#" and not in_single and not in_double and (i == 0 or line[i - 1].isspace()):
             return line[:i], line[i:]
@@ -189,6 +205,9 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
         return {}, body  # `content` minus any leading BOM
 
     data: dict[str, Any] = {}
+    # Every top-level key seen, including an empty `key:` that never gains a
+    # value and so never reaches `data`: its later duplicate is still a duplicate.
+    seen_keys: set[str] = set()
     lines = split_lines(raw_fm)
 
     # Parser state tracking
@@ -229,8 +248,9 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
             k, v_val = mapping
             if not RE_KEY.match(k):
                 raise FrontmatterParseError(f"Invalid key name '{k}'", line_idx)
-            if k in data:
+            if k in seen_keys:
                 raise FrontmatterParseError(f"Duplicate top-level key '{k}'", line_idx)
+            seen_keys.add(k)
 
             if not v_val:
                 # Key begins a container (sequence or nested mapping)
@@ -244,8 +264,9 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
             if current_key is None:
                 raise FrontmatterParseError("Unexpected indentation without preceding parent key", line_idx)
 
-            # Sequence item: '- ...'
-            if stripped.startswith("-"):
+            # Sequence item: '- ...' or a bare '-'. `-foo` is not an item: YAML
+            # reads it as a plain scalar, which has no place at indent 2.
+            if stripped == "-" or stripped.startswith("- "):
                 seq_val = stripped[1:].strip()
                 if seq_val.startswith("-"):
                     raise FrontmatterParseError("Sequences of sequences are not permitted", line_idx)
@@ -379,8 +400,11 @@ def format_scalar(val: Any) -> str:
     if _RE_SINGLE_QUOTABLE.fullmatch(val_str):
         return f"'{val_str}'"
 
-    # Keywords that would be ambiguously parsed as booleans or null
-    if val_str in ("true", "false", "null", "~", "yes", "no", "on", "off"):
+    # Anything a YAML reader (1.1 or 1.2 core schema, any casing) would type as
+    # a bool, null, number or date stays a string only if quoted. Our parser
+    # reads it back as a string either way, but Obsidian and every other tool
+    # in the vault would not (§3.2).
+    if val_str.lower() in _YAML_KEYWORDS or _RE_YAML_NON_STRING.fullmatch(val_str):
         return f'"{val_str}"'
 
     # Safe bare scalars (alphanumeric, dots, underscores, dashes, slashes).
@@ -413,7 +437,7 @@ def _check_key(key: Any, where: str) -> str:
     return key
 
 
-def serialize_frontmatter(data: dict[str, Any], body: str = "") -> str:
+def serialize_frontmatter(data: dict[str, Any], body: str = "", newline: str = "\n") -> str:
     """Canonicalizing frontmatter serializer conforming to §3.2.
 
     Emits keys in schema order, followed by unknown keys alphabetically.
@@ -422,6 +446,10 @@ def serialize_frontmatter(data: dict[str, Any], body: str = "") -> str:
     The writer is as strict as the parser: a value outside the subset raises
     rather than being coerced. Emitting a Python repr would destroy the value
     and leave a file the parser rejects, silently dropping the note from search.
+
+    `newline="\r\n"` writes the whole file with CRLF line endings, so editing
+    a note saved on Windows does not rewrite every line of it. The body is
+    emitted as given, leading blank lines included.
 
     Raises:
         FrontmatterSerializeError: on a value the restricted subset cannot express.
@@ -507,11 +535,10 @@ def serialize_frontmatter(data: dict[str, Any], body: str = "") -> str:
             f"(keys affected: {', '.join(changed)}) (§3.2)"
         )
 
-    if body:
-        if not body.startswith("\n"):
-            return fm_text + body
-        return fm_text + body.lstrip("\n")
-    return fm_text
+    text = fm_text + body
+    if newline == "\r\n":
+        text = text.replace("\r\n", "\n").replace("\n", "\r\n")
+    return text
 
 
 def _normalize_written(val: Any) -> Any:

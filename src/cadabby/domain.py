@@ -316,7 +316,16 @@ class Note:
                 fm, body = None, None
             if fm == self.frontmatter and body == self.body:
                 return self.raw_text
-        return serialize_frontmatter(self.frontmatter, self.body)
+        return serialize_frontmatter(self.frontmatter, self.body, newline=self.newline)
+
+    @property
+    def newline(self) -> str:
+        """The line ending the note was read with, judged by its first line (§8: minimal diffs)."""
+        if self.raw_text is not None:
+            first_end = self.raw_text.find("\n")
+            if first_end > 0 and self.raw_text[first_end - 1] == "\r":
+                return "\r\n"
+        return "\n"
 
     @classmethod
     def from_raw(cls, cid: str, rel_path: str, raw_text: str, source_hash: str | None = None) -> Note:

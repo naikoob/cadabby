@@ -16,6 +16,8 @@ from cadabby.constants import (
     RFC3339_TIMESTAMP_PATTERN,
 )
 
+# Always fullmatch: the patterns end in `$`, which also matches before a
+# trailing newline, so `.match` accepted "human:bob\n".
 RE_ACTOR = re.compile(ACTOR_PATTERN)
 RE_TIMESTAMP = re.compile(RFC3339_TIMESTAMP_PATTERN)
 
@@ -70,7 +72,7 @@ def is_valid_actor(actor: Any) -> bool:
     """Validate actor string against ^(human|agent|process):[A-Za-z0-9._\\-/]+$."""
     if not isinstance(actor, str):
         return False
-    return bool(RE_ACTOR.match(actor))
+    return bool(RE_ACTOR.fullmatch(actor))
 
 
 def is_actor_human(actor: str) -> bool:
@@ -129,7 +131,7 @@ def is_valid_timestamp(ts: Any) -> bool:
     '2026-13-45T99:99:99Z', which has the right digits and is not a date; lint
     promises RFC 3339 conformance (§3.1), so the parse has to agree.
     """
-    if not isinstance(ts, str) or not RE_TIMESTAMP.match(ts):
+    if not isinstance(ts, str) or not RE_TIMESTAMP.fullmatch(ts):
         return False
     try:
         datetime.fromisoformat(ts)

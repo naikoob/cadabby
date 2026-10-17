@@ -139,7 +139,8 @@ class TestByteExactSerialize(unittest.TestCase):
         note.patch_frontmatter({"status": "evergreen"})
         out = note.serialize()
         self.assertNotIn("# owner: legal", out)
-        self.assertNotIn("\r\n", out)
+        # A CRLF note stays CRLF throughout: no line is rewritten just for its ending.
+        self.assertNotIn("\n", out.replace("\r\n", ""))
         self.assertIn("status: evergreen", out)
         body_changed = Note.from_raw("wiki/X", "wiki/X.md", self.RAW)
         body_changed.body += "More.\n"

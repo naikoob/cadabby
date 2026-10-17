@@ -283,6 +283,24 @@ class TestDiskNoteStorage(unittest.TestCase):
         reread = self.storage.get_note("wiki/Crlf")
         self.assertEqual(reread.frontmatter["description"], "Edited")
 
+    def test_an_update_keeps_crlf_and_the_blank_line_after_the_fence(self):
+        """C31: editing frontmatter rewrites no body line and leaves the attestation bound."""
+        from cadabby.ops import update_note, verify_note
+
+        note_path = self.vault_dir / "wiki" / "Crlf.md"
+        text = (
+            "---\ntype: concept\ntitle: Crlf\ndescription: Windows line endings\n"
+            "status: active\n---\n\n# Crlf\n\nBody.\n"
+        )
+        note_path.write_bytes(text.replace("\n", "\r\n").encode("utf-8"))
+        verify_note(self.vault, "wiki/Crlf", actor="agent:test")
+        update_note(self.vault, "wiki/Crlf", frontmatter_patch={"description": "Edited"}, actor="agent:test")
+
+        raw = note_path.read_bytes().decode("utf-8")
+        self.assertNotIn("\n", raw.replace("\r\n", ""), "every line ending is still CRLF")
+        self.assertTrue(raw.endswith("---\r\n\r\n# Crlf\r\n\r\nBody.\r\n"), raw)
+        self.assertEqual(self.storage.get_note("wiki/Crlf").trust_tier, "machine-confirmed")
+
 
 class TestFileLedger(unittest.TestCase):
     def setUp(self):

@@ -438,5 +438,60 @@ class TestWriterParserRoundTrip(unittest.TestCase):
             serialize_frontmatter({"verified": [{}]})
 
 
+class TestParserStrictness(unittest.TestCase):
+    """Inputs the restricted subset must reject or read literally (§3.2, C64)."""
+
+    def test_an_empty_key_still_counts_for_duplicate_detection(self):
+        with self.assertRaises(FrontmatterParseError) as ctx:
+            parse_frontmatter("---\ntitle:\ntitle: second\n---\n")
+        self.assertIn("Duplicate", str(ctx.exception))
+
+    def test_dash_without_space_is_not_a_sequence_item(self):
+        with self.assertRaises(FrontmatterParseError):
+            parse_frontmatter("---\ntags:\n  -foo\n---\n")
+        fm, _ = parse_frontmatter("---\ntags:\n  - foo\n---\n")
+        self.assertEqual(fm["tags"], ["foo"])
+
+    def test_an_apostrophe_inside_a_bare_scalar_does_not_hide_the_comment(self):
+        fm, _ = parse_frontmatter("---\ntitle: it's mine # a comment\n---\n")
+        self.assertEqual(fm["title"], "it's mine")
+        self.assertEqual(split_comment('title: "a # b" # c'), ('title: "a # b" ', "# c"))
+        self.assertEqual(split_comment("  - by: 'x # y' # z"), ("  - by: 'x # y' ", "# z"))
+
+    def test_actor_and_timestamp_reject_a_trailing_newline(self):
+        from cadabby.okf import is_valid_actor, is_valid_timestamp
+
+        self.assertTrue(is_valid_actor("human:bob"))
+        self.assertFalse(is_valid_actor("human:bob\n"))
+        self.assertTrue(is_valid_timestamp("2026-01-02T03:04:05Z"))
+        self.assertFalse(is_valid_timestamp("2026-01-02T03:04:05Z\n"))
+
+
+class TestWriterQuotesYamlLookalikes(unittest.TestCase):
+    """A string that other YAML readers would type as non-string is written quoted (C64)."""
+
+    def test_core_schema_lookalikes_are_quoted_and_round_trip(self):
+        for value in ("3", "-7", "1.5", "1e3", ".inf", "-.INF", ".NaN", "0x1F", "0o17", "TRUE", "False",
+                      "Null", "NULL", "~", "Yes", "off", "2024-01-31", "1_000"):
+            with self.subTest(value=value):
+                text = serialize_frontmatter({"title": value})
+                self.assertIn(f'title: "{value}"', text)
+                self.assertEqual(parse_frontmatter(text)[0]["title"], value)
+
+    def test_ordinary_words_and_versions_stay_bare(self):
+        for value in ("concept", "v1.5", "sqlite", "raw/paper.pdf", "e5", "nullable", "trueish"):
+            with self.subTest(value=value):
+                self.assertIn(f"title: {value}\n", serialize_frontmatter({"title": value}))
+
+
+class TestWriterBodyFidelity(unittest.TestCase):
+    def test_leading_blank_lines_are_kept(self):
+        self.assertEqual(serialize_frontmatter({"title": "x"}, "\n# T\n"), "---\ntitle: x\n---\n\n# T\n")
+
+    def test_crlf_newline_applies_to_the_whole_file(self):
+        out = serialize_frontmatter({"title": "x"}, "# T\nbody\r\n", newline="\r\n")
+        self.assertEqual(out, "---\r\ntitle: x\r\n---\r\n# T\r\nbody\r\n")
+
+
 if __name__ == "__main__":
     unittest.main()
