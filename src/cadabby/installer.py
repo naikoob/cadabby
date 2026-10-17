@@ -6,6 +6,7 @@ Conforms strictly to Cadabby Technical Specification §7.6.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -30,7 +31,7 @@ from cadabby.constants import (
     LEDGER_HEADER,
 )
 from cadabby.errors import EXIT_ENVIRONMENT, EXIT_OK, INVALID_ARGUMENT, CadabbyError
-from cadabby.fsutil import atomic_write
+from cadabby.fsutil import atomic_replace_checked, atomic_write, compute_bytes_sha256
 from cadabby.vault import obsidian_template_dir
 
 
@@ -230,7 +231,7 @@ def init_vault(
     else:
         cfg_data = json.loads((vault_tpl / FILE_CONFIG).read_text("utf-8"))
         cfg_data["vault_name"] = name
-        atomic_write(cfg_dst, json.dumps(cfg_data, indent=2) + "\n")
+        atomic_write(cfg_dst, _dump_json_like(cfg_data))
     for filename in _USER_OWNED_FILES:
         write_once(vault_tpl / filename, root / filename)
 
@@ -492,7 +493,7 @@ def install_antigravity(
 
             if entry_stale:
                 cur_cfg.setdefault("mcpServers", {})["cadabby"] = desired_entry
-                atomic_write(mcp_file, json.dumps(cur_cfg, indent=2) + "\n")
+                atomic_write(mcp_file, _dump_json_like(cur_cfg, mcp_file.read_text("utf-8")))
             return True, f"Configured Antigravity plugin at {dest} (vault: {resolved_vault})"
         else:
             if not force:
@@ -539,18 +540,42 @@ def uninstall_antigravity(
     return True, f"Removed Antigravity plugin from {dest}"
 
 
-def _read_claude_config(dest: Path) -> tuple[dict[str, Any] | None, str, str | None]:
-    """Read and validate a Claude MCP config file, returning (cfg_data, raw_text, error)."""
+def _dump_json_like(data: Any, original: str = "") -> str:
+    """Serialize `data` in the style `original` used: indent, compactness, trailing newline, raw non-ASCII.
+
+    `~/.claude.json` belongs to the user and to Claude Code (§7.6), so a merge
+    must not reformat what it did not change. For files written by
+    JavaScript's JSON.stringify this round-trips byte for byte apart from the
+    edited key: both print numbers in their shortest form. A brand-new file
+    gets two-space indent and a trailing newline.
+    """
+    stripped = original.strip()
+    if stripped and "\n" not in stripped:
+        text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    else:
+        match = re.search(r"\n([ \t]+)\S", original)
+        indent: str | int = match.group(1) if match else 2
+        text = json.dumps(data, ensure_ascii=False, indent=indent)
+    return text + ("\n" if not original or original.endswith("\n") else "")
+
+
+def _read_claude_config(dest: Path) -> tuple[dict[str, Any] | None, str, str | None, str | None]:
+    """Read and validate a Claude MCP config file: (cfg_data, raw_text, error, token).
+
+    `token` is the sha256 of the bytes read, so the write can refuse to replace
+    a file another program (Claude Code rewrites it constantly) changed since.
+    """
     if not dest.exists():
-        return {}, "", None
+        return {}, "", None, None
     try:
-        raw = dest.read_text("utf-8")
+        data = dest.read_bytes()
+        raw = data.decode("utf-8")
         cfg = json.loads(raw) if raw.strip() else {}
     except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
-        return None, "", f"Failed to parse existing JSON at {dest}: {e}. Aborting."
+        return None, "", f"Failed to parse existing JSON at {dest}: {e}. Aborting.", None
     if not isinstance(cfg, dict) or not isinstance(cfg.get("mcpServers", {}), dict):
-        return None, "", f"Unexpected structure in {dest}: expected an object with 'mcpServers'. Aborting."
-    return cfg, raw, None
+        return None, "", f"Unexpected structure in {dest}: expected an object with 'mcpServers'. Aborting.", None
+    return cfg, raw, None, compute_bytes_sha256(data)
 
 
 def install_claude(
@@ -564,7 +589,7 @@ def install_claude(
     dest = (dest_path or default_claude_path(vault_path, is_global)).resolve()
     if (problem := _wrong_kind(dest, "file")) is not None:
         return False, problem
-    cfg_data, existing_content, err = _read_claude_config(dest)
+    cfg_data, existing_content, err, token = _read_claude_config(dest)
     if err is not None or cfg_data is None:
         return False, err or ""
 
@@ -580,7 +605,7 @@ def install_claude(
         return False, f"Conflict: mcpServers.cadabby already defined in {dest}. Use --force to overwrite."
 
     mcp_servers["cadabby"] = desired_entry
-    new_content = json.dumps(cfg_data, indent=2) + "\n"
+    new_content = _dump_json_like(cfg_data, existing_content)
 
     if existing_content == new_content:
         return True, f"Claude configuration in {dest} already up-to-date (unchanged)."
@@ -589,7 +614,7 @@ def install_claude(
         return True, f"[dry-run] Would update {dest} with mcpServers.cadabby"
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write(dest, new_content)
+    atomic_replace_checked(dest, new_content, expected_hash=token)
     vault_msg = f" (vault: {Path(vault_path).resolve()})" if vault_path else ""
     verb = "Re-bound stale Cadabby MCP entry in" if rebinding else "Registered Cadabby MCP server in"
     return True, f"{verb} {dest}{vault_msg}"
@@ -600,6 +625,7 @@ def uninstall_claude(
     vault_path: Path | str | None = None,
     is_global: bool = False,
     dry_run: bool = False,
+    force: bool = False,
 ) -> tuple[bool, str]:
     """Uninstall Cadabby MCP entry from Claude configuration, preserving other keys."""
     dest = (dest_path or default_claude_path(vault_path, is_global)).resolve()
@@ -608,7 +634,7 @@ def uninstall_claude(
     if not dest.exists():
         return True, f"Claude configuration not found at {dest} (nothing to uninstall)."
 
-    cfg_data, existing_content, err = _read_claude_config(dest)
+    cfg_data, existing_content, err, token = _read_claude_config(dest)
     if err is not None or cfg_data is None:
         return False, err or ""
     if not existing_content.strip():
@@ -617,14 +643,18 @@ def uninstall_claude(
     mcp_servers = cfg_data.get("mcpServers", {})
     if "cadabby" not in mcp_servers:
         return True, f"No Cadabby MCP entry in {dest} (nothing to uninstall)."
+    if not _is_cadabby_entry(mcp_servers["cadabby"]) and not force:
+        # Install refused this entry as a conflict; uninstall must not delete it
+        # either (§7.6: --uninstall removes exactly what install added).
+        return False, f"Conflict: mcpServers.cadabby in {dest} was not written by Cadabby. Use --force to remove it."
 
     del mcp_servers["cadabby"]
-    new_content = json.dumps(cfg_data, indent=2) + "\n"
+    new_content = _dump_json_like(cfg_data, existing_content)
 
     if dry_run:
         return True, f"[dry-run] Would remove mcpServers.cadabby from {dest}"
 
-    atomic_write(dest, new_content)
+    atomic_replace_checked(dest, new_content, expected_hash=token)
     return True, f"Removed Cadabby MCP entry from {dest}"
 
 
@@ -687,6 +717,7 @@ def run_install(
                 vault_path=vault_path,
                 is_global=is_global,
                 dry_run=dry_run,
+                force=force,
             )
         else:
             ok, msg = install_claude(

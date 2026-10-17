@@ -261,6 +261,64 @@ class TestMcpServer(unittest.TestCase):
                 idx = line_end + 1
         return framed if with_framing else [msg for _, msg in framed]
 
+    def test_oversized_frame_is_refused_and_server_keeps_serving(self):
+        """§5.2, §10 C62: a message over the cap is answered -32600 and drained; the next one is served."""
+        from unittest import mock
+
+        ping = json.dumps({"jsonrpc": "2.0", "id": 7, "method": "ping"}).encode("utf-8")
+        big = b'{"jsonrpc": "2.0", "id": 1, "method": "ping", "pad": "' + b"x" * 4000 + b'"}'
+        with mock.patch("cadabby.mcp.MAX_MESSAGE_BYTES", 1024):
+            for label, stream in (
+                ("content-length", f"Content-Length: {len(big)}\r\n\r\n".encode() + big + ping + b"\n"),
+                ("ndjson", big + b"\n" + ping + b"\n"),
+            ):
+                with self.subTest(framing=label):
+                    replies = self._drive_server_raw(stream)
+                    self.assertEqual(replies[0]["error"]["code"], -32600)
+                    self.assertIn("exceeds", replies[0]["error"]["message"])
+                    self.assertEqual(replies[1], {"jsonrpc": "2.0", "id": 7, "result": {}})
+
+            # A length far past what ever arrives is answered at once, not allocated (the reviewer's repro).
+            replies = self._drive_server_raw(b"Content-Length: 99999999999999\r\n\r\n{}")
+            self.assertEqual(replies[0]["error"]["code"], -32600)
+
+    def test_null_required_argument_is_missing(self):
+        """§5.1, §10 C62: a JSON null for a required argument is reported missing at the boundary, for every tool."""
+        from cadabby.mcp import TOOLS
+
+        for tool in TOOLS:
+            for key in tool["inputSchema"].get("required", ()):
+                with self.subTest(tool=tool["name"], arg=key):
+                    args = {k: "x" for k in tool["inputSchema"]["required"]} | {key: None}
+                    res = self.server.handle_tools_call(tool["name"], args)
+                    self.assertTrue(res["isError"])
+                    error = json.loads(res["content"][0]["text"])["error"]
+                    self.assertEqual(error["code"], "INVALID_ARGUMENT")
+                    self.assertIn(f"Missing required argument(s): {key}", error["message"])
+
+    def test_non_ascii_client_name_yields_a_valid_actor(self):
+        """§3.4, §10 C62: the client name is reduced to the ASCII actor grammar; malformed clientInfo is tolerated."""
+        self.server.handle_initialize({"clientInfo": {"name": "Café Agent"}})
+        self.assertEqual(self.server.client_id, "agent:Caf--Agent")
+        res = self.server.handle_tools_call("vault_verify_note", {"cid": "wiki/flash-attention"})
+        self.assertFalse(res["isError"], res)
+
+        for params in ({"clientInfo": "not-an-object"}, {"clientInfo": {"name": ["x"]}}, None):
+            with self.subTest(params=params):
+                self.server.handle_initialize(params)
+                self.assertRegex(self.server.client_id, r"^agent:[A-Za-z0-9._-]+$")
+
+    def test_scaffold_refuses_empty_core_fields_over_mcp(self):
+        """§5.1, §10 C62: an empty title, type or description is refused and nothing is written."""
+        for field in ("title", "type", "description"):
+            with self.subTest(field=field):
+                args = {"title": "T", "type": "concept", "description": "d", field: ""}
+                res = self.server.handle_tools_call("vault_scaffold_note", args)
+                self.assertTrue(res["isError"])
+                self.assertEqual(json.loads(res["content"][0]["text"])["error"]["code"], "INVALID_ARGUMENT")
+        self.assertFalse((self.vault_root / "wiki" / "untitled.md").exists())
+        self.assertFalse((self.vault_root / "wiki" / "t.md").exists())
+
     def test_newline_delimited_request_gets_newline_delimited_reply(self):
         """§10 C27. The MCP stdio standard framing is answered in kind, with no header."""
         req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "t"}}})

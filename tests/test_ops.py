@@ -279,6 +279,22 @@ class TestOps(unittest.TestCase):
         self.assertEqual(note.frontmatter["zz_note"], payload)
         self.assertFalse(any(str(v.get("by", "")).startswith("human:") for v in note.frontmatter["verified"]))
 
+    def test_scaffold_refuses_empty_core_fields_and_invalid_actor(self):
+        """§3.4, §5.1, §10 C62: no lint-failing note and no grammar-violating generated.by are ever written."""
+        cases = [
+            dict(title="", type_="concept", description="d"),
+            dict(title="   ", type_="concept", description="d"),
+            dict(title="T", type_="concept", description=""),
+            dict(title="T", type_="concept", description="d", actor="agent:Café-Agent"),
+            dict(title="T", type_="concept", description="d", actor="foo bar"),
+        ]
+        for kwargs in cases:
+            with self.subTest(**kwargs):
+                with self.assertRaises(ValueError):
+                    scaffold_note(self.vault, **kwargs)
+        self.assertFalse((self.vault_root / "wiki" / "untitled.md").exists())
+        self.assertFalse((self.vault_root / "wiki" / "t.md").exists())
+
     def _readme_hubs(self) -> None:
         for rel in ("customers/acme/README.md", "projects/apollo/README.md"):
             path = self.vault_root / rel

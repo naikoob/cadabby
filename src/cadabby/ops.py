@@ -18,7 +18,7 @@ from urllib.parse import quote
 
 from cadabby.adapters.disk_storage import DiskNoteStorage, FileLedger
 from cadabby.cache import VaultCache
-from cadabby.constants import DIR_RAW, DIR_WIKI, FILE_AGENTS, TEMPLATE_TITLE_PLACEHOLDER
+from cadabby.constants import ACTOR_PATTERN, DIR_RAW, DIR_WIKI, FILE_AGENTS, TEMPLATE_TITLE_PLACEHOLDER
 from cadabby.domain import (
     Note,
     VerificationResult,
@@ -47,7 +47,7 @@ from cadabby.graph import (
     split_link_target_and_anchor,
     strip_link_wrapper,
 )
-from cadabby.okf import utc_now_iso
+from cadabby.okf import is_valid_actor, utc_now_iso
 from cadabby.ports import IndexCachePort, LedgerPort, NoteStoragePort
 from cadabby.vault import Vault, cid_to_path, normalize_rel, note_path_violation, path_to_cid, path_to_layer
 
@@ -279,8 +279,14 @@ class ScaffoldNoteUseCase:
         for name, value in (("title", title), ("description", description)):
             if not isinstance(value, str):
                 raise ValueError(f"Note {name} must be a string")
+            if not value.strip():
+                # Lint would report the note FIELD_MISSING the moment it exists (§6.3).
+                raise ValueError(f"Note {name} must not be empty")
         if path is not None and not isinstance(path, str):
             raise ValueError("Note path must be a string")
+        if not is_valid_actor(actor):
+            # generated.by is attribution like verified[].by, so the same grammar binds (§3.4).
+            raise ValueError(f"Invalid actor format '{actor}'. Must match {ACTOR_PATTERN}")
 
         if template:
             if body.strip():

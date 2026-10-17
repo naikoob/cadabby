@@ -97,7 +97,7 @@ TOOLS = [
             "properties": {
                 "cids": {
                     "type": "array",
-                    "items": {"type": "string"},
+                    "items": {"type": "string", "minLength": 1},
                     "minItems": 1,
                     "description": (
                         "List of note CIDs, bare stems (e.g. 'raft-consensus'), relative paths, or wikilinks "
@@ -144,9 +144,13 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "title": {"type": "string", "description": "Title of the note"},
-                "type": {"type": "string", "description": "Note type (e.g. 'concept', 'entity', or domain-specific type)"},
-                "description": {"type": "string", "description": "One-line descriptive summary"},
+                "title": {"type": "string", "minLength": 1, "description": "Title of the note"},
+                "type": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Note type (e.g. 'concept', 'entity', or domain-specific type)",
+                },
+                "description": {"type": "string", "minLength": 1, "description": "One-line descriptive summary"},
                 "domain": {"type": "string", "default": "wiki", "description": "Cognitive domain (default: 'wiki')"},
                 "path": {
                     "type": "string",
@@ -403,10 +407,11 @@ class McpServer:
 
     def handle_initialize(self, params: dict[str, Any]) -> dict[str, Any]:
         """Negotiate capabilities and identify client."""
-        client_info = params.get("clientInfo", {})
-        client_name = client_info.get("name", "unknown")
-        # Sanitize client name for actor string
-        safe_name = re.sub(r"[^\w.-]", "-", client_name).strip("-") or "client"
+        client_info = params.get("clientInfo") if isinstance(params, dict) else None
+        client_name = client_info.get("name") if isinstance(client_info, dict) else None
+        # The actor grammar is ASCII (§3.4). `\w` admitted letters like 'é',
+        # minting an actor that verify then refused on every call.
+        safe_name = re.sub(r"[^A-Za-z0-9._-]", "-", str(client_name or "unknown")).strip("-") or "client"
         self.client_id = f"agent:{safe_name}"
 
         return {
@@ -538,8 +543,9 @@ class McpServer:
         # which raise KeyError and classify as INTERNAL -- telling a caller
         # who omitted a required field that the server has a bug. The
         # requirement is already declared in each tool's inputSchema, so
-        # reading it back is the only way the two cannot drift.
-        missing = [k for k in _required_args(name) if k not in args]
+        # reading it back is the only way the two cannot drift. A JSON null
+        # means "not given" (§5.1), for required arguments too.
+        missing = [k for k in _required_args(name) if args.get(k) is None]
         if missing:
             return _tool_error(
                 name,
@@ -690,6 +696,31 @@ class McpServer:
 _FRAMING_NDJSON = "ndjson"
 _FRAMING_CONTENT_LENGTH = "content-length"
 
+# One JSON-RPC message, in either framing (§5.2). Far above any real tool call;
+# its job is to keep a hostile or corrupt length from allocating without bound.
+MAX_MESSAGE_BYTES = 16 * 1024 * 1024
+_DISCARD_CHUNK = 64 * 1024
+
+
+def _discard(n: int) -> bool:
+    """Read and drop `n` bytes of stdin in bounded chunks; False if stdin ends first."""
+    while n > 0:
+        chunk = sys.stdin.buffer.read(min(n, _DISCARD_CHUNK))
+        if not chunk:
+            return False
+        n -= len(chunk)
+    return True
+
+
+def _drain_line() -> bool:
+    """Drop the rest of an over-long line through its newline; False if stdin ends first."""
+    while True:
+        chunk = sys.stdin.buffer.readline(_DISCARD_CHUNK)
+        if not chunk:
+            return False
+        if chunk.endswith(b"\n"):
+            return True
+
 
 def _write_framed(resp: dict[str, Any], framing: str) -> None:
     """Emit a JSON-RPC response in the framing the request arrived in."""
@@ -718,10 +749,17 @@ def _is_notification_only_batch(payload: Any) -> bool:
 
 def _iter_framed_messages() -> Iterator[tuple[dict[str, Any], str]]:
     """Yield `(req_dict, framing)` pairs from `sys.stdin.buffer`, emitting framing errors inline."""
+    too_large = f"Invalid Request: message exceeds {MAX_MESSAGE_BYTES} bytes"
     while True:
-        raw_line = sys.stdin.buffer.readline()
+        raw_line = sys.stdin.buffer.readline(MAX_MESSAGE_BYTES + 1)
         if not raw_line:
             break
+        if len(raw_line) > MAX_MESSAGE_BYTES and not raw_line.endswith(b"\n"):
+            # An NDJSON line past the cap: drain it to its newline, then refuse it.
+            if not _drain_line():
+                break
+            _write_framed_error(-32600, too_large, _FRAMING_NDJSON)
+            continue
 
         line = raw_line.decode("utf-8", errors="replace").strip()
         if not line:
@@ -742,6 +780,14 @@ def _iter_framed_messages() -> Iterator[tuple[dict[str, Any], str]]:
                     break
             if not hdr_bytes:
                 break
+            if length > MAX_MESSAGE_BYTES:
+                # Reading it whole would allocate whatever the header claims.
+                # Answer first (the body may never fully arrive), then read it
+                # away in bounded chunks and keep the session alive.
+                _write_framed_error(-32600, too_large, framing)
+                if not _discard(length):
+                    break
+                continue
             payload_bytes = sys.stdin.buffer.read(length)
             if len(payload_bytes) < length:
                 break

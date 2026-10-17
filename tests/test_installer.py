@@ -151,6 +151,59 @@ class TestInstaller(unittest.TestCase):
         self.assertTrue(ok)
         self.assertFalse(empty.exists())
 
+    def test_claude_uninstall_leaves_a_foreign_entry_without_force(self):
+        """§7.6, §10 C22: --uninstall removes only what install added; a foreign entry needs --force."""
+        cfg = self.root / "foreign.json"
+        original = json.dumps(
+            {"mcpServers": {"cadabby": {"command": "/opt/mytools/run-my-own-cadabby-fork.sh", "args": ["serve"]}}},
+            indent=2,
+        ) + "\n"
+        cfg.write_text(original, "utf-8")
+        ok, msg = uninstall_claude(dest_path=cfg)
+        self.assertFalse(ok)
+        self.assertIn("not written by Cadabby", msg)
+        self.assertEqual(cfg.read_text("utf-8"), original)
+        self.assertEqual(run_install(claude=True, uninstall=True, dest_path=cfg, force=True), 0)
+        self.assertNotIn("cadabby", json.loads(cfg.read_text("utf-8"))["mcpServers"])
+
+    def test_claude_install_preserves_style_and_non_ascii(self):
+        """§7.6, §10 C22: a merge changes only the cadabby entry -- indent, raw non-ASCII and newline stay."""
+        projects = {"/home/u/café": {"allowedTools": [], "n": 1.5}}
+        for label, dump in (
+            ("4-space, newline", lambda d: json.dumps(d, indent=4, ensure_ascii=False) + "\n"),
+            ("tab, no newline", lambda d: json.dumps(d, indent="\t", ensure_ascii=False)),
+            ("compact", lambda d: json.dumps(d, separators=(",", ":"), ensure_ascii=False)),
+        ):
+            with self.subTest(style=label):
+                cfg = self.root / f"style-{label.split(',')[0]}.json"
+                cfg.write_text(dump({"projects": projects, "mcpServers": {}}), "utf-8")
+                ok, _ = install_claude(dest_path=cfg)
+                self.assertTrue(ok)
+                expected = {"projects": projects, "mcpServers": {"cadabby": make_mcp_server_entry(None)}}
+                self.assertEqual(cfg.read_text("utf-8"), dump(expected))
+                self.assertIn("café", cfg.read_text("utf-8"))
+
+    def test_claude_install_refuses_a_concurrent_rewrite(self):
+        """§7.6, §8, §10 C22: if Claude Code rewrites the file mid-install, its bytes survive and the install is a retryable conflict."""
+        from unittest import mock
+
+        import cadabby.installer as installer
+        from cadabby.fsutil import VaultConflictError
+
+        cfg = self.root / "busy.json"
+        cfg.write_text('{\n  "mcpServers": {}\n}\n', "utf-8")
+        concurrent = '{\n  "mcpServers": {},\n  "lastSession": "written by Claude Code"\n}\n'
+        real_dump = installer._dump_json_like
+
+        def dump_while_claude_writes(data, original=""):
+            cfg.write_text(concurrent, "utf-8")  # Claude Code saves between our read and our write
+            return real_dump(data, original)
+
+        with mock.patch.object(installer, "_dump_json_like", dump_while_claude_writes):
+            with self.assertRaises(VaultConflictError):
+                install_claude(dest_path=cfg)
+        self.assertEqual(cfg.read_text("utf-8"), concurrent)
+
     def test_run_install_all_and_uninstall(self):
         claude_cfg = self.root / "run_all.json"
         claude_cfg.write_text('{"existing": true}\n', "utf-8")
