@@ -15,7 +15,7 @@ from typing import Any, Self
 from cadabby import __version__
 from cadabby.cache import VaultCache
 from cadabby.constants import DIR_WIKI
-from cadabby.errors import INVALID_ARGUMENT, UNKNOWN_TOOL, HumanAttestationRefusedError, classify
+from cadabby.errors import HUMAN_ATTESTATION_REFUSED, INVALID_ARGUMENT, UNKNOWN_TOOL, classify
 from cadabby.lint import status_report
 from cadabby.ops import ground_notes, move_note, scaffold_note, update_note, verify_note
 from cadabby.vault import Vault, path_to_cid
@@ -297,6 +297,11 @@ TOOLS = [
     },
 ]
 
+# Unknown keys are refused, not ignored (§5.1): `qurey` or `patch` silently
+# dropped turns a typo into a call that "succeeds" doing something else.
+for _tool in TOOLS:
+    _tool["inputSchema"]["additionalProperties"] = False  # type: ignore[index]
+
 _REQUIRED_ARGS: dict[str, tuple[str, ...]] = {
     t["name"]: tuple(t["inputSchema"].get("required", ())) for t in TOOLS  # type: ignore[index]
 }
@@ -438,7 +443,7 @@ class McpServer:
             trust=args.get("trust"),
             tag=args.get("tag"),
             domain=args.get("domain"),
-            limit=args.get("limit", 20),
+            limit=20 if args.get("limit") is None else args["limit"],
         )
         return _tool_ok([r.to_dict() for r in res])
 
@@ -486,12 +491,6 @@ class McpServer:
         return _tool_ok(f"Updated note: {rel}")
 
     def _tool_verify_note(self, args: dict[str, Any]) -> dict[str, Any]:
-        actor_param = args.get("actor") or args.get("by")
-        if actor_param and str(actor_param).startswith("human:"):
-            # Defense in depth: the server stamps its own client id regardless,
-            # but an explicit human:* request is refused rather than ignored.
-            raise HumanAttestationRefusedError("Verification by human:* cannot be performed over MCP.")
-
         res = verify_note(
             vault=self.vault,
             cid_or_path=args["cid"],
@@ -561,6 +560,26 @@ class McpServer:
                 message += f" -- retired in 0.4.0; call {replacement} instead"
             return _tool_error(name, UNKNOWN_TOOL, message, retryable=False)
 
+        # Defense in depth: the server stamps its own client id regardless, but
+        # an explicit human:* request is refused as such (§3.5), ahead of the
+        # unknown-argument check that would otherwise report it as a typo.
+        actor_param = args.get("actor") or args.get("by")
+        if actor_param and str(actor_param).startswith("human:"):
+            return _tool_error(
+                name,
+                HUMAN_ATTESTATION_REFUSED,
+                "Verification by human:* cannot be performed over MCP.",
+                retryable=False,
+            )
+        unknown = sorted(k for k in args if k not in _PROPERTIES[name])
+        if unknown:
+            return _tool_error(
+                name,
+                INVALID_ARGUMENT,
+                f"Unknown argument(s): {', '.join(unknown)}. Accepted: {', '.join(sorted(_PROPERTIES[name]))}",
+                retryable=False,
+            )
+
         # Types come from the same declaration. A JSON null means "not given".
         for key, value in args.items():
             schema = _PROPERTIES[name].get(key)
@@ -623,6 +642,8 @@ class McpServer:
         if uri.startswith("domain://") and uri.endswith("/directives"):
             domain_name = uri[len("domain://") : -len("/directives")].strip("/")
             domain_def = domains.get(domain_name)
+            if domain_def is None:
+                raise ValueError(f"Unknown domain '{domain_name}' (see vault://domains)")
             if domain_def is not None and domain_def.directives_markdown:
                 return {
                     "contents": [
@@ -658,6 +679,10 @@ class McpServer:
 
         resp: dict[str, Any] = {"jsonrpc": "2.0", "id": req_id}
 
+        if not isinstance(method, str):
+            resp["error"] = {"code": -32600, "message": "Invalid Request: 'method' must be a string"}
+            return resp
+
         if method == "initialize":
             try:
                 resp["result"] = self.handle_initialize(params)
@@ -668,11 +693,11 @@ class McpServer:
                 resp["result"] = self.handle_tools_list()
             except Exception as e:  # noqa: BLE001
                 resp["error"] = {"code": -32603, "message": f"Internal error during tools/list: {e!s}"}
+        elif method == "tools/call" and not isinstance(params.get("name"), str):
+            resp["error"] = {"code": -32602, "message": "Invalid params: 'name' must be a string"}
         elif method == "tools/call":
             try:
-                resp["result"] = self.handle_tools_call(
-                    params.get("name", ""), params.get("arguments")
-                )
+                resp["result"] = self.handle_tools_call(params["name"], params.get("arguments"))
             except Exception as e:  # noqa: BLE001
                 resp["error"] = {"code": -32603, "message": f"Internal error during tools/call: {e!s}"}
         elif method == "resources/list":
@@ -680,6 +705,8 @@ class McpServer:
                 resp["result"] = self.handle_resources_list()
             except Exception as e:  # noqa: BLE001
                 resp["error"] = {"code": -32603, "message": f"Internal error during resources/list: {e!s}"}
+        elif method == "resources/read" and not isinstance(params.get("uri"), str):
+            resp["error"] = {"code": -32602, "message": "Invalid params: 'uri' must be a string"}
         elif method == "resources/read":
             try:
                 resp["result"] = self.handle_resources_read(params.get("uri", ""))
@@ -693,6 +720,8 @@ class McpServer:
         return resp
 
 
+# A header line (`Name: value`), as opposed to a JSON message, which opens with `{` or `[`.
+_RE_HEADER = re.compile(r"[A-Za-z][A-Za-z0-9-]*:")
 _FRAMING_NDJSON = "ndjson"
 _FRAMING_CONTENT_LENGTH = "content-length"
 
@@ -765,20 +794,28 @@ def _iter_framed_messages() -> Iterator[tuple[dict[str, Any], str]]:
         if not line:
             continue
 
-        if line.lower().startswith("content-length:"):
+        if _RE_HEADER.match(line):
+            # An LSP-style header block. Content-Length is required but need
+            # not come first: `Content-Type` is just as legal a first header.
             framing = _FRAMING_CONTENT_LENGTH
-            try:
-                length = int(line.split(":", 1)[1].strip())
-            except ValueError:
-                length = -1
-            if length < 0:
-                _write_framed_error(-32700, "Parse error: malformed Content-Length header", framing)
-                break
+            headers = [line]
             while True:
-                hdr_bytes = sys.stdin.buffer.readline()
+                hdr_bytes = sys.stdin.buffer.readline(_DISCARD_CHUNK)
                 if hdr_bytes in (b"\r\n", b"\n", b""):
                     break
+                headers.append(hdr_bytes.decode("utf-8", errors="replace").strip())
             if not hdr_bytes:
+                break
+            length = -1
+            for header in headers:
+                key, _, value = header.partition(":")
+                if key.strip().lower() == "content-length":
+                    try:
+                        length = int(value.strip())
+                    except ValueError:
+                        length = -1
+            if length < 0:
+                _write_framed_error(-32700, "Parse error: missing or malformed Content-Length header", framing)
                 break
             if length > MAX_MESSAGE_BYTES:
                 # Reading it whole would allocate whatever the header claims.

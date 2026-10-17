@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+from pathlib import Path
 from dataclasses import dataclass
 
 from cadabby.constants import ACTOR_PATTERN
@@ -28,18 +29,36 @@ class AuditFinding:
     message: str
 
 
-def is_git_repository(vault: Vault) -> bool:
-    """Return True if vault directory is inside a Git worktree."""
+# Per git call. A hung git (a credential prompt, a stale index.lock on a
+# network share) must not hang `cadabby audit` -- or a pre-commit hook -- forever.
+GIT_TIMEOUT_SECONDS = 30
+
+
+class GitTimeoutError(OSError):
+    """A git subprocess exceeded GIT_TIMEOUT_SECONDS (IO_ERROR, §5.4)."""
+
+
+def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    """Run git with a timeout; GitTimeoutError if it does not finish."""
     try:
-        res = subprocess.run(
-            ["git", "rev-parse", "--is-inside-work-tree"],
-            cwd=vault.root,
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd,
             capture_output=True,
             text=True,
             check=False,
+            timeout=GIT_TIMEOUT_SECONDS,
         )
+    except subprocess.TimeoutExpired as e:
+        raise GitTimeoutError(f"git {args[0]} did not finish within {GIT_TIMEOUT_SECONDS}s") from e
+
+
+def is_git_repository(vault: Vault) -> bool:
+    """Return True if vault directory is inside a Git worktree."""
+    try:
+        res = _git(["rev-parse", "--is-inside-work-tree"], vault.root)
         return res.returncode == 0 and res.stdout.strip() == "true"
-    except (FileNotFoundError, OSError):
+    except OSError:  # no git binary, or it hung: treated as no repository (a notice)
         return False
 
 
@@ -95,15 +114,11 @@ def run_vault_audit(vault: Vault, require_signed: bool = False) -> tuple[list[Au
             allowed_emails = identities.get(actor, [])
 
             # Run git blame --porcelain for this specific line
-            cmd = ["git", "blame", "--porcelain", f"-L{line_no},{line_no}", "--", rel_path]
             try:
-                blame_res = subprocess.run(
-                    cmd,
-                    cwd=vault.root,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
+                blame_res = _git(["blame", "--porcelain", f"-L{line_no},{line_no}", "--", rel_path], vault.root)
+            except GitTimeoutError:
+                # Skipping would let an endorsement pass unchecked: fail the audit instead.
+                raise
             except OSError:
                 continue
 
@@ -169,13 +184,7 @@ def run_vault_audit(vault: Vault, require_signed: bool = False) -> tuple[list[Au
             # anything else -- 'N' unsigned, 'B' bad, 'E' unverifiable -- is flagged.
             if require_signed and commit_hash and commit_hash != UNCOMMITTED_SHA:
                 try:
-                    sig_res = subprocess.run(
-                        ["git", "log", "-1", "--format=%G?", commit_hash, "--"],
-                        cwd=vault.root,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
+                    sig_res = _git(["log", "-1", "--format=%G?", commit_hash, "--"], vault.root)
                     status_flag = sig_res.stdout.strip()
                     if status_flag not in ("G", "U"):
                         findings.append(
@@ -188,6 +197,8 @@ def run_vault_audit(vault: Vault, require_signed: bool = False) -> tuple[list[Au
                                 message=f"Commit {commit_hash[:8]} carrying '{actor}' attestation is unsigned (status={status_flag})",
                             )
                         )
+                except GitTimeoutError:
+                    raise
                 except OSError:
                     pass
 

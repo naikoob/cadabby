@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import re
 import secrets
 import sys
 from pathlib import Path
@@ -214,12 +215,20 @@ def _parse_json_flag(raw: str, flag_name: str, expected_type: type, type_label: 
     return parsed
 
 
+# The heading runs to the first ':' not written as '\:'.
+_RE_SECTION_ARG = re.compile(r"((?:\\:|[^:])*):?(.*)", re.DOTALL)
+
+
 def _parse_section_arg(raw: str | None) -> tuple[str, str] | None:
-    """Split a CLI 'Heading:Body' section argument into (heading, body)."""
+    """Split a CLI 'Heading:Body' section argument into (heading, body).
+
+    A heading that itself contains ':' escapes it: `"Q\\: why:Because."`.
+    """
     if not raw:
         return None
-    heading, _, body = raw.partition(":")
-    return (heading, body)
+    m = _RE_SECTION_ARG.fullmatch(raw)
+    assert m is not None  # the pattern matches any string
+    return (m.group(1).replace("\\:", ":"), m.group(2))
 
 
 def cmd_update(args: argparse.Namespace) -> int:
@@ -436,27 +445,28 @@ def cmd_audit(args: argparse.Namespace) -> int:
     vault = resolve_cli_vault(args)
     findings, notice = run_vault_audit(vault, require_signed=args.require_signed)
 
-    if notice:
-        if args.json:
-            print(json.dumps({"notice": notice, "findings": []}))
-        else:
-            print(f"Notice: {notice}")
-        return EXIT_OK
-
     if args.json:
-        out = [
-            {
-                "code": f.code,
-                "rel_path": f.rel_path,
-                "line": f.line,
-                "actor": f.actor,
-                "commit": f.commit,
-                "message": f.message,
-            }
-            for f in findings
-        ]
+        # One shape on every path, so a script never branches on the type.
+        out = {
+            "notice": notice,
+            "findings": [
+                {
+                    "code": f.code,
+                    "rel_path": f.rel_path,
+                    "line": f.line,
+                    "actor": f.actor,
+                    "commit": f.commit,
+                    "message": f.message,
+                }
+                for f in findings
+            ],
+        }
         print(json.dumps(out, indent=2))
         return EXIT_FINDINGS if findings else EXIT_OK
+
+    if notice:
+        print(f"Notice: {notice}")
+        return EXIT_OK
 
     if not findings:
         print("Audit clean: all human:* endorsements match Git author provenance.")
@@ -720,8 +730,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_update = subparsers.add_parser("update", parents=[vault_parent], help="Update a note")
     p_update.add_argument("cid", help="Note CID or path")
     p_update.add_argument("--patch-frontmatter", help="JSON frontmatter patch (never `verified` or `generated`)")
-    p_update.add_argument("--append-section", help="Heading:Body to append")
-    p_update.add_argument("--replace-section", help="Heading:Body to replace")
+    p_update.add_argument("--append-section", help="Heading:Body to append (write ':' in the heading as '\\:')")
+    p_update.add_argument("--replace-section", help="Heading:Body to replace (write ':' in the heading as '\\:')")
     p_update.add_argument(
         "--edits",
         help='JSON list of body edits applied atomically, e.g. \'[{"op":"replace_text","old":"..","new":".."}]\'',

@@ -354,9 +354,11 @@ class TestMcpServer(unittest.TestCase):
         responses = self._drive_server(requests)
 
         self.assertEqual([r["id"] for r in responses], [1, 2, 3, 4])
-        # Missing tool name and missing required arguments surface as tool errors, not crashes
-        for resp in responses[:3]:
-            self.assertTrue(resp["result"]["isError"])
+        # No tool name at all is malformed params (-32602); a missing required
+        # argument is a tool error. Neither is a crash.
+        for resp in responses[:2]:
+            self.assertEqual(resp["error"]["code"], -32602)
+        self.assertTrue(responses[2]["result"]["isError"])
         # The request following the malformed ones is still answered
         self.assertEqual(responses[3].get("result"), {})
 
@@ -576,6 +578,61 @@ class TestMcpServer(unittest.TestCase):
         empty = self.server.handle_tools_call("vault_ground", {"cids": []})
         self.assertTrue(empty["isError"])
         self.assertEqual(json.loads(empty["content"][0]["text"])["error"]["code"], "INVALID_ARGUMENT")
+
+
+class TestMcpProtocolErrors(unittest.TestCase):
+    """C66: malformed requests get the JSON-RPC code that names the fault (§5.2)."""
+
+    setUp = TestMcpServer.setUp
+    tearDown = TestMcpServer.tearDown
+    _drive_server_raw = TestMcpServer._drive_server_raw
+
+    def _call(self, name, args):
+        res = self.server.handle_tools_call(name, args)
+        return res, json.loads(res["content"][0]["text"])
+
+    def test_request_without_a_method_is_invalid_request(self):
+        resp = self.server.dispatch_request({"jsonrpc": "2.0", "id": 7})
+        self.assertEqual(resp["error"]["code"], -32600)
+
+    def test_tools_call_with_a_non_string_name_is_invalid_params(self):
+        resp = self.server.dispatch_request(
+            {"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": ["vault_search"]}}
+        )
+        self.assertEqual(resp["error"]["code"], -32602)
+
+    def test_reading_directives_of_an_unknown_domain_is_invalid_params(self):
+        resp = self.server.dispatch_request(
+            {"jsonrpc": "2.0", "id": 9, "method": "resources/read", "params": {"uri": "domain://nope/directives"}}
+        )
+        self.assertEqual(resp["error"]["code"], -32602)
+        self.assertIn("nope", resp["error"]["message"])
+
+    def test_null_limit_means_the_default(self):
+        res, payload = self._call("vault_search", {"query": "sqlite", "limit": None})
+        self.assertFalse(res.get("isError"), payload)
+        self.assertTrue(payload)
+
+    def test_unknown_argument_is_refused_by_name(self):
+        res, payload = self._call("vault_search", {"qurey": "sqlite"})
+        self.assertTrue(res["isError"])
+        self.assertEqual(payload["error"]["code"], "INVALID_ARGUMENT")
+        self.assertIn("qurey", payload["error"]["message"])
+        schema = next(t for t in self.server.handle_tools_list()["tools"] if t["name"] == "vault_search")
+        self.assertIs(schema["inputSchema"]["additionalProperties"], False)
+
+    def test_human_actor_is_still_refused_as_attestation_not_as_unknown_argument(self):
+        res, payload = self._call("vault_verify_note", {"cid": "wiki/sqlite", "actor": "human:x"})
+        self.assertEqual(payload["error"]["code"], "HUMAN_ATTESTATION_REFUSED")
+
+    def test_content_length_need_not_be_the_first_header(self):
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode()
+        framed = b"Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n" + (
+            f"Content-Length: {len(body)}\r\n\r\n".encode() + body
+        )
+        responses = self._drive_server_raw(framed)
+        self.assertEqual([r.get("id") for r in responses], [1])
+        self.assertEqual(responses[0]["result"], {})
 
 
 if __name__ == "__main__":

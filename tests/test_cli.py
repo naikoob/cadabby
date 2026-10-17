@@ -1089,6 +1089,67 @@ class TestStatusAndMoveCommands(unittest.TestCase):
         self.assertEqual(exit_code, EXIT_ENVIRONMENT)
 
 
+class TestCliPolish(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_section_heading_may_contain_an_escaped_colon(self):
+        from cadabby.cli import _parse_section_arg
+
+        self.assertEqual(_parse_section_arg("Q\\: why:Because: yes"), ("Q: why", "Because: yes"))
+        self.assertEqual(_parse_section_arg("Heading:Body"), ("Heading", "Body"))
+        self.assertEqual(_parse_section_arg("Heading"), ("Heading", ""))
+
+    def test_audit_json_has_one_shape_with_or_without_a_notice(self):
+        import contextlib
+        import io
+
+        from cadabby.cli import cmd_audit
+
+        vault_root = self.dir / "v"
+        cmd_init(DummyArgs(vault=str(vault_root), name="v", obsidian=False))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = cmd_audit(DummyArgs(vault=str(vault_root), require_signed=False, json=True))
+        payload = json.loads(out.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(set(payload), {"notice", "findings"})
+        self.assertEqual(payload["findings"], [])
+
+        from unittest import mock
+
+        from cadabby.audit import AuditFinding
+
+        finding = AuditFinding(code="X", rel_path="wiki/n.md", line=7, actor="human:a", commit="c" * 40, message="m")
+        out = io.StringIO()
+        with mock.patch("cadabby.cli.run_vault_audit", return_value=([finding], None)), contextlib.redirect_stdout(out):
+            code = cmd_audit(DummyArgs(vault=str(vault_root), require_signed=False, json=True))
+        payload = json.loads(out.getvalue())
+        self.assertEqual(code, 1)
+        self.assertIsNone(payload["notice"])
+        self.assertEqual([f["line"] for f in payload["findings"]], [7])
+
+    def test_search_without_query_or_filter_is_invalid_argument(self):
+        """C38: a cross-argument rule argparse cannot express is INVALID_ARGUMENT, exit 3."""
+        import os
+        import subprocess
+        import sys
+
+        vault_root = self.dir / "v"
+        cmd_init(DummyArgs(vault=str(vault_root), name="v", obsidian=False))
+        env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+        res = subprocess.run(
+            [sys.executable, "-m", "cadabby", "search", "--vault", str(vault_root)],
+            capture_output=True, text=True, env=env, check=False,
+        )
+        self.assertEqual(res.returncode, 3, res.stderr)
+        self.assertIn("INVALID_ARGUMENT", res.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
 

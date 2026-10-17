@@ -382,6 +382,41 @@ class TestAudit(unittest.TestCase):
             self.assertEqual(len(log_cmds), 1)
             self.assertEqual(log_cmds[0][-1], "--")
 
+    # A hung git never hangs the audit, and never lets an endorsement pass unchecked.
+    # (Kept in TestAudit: the runner's pattern-filter test expects one class here.)
+
+    def test_a_hung_rev_parse_reads_as_no_repository(self):
+        vault = MagicMock()
+        vault.root = Path(tempfile.gettempdir())
+        with patch("cadabby.audit.subprocess.run", side_effect=subprocess.TimeoutExpired("git", 30)) as run:
+            self.assertFalse(is_git_repository(vault))
+        self.assertEqual(run.call_args.kwargs["timeout"], 30)
+
+    def test_a_hung_blame_fails_the_audit(self):
+        from cadabby.audit import GitTimeoutError
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        (root / ".cadabby.json").write_text('{"vault_name": "v"}', "utf-8")
+        (root / "wiki").mkdir()
+        (root / "wiki" / "n.md").write_text(
+            "---\ntype: concept\ntitle: N\ndescription: d\nstatus: active\nverified:\n"
+            "  - by: human:alice\n    at: '2026-01-01T00:00:00Z'\n    method: manual-review\n"
+            "    of: 'sha256:" + "0" * 64 + "'\n---\n# N\n",
+            "utf-8",
+        )
+        vault = Vault(root)
+
+        def fake_run(cmd, **kwargs):
+            if cmd[1] == "rev-parse":
+                return subprocess.CompletedProcess(cmd, 0, stdout="true\n", stderr="")
+            raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+        with patch("cadabby.audit.subprocess.run", side_effect=fake_run):
+            with self.assertRaises(GitTimeoutError):
+                run_vault_audit(vault)
+
 
 if __name__ == "__main__":
     unittest.main()
