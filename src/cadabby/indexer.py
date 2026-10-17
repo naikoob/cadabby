@@ -5,8 +5,10 @@ Conforms to Cadabby Technical Specification §2.5, §4.3, §8.
 
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +49,11 @@ def rotate_vault_log(vault: Vault) -> Path | None:
     The size, the year and the decision are all read under the lock: decided
     outside it, two concurrent syncs could both choose to rotate and archive
     the same ledger twice.
+
+    Appends take no lock (§8), so the live ledger is moved aside before it is
+    archived. Reading it and then writing a fresh header over it lost any
+    entry appended in between; after the rename, a new append creates a new
+    log.md instead, and nothing overwrites it.
     """
     log_file = vault.log_path
     max_bytes = vault.config["log_rotate_bytes"]
@@ -62,19 +69,43 @@ def rotate_vault_log(vault: Vault) -> Path | None:
 
         target_rotated = vault.log_dir / f"{ledger_year}.md"
         target_rotated.parent.mkdir(parents=True, exist_ok=True)
-        if target_rotated.exists():
-            header_prefix = f"{LEDGER_TITLE} ({ledger_year})"
-            body_content = content.removeprefix(header_prefix).lstrip("\r\n") if content.startswith(
-                header_prefix
-            ) else content
-            if body_content:
-                append_ledger(target_rotated, body_content)
-        else:
-            atomic_write(target_rotated, content)
+        pending = vault.log_dir / f".rotating-{uuid.uuid4().hex}.md"
+        os.replace(log_file, pending)
 
-        atomic_write(log_file, f"{LEDGER_TITLE} ({current_year})\n\n")
+        content = pending.read_text("utf-8")
+        _archive_ledger(target_rotated, content, ledger_year)
+        # A writer that opened log.md before the rename appends to `pending`;
+        # one more read catches what it wrote while we archived.
+        tail = pending.read_text("utf-8")[len(content):]
+        if tail:
+            append_ledger(target_rotated, tail)
+        pending.unlink()
+
+        # O_EXCL: if an append already created the new ledger, keep its entries
+        # and go without the heading (year detection falls back to the first
+        # entry's timestamp) rather than overwrite them.
+        try:
+            fd = os.open(log_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            pass
+        else:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(f"{LEDGER_TITLE} ({current_year})\n\n")
 
     return target_rotated
+
+
+def _archive_ledger(target_rotated: Path, content: str, ledger_year: str) -> None:
+    """Write `content` to the year's archive, appending (minus its heading) if one exists."""
+    if target_rotated.exists():
+        header_prefix = f"{LEDGER_TITLE} ({ledger_year})"
+        body_content = content.removeprefix(header_prefix).lstrip("\r\n") if content.startswith(
+            header_prefix
+        ) else content
+        if body_content:
+            append_ledger(target_rotated, body_content)
+    else:
+        atomic_write(target_rotated, content)
 
 
 def _cell(value: Any, fallback: str = "") -> str:

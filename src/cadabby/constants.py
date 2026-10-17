@@ -11,7 +11,8 @@ from __future__ import annotations
 # set and `./raw/x` counts as citing `raw/x` (§4.3).
 # 6 backs each FTS table with a view of exactly the rows it indexes, so the
 # content-comparing integrity check can run at all (§4.2).
-SCHEMA_VERSION = 6
+# 7 stores tags lowercased whatever casing the file uses, so --tag matches (§4.2).
+SCHEMA_VERSION = 7
 
 # `.cadabby.json`'s "schema" (§2.6). Independent of SCHEMA_VERSION above: the
 # cache is disposable and rebuilds on mismatch, the config is user-owned and is

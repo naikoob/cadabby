@@ -310,6 +310,35 @@ class TestLogRotation(IndexerFixture):
         self.assertIn("Prior year entry", rot.read_text("utf-8"))
         self.assertNotIn("Prior year entry", self.vault.log_path.read_text("utf-8"))
 
+    def test_rotation_never_loses_a_concurrent_append(self):
+        """§8, §10 C61: an entry appended while rotation archives the ledger is neither archived nor overwritten away."""
+        import cadabby.indexer as indexer
+        from cadabby.indexer import append_vault_log
+
+        self.vault.config["log_rotate_bytes"] = 10
+        self.vault.log_path.write_text("# Activity Ledger (2026)\n\n- [2026-10-01T00:00:00Z] old entry\n", "utf-8")
+        real_atomic_write = indexer.atomic_write
+        real_append = indexer.append_ledger
+
+        def racing(fn):
+            def wrapper(path, *args, **kwargs):
+                if self.vault.log_dir in Path(path).parents and not getattr(wrapper, "done", False):
+                    wrapper.done = True  # once: another process logs while we archive
+                    append_vault_log(self.vault, "CONCURRENT ENTRY", actor="agent:other")
+                return fn(path, *args, **kwargs)
+            return wrapper
+
+        with (
+            unittest.mock.patch.object(indexer, "atomic_write", racing(real_atomic_write)),
+            unittest.mock.patch.object(indexer, "append_ledger", racing(real_append)),
+        ):
+            rot = rotate_vault_log(self.vault)
+        assert rot is not None
+        everywhere = rot.read_text("utf-8") + self.vault.log_path.read_text("utf-8")
+        self.assertIn("CONCURRENT ENTRY", everywhere)
+        self.assertIn("old entry", rot.read_text("utf-8"))
+        self.assertEqual([p.name for p in self.vault.log_dir.iterdir()], [rot.name])  # no leftover pending file
+
 
 if __name__ == "__main__":
     unittest.main()

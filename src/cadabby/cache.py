@@ -454,7 +454,10 @@ class VaultCache:
         or its FTS5 tables (§4.2); both retract old terms before changing a row.
         """
         conn = self.get_connection()
-        tags_str = " ".join(str(t) for t in (record.tags or []))
+        # Lowercased here, not only by the agent writer: a hand-written file may
+        # still say `ML` (§3.1 makes casing a warning), and the --tag predicate
+        # lowercases its probe on the assumption that stored tags are canonical.
+        tags_str = " ".join(str(t).lower() for t in (record.tags or []))
         # Positionally matched to _NOTE_COLUMNS.
         values = (
             path_to_cid(record.rel_path),
@@ -764,22 +767,39 @@ class VaultCache:
         )
 
         resolver = self.get_link_resolver()
+        # A link whose target is a note with broken frontmatter stays unresolved
+        # (gate 3 names the cause). It must not fall through to another note
+        # with the same stem, which is why the resolver still includes it (§4.4).
+        broken = self.unparseable_cids()
         link_updates: list[tuple[str | None, int]] = []
         for link_row in conn.execute("SELECT id, source_cid, target_raw, kind FROM links;").fetchall():
             target_raw = link_row["target_raw"]
             if link_row["kind"] == LINK_KIND_MARKDOWN:
                 # Exact path from the citing note's folder; never a stem fallback (§4.4).
-                md_cid = resolve_markdown_target(link_row["source_cid"], target_raw)
-                link_updates.append((md_cid if md_cid in resolver.known_cids else None, link_row["id"]))
+                hit = resolve_markdown_target(link_row["source_cid"], target_raw)
+                hit = hit if hit in resolver.known_cids else None
             else:
-                link_updates.append((resolver.resolve(target_raw.split("#")[0]), link_row["id"]))
+                hit = resolver.resolve(target_raw.split("#")[0])
+            link_updates.append((None if hit in broken else hit, link_row["id"]))
         conn.executemany("UPDATE links SET target_cid = ? WHERE id = ?;", link_updates)
 
     def get_link_resolver(self) -> LinkTargetIndex:
-        """A LinkTargetIndex over every parseable non-raw note. A pure read: callers scan first (§4.3)."""
+        """A LinkTargetIndex over every non-raw note, parseable or not (§4.4). A pure read: callers scan first (§4.3).
+
+        A note whose frontmatter is broken still exists, so it keeps its name.
+        Leaving it out let `[[Architecture]]` fall through to another note with
+        that stem, silently, the moment someone mistyped YAML. Callers that must
+        not land on such a note check `unparseable_cids()`.
+        """
         conn = self.get_connection()
-        rows = conn.execute("SELECT cid FROM notes WHERE layer != 'raw' AND parse_error IS NULL;")
+        rows = conn.execute("SELECT cid FROM notes WHERE layer != 'raw';")
         return LinkTargetIndex([row["cid"] for row in rows])
+
+    def unparseable_cids(self) -> frozenset[str]:
+        """CIDs of non-raw notes whose frontmatter does not parse (§3.2)."""
+        conn = self.get_connection()
+        rows = conn.execute("SELECT cid FROM notes WHERE layer != 'raw' AND parse_error IS NOT NULL;")
+        return frozenset(row["cid"] for row in rows)
 
     def get_note_neighborhood(
         self, cid: str

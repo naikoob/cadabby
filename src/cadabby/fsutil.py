@@ -143,8 +143,41 @@ def _is_process_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
         return True
+    except PermissionError:
+        # EPERM: the process exists but belongs to another user (a shared vault,
+        # a container with a shared pid namespace). That is a live holder.
+        return True
     except OSError:
         return False
+
+
+def _remove_if_unchanged(target: Path, expected: bytes) -> bool:
+    """Remove `target` only if it still holds `expected`; True if it is gone afterwards.
+
+    Moving the file aside is atomic, so what we then read is exactly what we
+    took. If those are not the bytes we judged -- another process broke the
+    stale lock and re-acquired in between -- it is put back where it was. A
+    read-then-unlink check could delete a live lock in the gap between calls.
+    Raises OSError if the file cannot be moved at all (an unremovable lock).
+    """
+    grave = target.with_name(f"{target.name}.{uuid.uuid4().hex}.stale")
+    try:
+        os.rename(target, grave)
+    except FileNotFoundError:
+        return True
+    try:
+        if grave.read_bytes() == expected:
+            return True
+        try:
+            os.link(grave, target)  # restore, unless someone has since taken the slot
+        except OSError:
+            pass
+        return False
+    finally:
+        try:
+            grave.unlink()
+        except OSError:
+            pass
 
 
 @contextlib.contextmanager
@@ -158,21 +191,25 @@ def advisory_lock(
 
     Lock file stores 'pid:start_timestamp'.
     If the lock is older than stale_age or the owning pid is dead, the stale lock is broken.
+    A lock whose content cannot be read as 'pid:timestamp' -- empty because its
+    creator has not written it yet, or garbage -- is stale only once its mtime
+    is older than stale_age; breaking it at once broke locks still being created.
     """
     target = Path(lock_path).resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
 
     start_time = time.monotonic()
     acquired = False
+    lock_bytes = b""
 
     while not acquired:
         now = time.time()
-        lock_content = f"{os.getpid()}:{now:.3f}\n"
+        lock_bytes = f"{os.getpid()}:{now:.3f}\n".encode("utf-8")
 
         try:
             fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
             try:
-                os.write(fd, lock_content.encode("utf-8"))
+                os.write(fd, lock_bytes)
             finally:
                 os.close(fd)
             acquired = True
@@ -182,27 +219,20 @@ def advisory_lock(
             try:
                 raw_bytes = target.read_bytes()
                 raw_info = raw_bytes.decode("utf-8", errors="replace").strip()
-                if ":" in raw_info:
+                try:
                     pid_str, ts_str = raw_info.split(":", 1)
-                    try:
-                        lock_pid = int(pid_str)
-                        lock_ts = float(ts_str)
-                        is_stale = (now - lock_ts > stale_age) or not _is_process_alive(lock_pid)
-                    except ValueError:
-                        is_stale = True
-                else:
-                    is_stale = True
+                    lock_pid = int(pid_str)
+                    lock_ts = float(ts_str)
+                    is_stale = (now - lock_ts > stale_age) or not _is_process_alive(lock_pid)
+                except ValueError:
+                    is_stale = now - target.stat().st_mtime > stale_age
 
                 if is_stale:
-                    # Break the stale lock by removing it, then let O_EXCL alone
-                    # decide the winner. Replacing it in place raced: two breakers
-                    # could both "win". A lock we cannot remove falls through to
-                    # the timeout check below rather than spinning forever.
+                    # Break it only if it still holds what we judged, then let
+                    # O_EXCL alone decide the winner. A lock we cannot move
+                    # falls through to the timeout check rather than spinning.
                     try:
-                        if target.read_bytes() == raw_bytes:
-                            target.unlink()
-                        continue
-                    except FileNotFoundError:
+                        _remove_if_unchanged(target, raw_bytes)
                         continue
                     except OSError:
                         pass
@@ -219,10 +249,9 @@ def advisory_lock(
     try:
         yield target
     finally:
-        # Only unlink if this process still holds the lock
+        # Only remove the lock this holder wrote, byte for byte: matching the
+        # pid prefix alone also matched a later lock by the same process.
         try:
-            current_owner = target.read_text("utf-8").strip()
-            if current_owner.startswith(f"{os.getpid()}:"):
-                target.unlink()
-        except (FileNotFoundError, OSError):
+            _remove_if_unchanged(target, lock_bytes)
+        except OSError:
             pass

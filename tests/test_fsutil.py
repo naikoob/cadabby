@@ -113,7 +113,12 @@ class TestFsutil(unittest.TestCase):
         lock_file.write_text(f"99999999:{time.time() - 3600:.3f}\n", "utf-8")
 
         started = time.monotonic()
-        with mock.patch.object(Path, "unlink", side_effect=PermissionError("read-only")):
+        # Breaking moves the lock aside first (os.rename), then deletes it; a
+        # read-only directory refuses both.
+        with (
+            mock.patch.object(Path, "unlink", side_effect=PermissionError("read-only")),
+            mock.patch("cadabby.fsutil.os.rename", side_effect=PermissionError("read-only")),
+        ):
             with self.assertRaises(LockTimeoutError):
                 with advisory_lock(lock_file, stale_age=1.0, timeout=0.3, poll_interval=0.01):
                     self.fail("acquired a lock that could not be broken")
@@ -133,13 +138,74 @@ class TestFsutil(unittest.TestCase):
     def test_corrupt_lock_recovery(self):
         lock_file = self.dir / ".cadabby" / "vault.lock"
         lock_file.parent.mkdir(parents=True, exist_ok=True)
-        # Write corrupted lock content with colon but non-numeric data
+        # Write corrupted lock content with colon but non-numeric data, old enough to be stale
         lock_file.write_text("corrupt:data\n", "utf-8")
+        old = time.time() - 3600
+        os.utime(lock_file, (old, old))
 
         with advisory_lock(lock_file, stale_age=1.0, timeout=0.5):
             self.assertTrue(lock_file.exists())
 
         self.assertFalse(lock_file.exists())
+
+    def test_fresh_empty_lock_is_not_broken(self):
+        """§8, §10 C61: a lock its creator has not written yet is live, not stale."""
+        lock_file = self.dir / ".cadabby" / "vault.lock"
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+        lock_file.write_bytes(b"")
+        with self.assertRaises(LockTimeoutError):
+            with advisory_lock(lock_file, stale_age=60.0, timeout=0.2, poll_interval=0.01):
+                self.fail("broke a lock that was still being created")
+        self.assertEqual(lock_file.read_bytes(), b"")
+
+    def test_old_empty_lock_is_broken(self):
+        lock_file = self.dir / ".cadabby" / "vault.lock"
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+        lock_file.write_bytes(b"")
+        old = time.time() - 3600
+        os.utime(lock_file, (old, old))
+        with advisory_lock(lock_file, stale_age=60.0, timeout=0.5):
+            self.assertNotEqual(lock_file.read_bytes(), b"")
+
+    def test_eperm_owner_counts_as_alive(self):
+        """§8, §10 C61: EPERM from os.kill means the owner exists under another user."""
+        from unittest import mock
+
+        from cadabby.fsutil import _is_process_alive
+
+        with mock.patch("cadabby.fsutil.os.kill", side_effect=PermissionError("EPERM")):
+            self.assertTrue(_is_process_alive(4242))
+        with mock.patch("cadabby.fsutil.os.kill", side_effect=ProcessLookupError("ESRCH")):
+            self.assertFalse(_is_process_alive(4242))
+
+        lock_file = self.dir / ".cadabby" / "vault.lock"
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+        lock_file.write_text(f"4242:{time.time():.3f}\n", "utf-8")
+        with mock.patch("cadabby.fsutil.os.kill", side_effect=PermissionError("EPERM")):
+            with self.assertRaises(LockTimeoutError):
+                with advisory_lock(lock_file, timeout=0.2, poll_interval=0.01):
+                    self.fail("broke a lock held by another user's live process")
+
+    def test_remove_if_unchanged_restores_a_swapped_lock(self):
+        """§8, §10 C61: a lock replaced between judging and breaking survives the break."""
+        from cadabby.fsutil import _remove_if_unchanged
+
+        lock_file = self.dir / ".cadabby" / "vault.lock"
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+        lock_file.write_bytes(b"777:1.000\n")  # someone else's fresh lock
+        self.assertFalse(_remove_if_unchanged(lock_file, b"99999999:0.000\n"))  # judged a different, stale one
+        self.assertEqual(lock_file.read_bytes(), b"777:1.000\n")
+        self.assertEqual(sorted(p.name for p in lock_file.parent.iterdir()), ["vault.lock"])
+
+        self.assertTrue(_remove_if_unchanged(lock_file, b"777:1.000\n"))
+        self.assertFalse(lock_file.exists())
+
+    def test_release_only_removes_the_exact_lock_written(self):
+        """A later lock by the same pid (same prefix, different start time) is not released."""
+        lock_file = self.dir / ".cadabby" / "vault.lock"
+        with advisory_lock(lock_file):
+            lock_file.write_text(f"{os.getpid()}:9999999999.000\n", "utf-8")
+        self.assertTrue(lock_file.exists())
 
     def test_atomic_write_cleans_up_on_base_exception(self):
         from unittest.mock import patch

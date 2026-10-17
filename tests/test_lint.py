@@ -44,6 +44,21 @@ class TestLint(unittest.TestCase):
         self.assertIn("FRONTMATTER_UNPARSEABLE", codes)
         self.assertIn("FIELD_MISSING", codes)
 
+    def test_dead_link_to_unparseable_note_names_it(self):
+        """§4.4, §6.3, §10 C60: the link is LINK_DEAD and names the broken note, not a same-stem stand-in."""
+        (self.vault_root / "projects").mkdir(parents=True, exist_ok=True)
+        (self.vault_root / "projects" / "Shared.md").write_text(
+            "---\ntype: concept\ntitle: Shared\ndescription: d\nstatus: active\n---\n# P\n", "utf-8"
+        )
+        (self.vault.wiki_dir / "Shared.md").write_text("---\ntags: [broken]\n---\n# W\n", "utf-8")
+        (self.vault.wiki_dir / "Caller.md").write_text(
+            "---\ntype: concept\ntitle: Caller\ndescription: d\nstatus: active\n---\n# C\n[[Shared]] [[sqlite]]\n",
+            "utf-8",
+        )
+        dead = [f for f in run_vault_lint(self.vault) if f.code == "LINK_DEAD" and f.rel_path == "wiki/Caller.md"]
+        self.assertEqual(len(dead), 1)
+        self.assertIn("points at wiki/Shared, whose frontmatter does not parse", dead[0].message)
+
     def test_gate1_tag_grammar(self):
         """Whitespace in a tag is an error; non-canonical case is only a warning.
 

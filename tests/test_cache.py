@@ -258,6 +258,46 @@ class TestVaultCache(unittest.TestCase):
         self.assertIn("wiki/sqlite", [r.cid for r in self.cache.search("SQLite", tag="c-library")])
         self.assertEqual(self.cache.search("SQLite", tag="library"), [])
 
+    def test_uppercase_tag_in_file_matches_any_case_filter(self):
+        """§4.2, §10 C60: a hand-written uppercase tag is stored lowercased, so --tag finds it in any case."""
+        (self.vault.wiki_dir / "ml-note.md").write_text(
+            "---\ntype: concept\ntitle: ML Note\ndescription: d\nstatus: active\ntags:\n  - ML\n---\n# ML Note\n",
+            "utf-8",
+        )
+        self.cache.scan()
+        stored = self.cache.get_connection().execute("SELECT tags FROM notes WHERE cid = 'wiki/ml-note';").fetchone()
+        self.assertEqual(stored["tags"], "ml")
+        for probe in ("ML", "ml", "Ml"):
+            with self.subTest(probe=probe):
+                self.assertEqual([r.cid for r in self.cache.search(tag=probe)], ["wiki/ml-note"])
+
+    def test_unparseable_note_keeps_its_name_and_links_stay_unresolved(self):
+        """§4.4, §10 C60: a broken note's stem never falls through to another note with that stem."""
+        (self.vault.root / "projects" / "apollo").mkdir(parents=True, exist_ok=True)
+        (self.vault.root / "projects" / "apollo" / "Architecture.md").write_text(
+            "---\ntype: concept\ntitle: Apollo Arch\ndescription: d\nstatus: active\n---\n# Apollo\n", "utf-8"
+        )
+        wiki_arch = self.vault.wiki_dir / "Architecture.md"
+        healthy = "---\ntype: concept\ntitle: Architecture\ndescription: d\nstatus: active\n---\n# Arch\n"
+        wiki_arch.write_text(healthy, "utf-8")
+        (self.vault.wiki_dir / "linker.md").write_text(
+            "---\ntype: concept\ntitle: Linker\ndescription: d\nstatus: active\n---\n[[Architecture]]\n", "utf-8"
+        )
+
+        def target() -> str | None:
+            self.cache.scan()
+            row = self.cache.get_connection().execute(
+                "SELECT target_cid FROM links WHERE source_cid = 'wiki/linker';"
+            ).fetchone()
+            return row["target_cid"]
+
+        self.assertEqual(target(), "wiki/Architecture")
+        wiki_arch.write_text("---\ntags: [broken]\n---\n# Arch\n", "utf-8")
+        self.assertIsNone(target())  # not projects/apollo/Architecture
+        self.assertIn("wiki/Architecture", self.cache.unparseable_cids())
+        wiki_arch.write_text(healthy, "utf-8")
+        self.assertEqual(target(), "wiki/Architecture")
+
     def test_sanitize_fts5_query(self):
         # Bare hyphenated words get quoted
         self.assertEqual(sanitize_fts5_query("B-tree"), '"B-tree"')
@@ -899,7 +939,8 @@ class TestVaultCacheRanking(unittest.TestCase):
             "---\ntype: concept\ntitle: Caller\ndescription: C\nstatus: active\n---\n# C\n[[Shared]]\n",
             "utf-8",
         )
-        # Initially wiki/Shared has broken frontmatter, so [[Shared]] resolves to projects/Shared
+        # wiki/Shared has broken frontmatter: it still owns the stem, so [[Shared]]
+        # stays unresolved rather than silently redirecting to projects/Shared (§4.4)
         wiki_shared.write_text("---\ntags: [broken]\n---\n# Shared\n", "utf-8")
         proj_shared.write_text(
             "---\ntype: concept\ntitle: Shared\ndescription: P\nstatus: active\n---\n# P\n",
@@ -910,7 +951,7 @@ class TestVaultCacheRanking(unittest.TestCase):
             cache.scan()
             conn = cache.get_connection()
             row1 = conn.execute("SELECT target_cid FROM links WHERE source_cid = 'wiki/Caller';").fetchone()
-            self.assertEqual(row1["target_cid"], "projects/Shared")
+            self.assertIsNone(row1["target_cid"])
 
             # Repair wiki/Shared frontmatter (an update to an existing note)
             wiki_shared.write_text(

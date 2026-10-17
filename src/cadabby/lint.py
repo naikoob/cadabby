@@ -37,6 +37,7 @@ from cadabby.graph import (
     LinkTargetIndex,
     iter_markdown_link_targets,
     relative_note_path,
+    resolve_markdown_target,
 )
 from cadabby.okf import (
     is_actor_human,
@@ -465,6 +466,7 @@ def _link_findings(
 ) -> Iterator[LintFinding]:
     """Gate 3: wikilinks and relative Markdown note links resolve, and their anchors exist."""
     resolver = cache.get_link_resolver()
+    broken = cache.unparseable_cids()
     headings_cache: dict[str, list[str]] = {}
     for link_row in conn.execute("SELECT source_cid, target_raw, target_cid, anchor, kind FROM links;").fetchall():
         source_cid = link_row["source_cid"]
@@ -474,11 +476,18 @@ def _link_findings(
         rel_path = cid_to_path(source_cid)
 
         if target_cid is None:
-            if link_row["kind"] == LINK_KIND_MARKDOWN:
-                hint = _markdown_path_hint(source_cid, target_raw, resolver)
-                message = f"Dead Markdown link '{target_raw}'{hint}"
+            is_md = link_row["kind"] == LINK_KIND_MARKDOWN
+            would_be = (
+                resolve_markdown_target(source_cid, target_raw) if is_md else resolver.resolve(target_raw.split("#")[0])
+            )
+            shown = f"Markdown link '{target_raw}'" if is_md else f"wikilink [[{target_raw}]]"
+            if would_be in broken:
+                # The link names a real note; its frontmatter is what is broken (§4.4).
+                message = f"Dead {shown}: points at {would_be}, whose frontmatter does not parse"
+            elif is_md:
+                message = f"Dead {shown}{_markdown_path_hint(source_cid, target_raw, resolver)}"
             else:
-                message = f"Dead wikilink [[{target_raw}]]"
+                message = f"Dead {shown}"
             yield _error(code="LINK_DEAD", rel_path=rel_path, message=message)
         elif anchor:
             target_note = notes_by_cid.get(target_cid)
