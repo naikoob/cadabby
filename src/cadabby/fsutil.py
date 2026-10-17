@@ -34,6 +34,44 @@ def compute_bytes_sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+# NAME_MAX on every filesystem Cadabby targets (ext4, APFS, NTFS via WSL).
+_NAME_MAX_BYTES = 255
+
+
+def _temp_name(target_name: str) -> str:
+    """A unique, dot-hidden sibling name that never exceeds NAME_MAX.
+
+    The prefix adds ~23 bytes, so appending the full target name made any note
+    whose own name was near the limit fail with ENAMETOOLONG on every edit. The
+    name part only aids debugging a leftover temp file; truncating it is safe.
+    """
+    prefix = f".tmp_{os.getpid()}_{uuid.uuid4().hex[:8]}_"
+    room = _NAME_MAX_BYTES - len(prefix.encode("utf-8"))
+    tail = target_name.encode("utf-8")[:room].decode("utf-8", errors="ignore")
+    return prefix + tail
+
+
+def fsync_dir(directory: Path) -> None:
+    """Persist a directory entry change (rename, create, unlink) to disk.
+
+    Best effort: platforms without O_DIRECTORY, or filesystems that refuse to
+    fsync a directory, keep the durability they had before.
+    """
+    flag = getattr(os, "O_DIRECTORY", None)
+    if flag is None:
+        return
+    try:
+        fd = os.open(directory, os.O_RDONLY | flag)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 def atomic_write(target_path: Path | str, content: str | bytes, encoding: str = "utf-8") -> None:
     """Atomically write content to target_path using same-directory temp file and fsync.
 
@@ -43,7 +81,7 @@ def atomic_write(target_path: Path | str, content: str | bytes, encoding: str = 
     target.parent.mkdir(parents=True, exist_ok=True)
 
     data = content.encode(encoding) if isinstance(content, str) else content
-    tmp_path = target.parent / f".tmp_{os.getpid()}_{uuid.uuid4().hex[:8]}_{target.name}"
+    tmp_path = target.parent / _temp_name(target.name)
 
     try:
         fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
@@ -69,6 +107,9 @@ def atomic_write(target_path: Path | str, content: str | bytes, encoding: str = 
         with contextlib.suppress(OSError):
             tmp_path.unlink(missing_ok=True)
         raise
+    # The file's bytes are on disk; without this the rename itself may not be,
+    # and a power cut can bring back the old note after the write "succeeded".
+    fsync_dir(target.parent)
 
 
 def check_expected_hash(

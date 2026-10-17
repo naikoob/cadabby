@@ -222,6 +222,29 @@ class TestVault(unittest.TestCase):
                 load_vault_config(vdir)
 
 
+class TestConfigEncoding(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp_dir.name)
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def test_a_byte_order_mark_is_tolerated(self):
+        from cadabby.vault import load_vault_config
+
+        (self.dir / FILE_CONFIG).write_bytes('\ufeff{"vault_name": "bom"}'.encode())
+        self.assertEqual(load_vault_config(self.dir)["vault_name"], "bom")
+
+    def test_invalid_utf8_is_config_invalid(self):
+        from cadabby.vault import load_vault_config
+
+        (self.dir / FILE_CONFIG).write_bytes(b'{"vault_name": "\xff\xfe"}')
+        with self.assertRaises(VaultConfigError) as ctx:
+            load_vault_config(self.dir)
+        self.assertIn(FILE_CONFIG, str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -266,5 +266,27 @@ class TestInMemoryHexagonalUseCases(unittest.TestCase):
         self.assertNotIn("## Section 2", grounded_sec[0]["content"])
 
 
+class TestExtractHeadings(unittest.TestCase):
+    """A heading's text is on its own line; `\\s+` used to cross the newline (M17)."""
+
+    def test_bare_hash_line_does_not_promote_the_next_line(self):
+        from cadabby.domain import extract_headings
+
+        self.assertEqual(extract_headings("#\nnot a heading\n\n## \nalso not\n"), [])
+
+    def test_real_headings_survive_tabs_crlf_and_closing_hashes(self):
+        from cadabby.domain import extract_headings
+
+        body = "# One\r\n##\tTwo ##\r\ntext\n### `Three`\n"
+        self.assertEqual(extract_headings(body), ["One", "Two", "Three"])
+
+    def test_a_bare_hash_with_carriage_return_does_not_end_a_section(self):
+        from cadabby.domain import extract_markdown_section
+
+        found = extract_markdown_section("## A\ntext\n## \r\nmore\n", "A")
+        self.assertIsNotNone(found)
+        self.assertIn("more", found[1])
+
+
 if __name__ == "__main__":
     unittest.main()

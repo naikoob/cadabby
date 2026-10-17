@@ -67,12 +67,12 @@ def unprocessed_raw_paths(conn: sqlite3.Connection) -> list[str]:
 class NoteRecord:
     """One row's worth of `notes` content, as handed to `VaultCache.upsert_note()`.
 
-    The identity columns (`cid`, `stem`) and `indexed_at` are derived inside
-    upsert_note, so a caller cannot hand in a CID that disagrees with its path.
+    The identity columns (`cid`, `stem`, `layer`) and `indexed_at` are derived
+    inside upsert_note, so a caller cannot hand in a CID that disagrees with its
+    path, or a layer that would index the row into the wrong FTS table.
     """
 
     rel_path: str
-    layer: str
     mtime: float
     file_size: int
     file_hash: str | None
@@ -307,9 +307,18 @@ class VaultCache:
         any table a newer schema added.
         """
         if self._conn is None:
-            conn = self._open()
-            if not _schema_is_current(conn):
-                conn.close()
+            try:
+                conn = self._open()
+                current = _schema_is_current(conn)
+            except sqlite3.DatabaseError:
+                # Not a database at all, or a corrupt page: the cache is
+                # disposable, so a damaged one is rebuilt rather than failing
+                # every command as INTERNAL (§4.2). A second failure is real.
+                current = False
+                conn = None
+            if not current:
+                if conn is not None:
+                    conn.close()
                 reset_cache_files(self.db_path)
                 conn = self._open()
             self._conn = conn
@@ -319,10 +328,14 @@ class VaultCache:
     def _open(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA busy_timeout=5000;")
-        check_fts5_capability(conn)
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA busy_timeout=5000;")
+            check_fts5_capability(conn)
+        except BaseException:
+            conn.close()
+            raise
         return conn
 
     def _create_tables(self, conn: sqlite3.Connection) -> None:
@@ -458,11 +471,12 @@ class VaultCache:
         # still say `ML` (§3.1 makes casing a warning), and the --tag predicate
         # lowercases its probe on the assumption that stored tags are canonical.
         tags_str = " ".join(str(t).lower() for t in (record.tags or []))
+        layer = path_to_layer(record.rel_path)
         # Positionally matched to _NOTE_COLUMNS.
         values = (
             path_to_cid(record.rel_path),
             path_to_stem(record.rel_path),
-            record.layer,
+            layer,
             record.mtime,
             record.file_size,
             record.file_hash,
@@ -503,7 +517,7 @@ class VaultCache:
         # title alone, which is what makes `raw/paper.pdf` findable by name.
         if record.parse_error is None:
             conn.execute(
-                f"INSERT INTO {_fts_table(record.layer)}(rowid, title, description, body, tags) "
+                f"INSERT INTO {_fts_table(layer)}(rowid, title, description, body, tags) "
                 "VALUES (?, ?, ?, ?, ?);",
                 (row_id, record.title or "", record.description or "", record.body, tags_str),
             )
@@ -570,18 +584,27 @@ class VaultCache:
             inserted_count = 0
             updated_count = 0
             for rel_path, abs_path in disk_files.items():
-                st = abs_path.stat()
-                f_hash = compute_file_sha256(abs_path) if integrity_mode == "hash" else None
                 cached = cached_meta.get(rel_path)
                 is_raw = path_to_layer(rel_path) == DIR_RAW
-                stale_by_config = is_raw and raw_exts_changed
-                if cached is not None and not force and not stale_by_config and _is_unchanged(cached, st, f_hash, integrity_mode):
-                    continue
+                try:
+                    st = abs_path.stat()
+                    f_hash = compute_file_sha256(abs_path) if integrity_mode == "hash" else None
+                    stale_by_config = is_raw and raw_exts_changed
+                    if cached is not None and not force and not stale_by_config and _is_unchanged(cached, st, f_hash, integrity_mode):
+                        continue
 
-                if is_raw:
-                    self._index_raw_file(rel_path, abs_path, st, f_hash, raw_text_exts)
-                else:
-                    self._index_note_file(rel_path, abs_path, st, f_hash, template_rel)
+                    if is_raw:
+                        self._index_raw_file(rel_path, abs_path, st, f_hash, raw_text_exts)
+                    else:
+                        self._index_note_file(rel_path, abs_path, st, f_hash, template_rel)
+                except FileNotFoundError:
+                    # Deleted between discovery and here (an editor's save-by-rename,
+                    # a concurrent move): it is simply gone, which is what step 1
+                    # would have concluded a moment later (§4.3).
+                    if cached is not None:
+                        self.delete_note(rel_path)
+                        deleted_count += 1
+                    continue
 
                 if cached is None:
                     inserted_count += 1
@@ -632,7 +655,6 @@ class VaultCache:
         template_rel: str | None,
     ) -> None:
         """Index one note with its graph edges, or record why its frontmatter does not parse."""
-        layer = path_to_layer(rel_path)
         cid = path_to_cid(rel_path)
         content = abs_path.read_text("utf-8", errors="replace")
         try:
@@ -643,7 +665,6 @@ class VaultCache:
             self.upsert_note(
                 NoteRecord(
                     rel_path=rel_path,
-                    layer=layer,
                     mtime=st.st_mtime,
                     file_size=st.st_size,
                     file_hash=f_hash,
@@ -668,7 +689,6 @@ class VaultCache:
         self.upsert_note(
             NoteRecord(
                 rel_path=rel_path,
-                layer=layer,
                 mtime=st.st_mtime,
                 file_size=st.st_size,
                 file_hash=f_hash,
@@ -698,7 +718,6 @@ class VaultCache:
         self.upsert_note(
             NoteRecord(
                 rel_path=rel_path,
-                layer=path_to_layer(rel_path),
                 mtime=st.st_mtime,
                 file_size=st.st_size,
                 file_hash=f_hash,

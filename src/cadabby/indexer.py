@@ -265,10 +265,12 @@ def sync_vault_index(vault: Vault, cache: VaultCache) -> bool:
 
     Returns True if file was rewritten, False if unchanged.
     """
-    new_content = generate_index_markdown(vault, cache=cache)
     index_path = vault.index_path
 
+    # Generated under the lock: built outside it, a slower writer could replace
+    # a newer report with the older snapshot it read first.
     with advisory_lock(vault.lock_path):
+        new_content = generate_index_markdown(vault, cache=cache)
         if index_path.exists():
             existing = index_path.read_text("utf-8")
             if existing == new_content:

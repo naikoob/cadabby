@@ -340,6 +340,27 @@ class TestLogRotation(IndexerFixture):
         self.assertEqual([p.name for p in self.vault.log_dir.iterdir()], [rot.name])  # no leftover pending file
 
 
+class TestIndexSyncUnderLock(IndexerFixture):
+    def test_the_report_is_generated_while_the_lock_is_held(self):
+        import cadabby.indexer as indexer
+
+        self._note("alpha")
+        cache = VaultCache(self.vault)
+        seen = []
+        real = indexer.generate_index_markdown
+
+        def spy(vault, cache=None):
+            seen.append(vault.lock_path.exists())
+            return real(vault, cache=cache)
+
+        try:
+            with unittest.mock.patch.object(indexer, "generate_index_markdown", spy):
+                sync_vault_index(self.vault, cache)
+        finally:
+            cache.close()
+        self.assertEqual(seen, [True])
+
+
 if __name__ == "__main__":
     unittest.main()
 

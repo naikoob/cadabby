@@ -19,7 +19,7 @@ from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter, serial
 from cadabby.okf import compute_body_hash, derive_trust_tier, is_valid_actor, utc_now_iso
 
 _INLINE_CODE_RE = re.compile(r"`+([^`\n]+)`+")
-_ATX_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\r?\n?$")
+_ATX_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(\S.*?)\r?\n?$")
 
 
 def iter_fence_states(lines: Iterable[str]) -> Iterator[tuple[str, bool]]:
@@ -58,7 +58,9 @@ def extract_headings(body: str) -> list[str]:
     unfenced = "\n".join(
         "" if in_fence else line for line, in_fence in iter_fence_states(body.split("\n"))
     )
-    raw_headings = re.findall(r"^#{1,6}\s+(.+)$", unfenced, flags=re.MULTILINE)
+    # `[ \t]`, not `\s`: with MULTILINE, `\s+` crosses the newline after a bare
+    # `#`, promoting the next line to an invented heading.
+    raw_headings = re.findall(r"^#{1,6}[ \t]+(\S[^\n]*?)[ \t\r]*$", unfenced, flags=re.MULTILINE)
     return [_clean_heading_text(h) for h in raw_headings]
 
 

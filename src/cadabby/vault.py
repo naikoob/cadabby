@@ -184,8 +184,11 @@ def load_vault_config(vault_root: Path) -> dict[str, Any]:
 
     if cfg_file.exists():
         try:
-            content = cfg_file.read_text("utf-8")
+            # utf-8-sig: Windows editors prepend a BOM, which json.loads rejects.
+            content = cfg_file.read_text("utf-8-sig")
             user_data = json.loads(content)
+        except UnicodeDecodeError as e:
+            raise VaultConfigError(f"Configuration file at {cfg_file} is not valid UTF-8: {e}") from e
         except json.JSONDecodeError as e:
             raise VaultConfigError(f"Malformed configuration file at {cfg_file}: {e}") from e
         except OSError as e:

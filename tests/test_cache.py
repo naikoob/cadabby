@@ -992,6 +992,50 @@ class TestVaultCacheRanking(unittest.TestCase):
             )
 
 
+class TestCacheSelfHealing(unittest.TestCase):
+    """The cache is disposable (§4.2): damage to it, or races with the vault, never fail a command."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.vault_root = copy_demo_vault(Path(self.tmp_dir.name) / "demo-vault")
+        self.vault = Vault(self.vault_root)
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def test_a_corrupt_cache_file_is_rebuilt(self):
+        db = self.vault.cache_db_path
+        db.parent.mkdir(parents=True, exist_ok=True)
+        db.write_bytes(b"this is not an sqlite database" * 200)
+        cache = VaultCache(self.vault)
+        try:
+            cache.scan()
+            self.assertTrue(cache.search("sqlite"))
+        finally:
+            cache.close()
+
+    def test_a_file_deleted_mid_scan_is_dropped_not_fatal(self):
+        cache = VaultCache(self.vault)
+        try:
+            cache.scan()
+            victim = self.vault_root / "wiki" / "sqlite.md"
+            discovered = cache._discover_files()
+            victim.unlink()  # gone after discovery, before stat/read
+            ghost = self.vault_root / "wiki" / "never-existed.md"
+            discovered["wiki/never-existed.md"] = ghost
+            original = cache._discover_files
+            cache._discover_files = lambda: discovered
+            try:
+                cache.scan(force=True)
+            finally:
+                cache._discover_files = original
+            cids = {r["cid"] for r in cache.get_connection().execute("SELECT cid FROM notes;")}
+            self.assertNotIn("wiki/sqlite", cids)
+            self.assertNotIn("wiki/never-existed", cids)
+        finally:
+            cache.close()
+
+
 if __name__ == "__main__":
     unittest.main()
 

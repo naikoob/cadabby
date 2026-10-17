@@ -220,6 +220,37 @@ class TestFsutil(unittest.TestCase):
         self.assertEqual(len(tmp_files), 0)
 
 
+class TestAtomicWriteDurability(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp_dir.name)
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def test_a_name_near_name_max_can_still_be_rewritten(self):
+        target = self.dir / ("n" * 250 + ".md")
+        target.write_text("old\n", "utf-8")
+        atomic_write(target, "new\n")
+        self.assertEqual(target.read_text("utf-8"), "new\n")
+        self.assertEqual(list(self.dir.glob(".tmp_*")), [])
+
+    def test_multibyte_name_is_truncated_on_a_character_boundary(self):
+        target = self.dir / ("é" * 125 + ".md")  # 254 bytes
+        atomic_write(target, "x\n")
+        self.assertEqual(target.read_text("utf-8"), "x\n")
+
+    def test_the_parent_directory_is_fsynced_after_the_rename(self):
+        from unittest import mock
+
+        import cadabby.fsutil as fsutil
+
+        target = self.dir / "note.md"
+        with mock.patch.object(fsutil, "fsync_dir", wraps=fsutil.fsync_dir) as spy:
+            atomic_write(target, "x\n")
+        spy.assert_called_once_with(target.resolve().parent)
+
+
 if __name__ == "__main__":
     unittest.main()
 
