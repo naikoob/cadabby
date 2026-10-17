@@ -1019,6 +1019,60 @@ class TestStatusAndMoveCommands(unittest.TestCase):
                 cmd_verify(DummyArgs(vault=str(self.vault_root), cid="README", human=True, agent=None, method=None))
         prompt.assert_not_called()
 
+    def test_cli_filter_only_search_and_section_grounding(self):
+        """§5.3, §10 C55, C56: `cadabby search` allows omitting query when a filter is passed, and `cadabby ground` renders `[Section: ...]`."""
+        parser = build_parser()
+
+        # 1. Parser accepts `cadabby search --domain wiki` with no positional query
+        parsed = parser.parse_args(["search", "--domain", "wiki", "--trust", "human-reviewed"])
+        self.assertEqual(parsed.query, "")
+        self.assertEqual(parsed.domain, "wiki")
+        self.assertEqual(parsed.trust, "human-reviewed")
+
+        # 2. cmd_search with filter-only prints "active filters" header
+        code, out = self._run(
+            cmd_search,
+            query="",
+            domain="wiki",
+            type=None,
+            status=None,
+            trust="human-reviewed",
+            tag=None,
+            limit=10,
+            json=False,
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("active filters", out)
+        self.assertIn("wiki/epistemic-trust-tiers", out)
+
+        # 3. cmd_search with no query and no filters exits EXIT_ENVIRONMENT (INVALID_ARGUMENT)
+        with contextlib.redirect_stderr(io.StringIO()):
+            exit_code = _run_like_main(
+                cmd_search,
+                DummyArgs(
+                    vault=str(self.vault_root),
+                    query="",
+                    domain=None,
+                    type=None,
+                    status=None,
+                    trust=None,
+                    tag=None,
+                    limit=10,
+                    json=False,
+                ),
+            )
+        self.assertEqual(exit_code, EXIT_ENVIRONMENT)
+
+        # 4. cmd_ground with #section renders `[Section: ...]` in text output
+        code_g, out_g = self._run(
+            cmd_ground,
+            cids=["wiki/epistemic-trust-tiers#Epistemic Trust Tiers"],
+            budget_tokens=None,
+            json=False,
+        )
+        self.assertEqual(code_g, 0)
+        self.assertIn("[Section: Epistemic Trust Tiers]", out_g)
+
 
 if __name__ == "__main__":
     unittest.main()

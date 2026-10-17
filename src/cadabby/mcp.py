@@ -51,16 +51,21 @@ TOOLS = [
     {
         "name": "vault_search",
         "description": (
-            "Keyword search (SQLite FTS5 BM25) over vault notes, ranked up by trust tier and note status. "
-            "Matching is lexical, not semantic: query with words the note would contain, and try synonyms "
-            "before concluding a topic is absent. Results exclude raw/ unless domain='raw'; search raw/ too "
-            "before telling the user the vault has nothing. Every call rescans the vault first, so files "
-            "edited outside this session are already visible."
+            "Keyword search (SQLite FTS5 BM25) or metadata filter query over vault notes, ranked up by trust tier, "
+            "note status, and domain. Matching is lexical, not semantic: query with words the note would contain, "
+            "and try synonyms before concluding a topic is absent. Omit 'query' (or pass '') with at least one "
+            "filter (domain, type, status, trust, tag) to list matching notes by epistemic rank without a keyword. "
+            "Results exclude raw/ unless domain='raw'; search raw/ too before telling the user the vault has nothing. "
+            "Every call rescans the vault first, so files edited outside this session are already visible."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Search query terms"},
+                "query": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Search query terms; omit or pass '' when filtering by domain, type, status, trust, or tag",
+                },
                 "domain": {
                     "type": "string",
                     "description": (
@@ -75,19 +80,26 @@ TOOLS = [
                 "tag": {"type": "string", "description": "Filter by note tag"},
                 "limit": {"type": "integer", "minimum": 1, "default": 20, "description": "Max results to return"},
             },
-            "required": ["query"],
         },
     },
     {
         "name": "vault_ground",
-        "description": "Retrieve full note markdown content and 1-hop link/backlink/source graph for specified CIDs, note stems, or wikilinks.",
+        "description": (
+            "Retrieve note markdown content (full note or a specific '#heading' section), domain directives, "
+            "and 1-hop link/backlink/source graph with neighbor metadata (title, type, status, trust_tier, "
+            "description) for specified CIDs, note stems, or wikilinks."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "cids": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "List of note CIDs, bare stems (e.g. 'Raft-Consensus'), relative paths, or wikilinks to retrieve",
+                    "description": (
+                        "List of note CIDs, bare stems (e.g. 'raft-consensus'), relative paths, or wikilinks "
+                        "to retrieve; append '#heading' (or '[[Note#Heading]]') to ground only that section "
+                        "and its subsections"
+                    ),
                 },
                 "budget_tokens": {
                     "type": "integer",
@@ -409,7 +421,7 @@ class McpServer:
     def _tool_search(self, args: dict[str, Any]) -> dict[str, Any]:
         self.cache.scan()
         res = self.cache.search(
-            query=args["query"],
+            query=args.get("query") or "",
             type_=args.get("type"),
             status=args.get("status"),
             trust=args.get("trust"),

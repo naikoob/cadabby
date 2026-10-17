@@ -462,6 +462,45 @@ class TestMcpServer(unittest.TestCase):
         ok = self.server.handle_tools_call("vault_scaffold_note", {"title": "Nulls", "type": "concept", "description": "d", "path": None})
         self.assertFalse(ok["isError"], ok)
 
+    def test_mcp_filter_only_search_and_section_grounding(self):
+        """§4.4, §5.1, §10 C55, C56: MCP vault_search supports filter-only queries and vault_ground supports #section + neighbor metadata."""
+        self.server.handle_initialize({"clientInfo": {"name": "test-agent"}})
+
+        # 1. vault_search with omitted query and a filter succeeds
+        res_filtered = self.server.handle_tools_call("vault_search", {"trust": "human-reviewed"})
+        self.assertFalse(res_filtered["isError"])
+        hits = json.loads(res_filtered["content"][0]["text"])
+        self.assertGreater(len(hits), 0)
+        self.assertTrue(all(h["trust_tier"] == "human-reviewed" for h in hits))
+
+        # 2. vault_search with omitted or empty query and NO filters returns INVALID_ARGUMENT
+        for bad in ({}, {"query": ""}, {"query": "   "}):
+            res_empty = self.server.handle_tools_call("vault_search", bad)
+            self.assertTrue(res_empty["isError"])
+            err = json.loads(res_empty["content"][0]["text"])["error"]
+            self.assertEqual(err["code"], "INVALID_ARGUMENT")
+
+        # 3. vault_ground with #section extracts section and enriches 1-hop neighbors
+        res_ground = self.server.handle_tools_call(
+            "vault_ground",
+            {"cids": ["wiki/epistemic-trust-tiers#Epistemic Trust Tiers"]},
+        )
+        self.assertFalse(res_ground["isError"])
+        grounded = json.loads(res_ground["content"][0]["text"])
+        self.assertEqual(len(grounded), 1)
+        self.assertEqual(grounded[0]["section"], "Epistemic Trust Tiers")
+        self.assertTrue(all("trust_tier" in l and "title" in l for l in grounded[0]["links"]))
+
+        # 4. vault_ground with missing #section returns INVALID_ARGUMENT naming available headings
+        res_bad_sec = self.server.handle_tools_call(
+            "vault_ground",
+            {"cids": ["wiki/epistemic-trust-tiers#NoSuchHeading"]},
+        )
+        self.assertTrue(res_bad_sec["isError"])
+        sec_err = json.loads(res_bad_sec["content"][0]["text"])["error"]
+        self.assertEqual(sec_err["code"], "INVALID_ARGUMENT")
+        self.assertIn("Epistemic Trust Tiers", sec_err["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

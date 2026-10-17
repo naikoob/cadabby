@@ -343,9 +343,47 @@ class TestVaultCache(unittest.TestCase):
         results_btree = self.cache.search("LSM B-tree write heavy")
         self.assertIsInstance(results_btree, list)
 
-        # Empty or punctuation-only query returns empty list cleanly
+        # Punctuation-only query returns empty list cleanly; unfiltered empty query raises ValueError
         self.assertEqual(self.cache.search("---"), [])
-        self.assertEqual(self.cache.search(""), [])
+        with self.assertRaises(ValueError):
+            self.cache.search("")
+
+    def test_filter_only_search_orders_by_epistemic_multipliers_and_rejects_unfiltered_empty_query(self):
+        """§4.4, §5.1, §10 C55: Filter-only search ranks by trust_mult * status_mult * domain_mult and rejects unfiltered empty queries."""
+        self.cache.scan()
+
+        # Unfiltered empty or whitespace query is rejected as ValueError (INVALID_ARGUMENT)
+        with self.assertRaises(ValueError):
+            self.cache.search("")
+        with self.assertRaises(ValueError):
+            self.cache.search("   ")
+
+        # Filter by trust_tier="human-reviewed": scores are 2.0 * 1.0 * 1.0 = 2.0
+        hr_results = self.cache.search("", trust="human-reviewed")
+        self.assertGreater(len(hr_results), 0)
+        for r in hr_results:
+            self.assertEqual(r.trust_tier, "human-reviewed")
+            self.assertAlmostEqual(r.score, 2.0, places=5)
+            self.assertTrue(r.snippet)
+
+        # Filter by domain="wiki": human-reviewed (2.0) outranks machine-confirmed (1.2) outranks unverified/stale (1.0),
+        # and deprecated (0.4) sits at the bottom.
+        wiki_results = self.cache.search(domain="wiki")
+        self.assertGreater(len(wiki_results), 3)
+        scores = [r.score for r in wiki_results]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+        self.assertEqual(wiki_results[0].trust_tier, "human-reviewed")
+        self.assertEqual(wiki_results[-1].status, "deprecated")
+        self.assertAlmostEqual(wiki_results[-1].score, 0.4, places=5)
+
+        # Filter by tag="attention" with empty query
+        tag_results = self.cache.search("", tag="attention")
+        self.assertTrue(any(r.cid == "wiki/flash-attention" for r in tag_results))
+
+        # Filter by domain="raw" lists raw sources ordered by CID
+        raw_results = self.cache.search("", domain="raw")
+        self.assertGreater(len(raw_results), 0)
+        self.assertTrue(all(r.domain == "raw" for r in raw_results))
 
     def test_cache_target_resolution(self):
         self.cache.scan()

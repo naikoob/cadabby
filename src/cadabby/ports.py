@@ -56,7 +56,7 @@ class IndexCachePort(Protocol):
 
     def search(
         self,
-        query: str,
+        query: str = "",
         type_: str | None = None,
         status: str | None = None,
         trust: str | None = None,

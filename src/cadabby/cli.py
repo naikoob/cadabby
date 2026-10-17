@@ -126,12 +126,13 @@ def cmd_search(args: argparse.Namespace) -> int:
         print(json.dumps(out, indent=2))
         return EXIT_OK
 
+    label = f"'{args.query}'" if args.query else "active filters"
     if not results:
-        print(f"No results found matching '{args.query}'.")
+        print(f"No results found matching {label}.")
         return EXIT_OK
 
     cid_w = max(42, max(len(r.cid) for r in results) + 2)
-    print(f"\nFound {len(results)} matches for '{args.query}':\n")
+    print(f"\nFound {len(results)} matches for {label}:\n")
     print(f"{'CID':<{cid_w}} {'TRUST':<18} {'STATUS':<12} {'SCORE':<8} {'TITLE'}")
     print("-" * (cid_w + 58))
     for r in results:
@@ -156,7 +157,8 @@ def cmd_ground(args: argparse.Namespace) -> int:
 
     for item in grounded:
         print("=" * 80)
-        print(f"CID: {item['cid']} ({item['trust_tier']})")
+        sec_suffix = f" [Section: {item['section']}]" if item.get("section") else ""
+        print(f"CID: {item['cid']} ({item['trust_tier']}){sec_suffix}")
         print(f"Title: {item['title']} | Type: {item['type']} | Status: {item['status']}")
         print(f"Links ({len(item['links'])}): {', '.join(l['target'] for l in item['links'])}")
         print(f"Backlinks ({len(item['backlinks'])}): {', '.join(b['source_cid'] for b in item['backlinks'])}")
@@ -657,7 +659,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     # search
     p_search = subparsers.add_parser("search", parents=[vault_parent], help="Search vault notes")
-    p_search.add_argument("query", help="Search query")
+    p_search.add_argument(
+        "query",
+        nargs="?",
+        default="",
+        help="Search query (optional when at least one filter flag is passed)",
+    )
     p_search.add_argument(
         "--domain",
         help="Filter by cognitive domain (e.g. wiki, customers, projects); 'raw' searches unprocessed sources",
@@ -672,7 +679,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ground
     p_ground = subparsers.add_parser("ground", parents=[vault_parent], help="Retrieve full content and 1-hop graph")
-    p_ground.add_argument("cids", nargs="+", help="One or more note CIDs, note stems, or wikilinks")
+    p_ground.add_argument(
+        "cids",
+        nargs="+",
+        help="One or more note CIDs, note stems, or wikilinks (append #Heading to ground a single section)",
+    )
     p_ground.add_argument(
         "--budget-tokens", "--budget", dest="budget_tokens", type=_positive_int, default=None, help="Token budget"
     )

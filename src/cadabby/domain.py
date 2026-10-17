@@ -12,9 +12,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from urllib.parse import unquote
+
 from cadabby.constants import ACTOR_PATTERN
 from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter, serialize_frontmatter
 from cadabby.okf import compute_body_hash, derive_trust_tier, is_valid_actor, utc_now_iso
+
+_INLINE_CODE_RE = re.compile(r"`+([^`\n]+)`+")
+_ATX_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\r?\n?$")
 
 
 def iter_fence_states(lines: Iterable[str]) -> Iterator[tuple[str, bool]]:
@@ -41,6 +46,79 @@ def iter_fence_states(lines: Iterable[str]) -> Iterator[tuple[str, bool]]:
             if stripped.startswith(fence) and not stripped.strip(fence[0]):
                 fence = ""
             yield line, True
+
+
+def _clean_heading_text(raw: str) -> str:
+    """Strip optional closing ATX `#` sequence and unwrap inline code backticks."""
+    return _INLINE_CODE_RE.sub(r"\1", re.sub(r"\s+#+\s*$", "", raw.strip()))
+
+
+def extract_headings(body: str) -> list[str]:
+    """Extract markdown ATX headings outside fenced code blocks, unwrapping inline code backticks."""
+    unfenced = "\n".join(
+        "" if in_fence else line for line, in_fence in iter_fence_states(body.split("\n"))
+    )
+    raw_headings = re.findall(r"^#{1,6}\s+(.+)$", unfenced, flags=re.MULTILINE)
+    return [_clean_heading_text(h) for h in raw_headings]
+
+
+def heading_slug(text: str) -> str:
+    """GitHub-style heading anchor: lowercase, punctuation dropped, spaces to hyphens."""
+    unwrapped = _INLINE_CODE_RE.sub(r"\1", text.strip())
+    return re.sub(r"[^\w\- ]", "", unwrapped.lower()).replace(" ", "-")
+
+
+def anchor_matches_heading(anchor: str, heading: str) -> bool:
+    """Whether a link or grounding anchor names `heading` (Obsidian or GitHub-slug form)."""
+    a = _INLINE_CODE_RE.sub(r"\1", unquote(anchor).strip())
+    if not a:
+        return False
+    a_norm = re.sub(r"[\s-]+", " ", a.lower())
+    h_clean = heading.strip()
+    if a.lower() == h_clean.lower() or a_norm == re.sub(r"[\s-]+", " ", h_clean.lower()):
+        return True
+    a_slug = heading_slug(a)
+    return bool(a_slug and a_slug == heading_slug(h_clean))
+
+
+def anchor_matches(anchor: str, headings: Iterable[str]) -> bool:
+    """Whether a link anchor names one of the headings.
+
+    Accepts the heading text as written (Obsidian), its space/hyphen-normalized
+    form, and the GitHub slug, so `#b-tree-indexes-v2` finds `## B-Tree Indexes (v2)`.
+    """
+    return any(anchor_matches_heading(anchor, h) for h in headings)
+
+
+def extract_markdown_section(body: str, anchor: str) -> tuple[str, str] | None:
+    """Extract the ATX heading section matching `anchor` (including nested subsections).
+
+    Scans lines outside fenced code blocks for the first heading at level k (1..6)
+    matching `anchor`, and collects all lines up to the next non-fenced heading of
+    level <= k. Returns `(matched_heading_title, section_text)` or None.
+    """
+    target_level: int | None = None
+    matched_heading = ""
+    collected: list[str] = []
+
+    for line, in_fence in iter_fence_states(re.findall(r"[^\n]*\n|[^\n]+\Z", body)):
+        if not in_fence and (m := _ATX_HEADING_RE.match(line)):
+            level = len(m.group(1))
+            heading_text = _clean_heading_text(m.group(2))
+            if target_level is None:
+                if anchor_matches_heading(anchor, heading_text):
+                    target_level = level
+                    matched_heading = heading_text
+                    collected.append(line)
+                continue
+            if level <= target_level:
+                break
+        if target_level is not None:
+            collected.append(line)
+
+    if target_level is None:
+        return None
+    return matched_heading, "".join(collected)
 
 
 def split_markdown_sections(body: str) -> list[tuple[str, str]]:

@@ -24,7 +24,13 @@ from cadabby.constants import (
     NOTE_STATUSES,
     REQUIRED_FRONTMATTER_FIELDS,
 )
-from cadabby.domain import DomainDefinition, iter_fence_states
+from cadabby.domain import (
+    DomainDefinition,
+    anchor_matches as _anchor_matches,
+    extract_headings as _extract_headings,
+    heading_slug as _heading_slug,
+    iter_fence_states,
+)
 from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter
 from cadabby.graph import (
     LINK_KIND_MARKDOWN,
@@ -118,44 +124,6 @@ def status_report(vault: Vault, cache: VaultCache, *, lint: bool = False) -> dic
     if lint:
         report["findings"] = [f.to_dict() for f in findings]
     return report
-
-
-_INLINE_CODE_RE = re.compile(r"`+([^`\n]+)`+")
-
-
-def _extract_headings(body: str) -> list[str]:
-    """Extract markdown ATX headings outside fenced code blocks, unwrapping inline code backticks."""
-    unfenced = "\n".join(
-        "" if in_fence else line for line, in_fence in iter_fence_states(body.split("\n"))
-    )
-    raw_headings = re.findall(r"^#{1,6}\s+(.+)$", unfenced, flags=re.MULTILINE)
-    return [
-        _INLINE_CODE_RE.sub(r"\1", re.sub(r"\s+#+\s*$", "", h.strip()))
-        for h in raw_headings
-    ]
-
-
-def _heading_slug(text: str) -> str:
-    """GitHub-style heading anchor: lowercase, punctuation dropped, spaces to hyphens."""
-    unwrapped = _INLINE_CODE_RE.sub(r"\1", text.strip())
-    return re.sub(r"[^\w\- ]", "", unwrapped.lower()).replace(" ", "-")
-
-
-def _anchor_matches(anchor: str, headings: list[str]) -> bool:
-    """Whether a link anchor names one of the headings.
-
-    Accepts the heading text as written (Obsidian), its space/hyphen-normalized
-    form, and the GitHub slug, so `#b-tree-indexes-v2` finds `## B-Tree Indexes (v2)`.
-    """
-    a = _INLINE_CODE_RE.sub(r"\1", unquote(anchor).strip())
-    a_norm = re.sub(r"[\s-]+", " ", a.lower())
-    a_slug = _heading_slug(a)
-    for h in headings:
-        if a.lower() == h.strip().lower() or a_norm == re.sub(r"[\s-]+", " ", h.strip().lower()):
-            return True
-        if a_slug and a_slug == _heading_slug(h):
-            return True
-    return False
 
 
 def _markdown_path_hint(source_cid: str, target_raw: str, resolver: LinkTargetIndex) -> str:

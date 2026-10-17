@@ -770,19 +770,49 @@ class VaultCache:
     def get_note_neighborhood(
         self, cid: str
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-        """Return (forward_links, backlinks, sources) for `cid` (§5.1)."""
+        """Return (forward_links, backlinks, sources) for `cid` with 1-hop neighbor metadata (§5.1)."""
         conn = self.get_connection()
         links = [
-            {"target": r["target_raw"], "resolved_cid": r["target_cid"], "kind": r["kind"]}
+            {
+                "target": r["target_raw"],
+                "resolved_cid": r["target_cid"],
+                "kind": r["kind"],
+                "title": r["title"],
+                "type": r["type"],
+                "status": r["status"],
+                "trust_tier": r["trust_tier"],
+                "description": r["description"],
+            }
             for r in conn.execute(
-                "SELECT target_raw, target_cid, kind FROM links WHERE source_cid = ?;",
+                """
+                SELECT l.target_raw, l.target_cid, l.kind,
+                       n.title, n.type, n.status, n.trust_tier, n.description
+                FROM links l
+                LEFT JOIN notes n ON n.cid = l.target_cid AND n.parse_error IS NULL
+                WHERE l.source_cid = ?;
+                """,
                 (cid,),
             ).fetchall()
         ]
         backlinks = [
-            {"source_cid": r["source_cid"], "target_raw": r["target_raw"], "kind": r["kind"]}
+            {
+                "source_cid": r["source_cid"],
+                "target_raw": r["target_raw"],
+                "kind": r["kind"],
+                "title": r["title"],
+                "type": r["type"],
+                "status": r["status"],
+                "trust_tier": r["trust_tier"],
+                "description": r["description"],
+            }
             for r in conn.execute(
-                "SELECT source_cid, target_raw, kind FROM links WHERE target_cid = ?;",
+                """
+                SELECT l.source_cid, l.target_raw, l.kind,
+                       n.title, n.type, n.status, n.trust_tier, n.description
+                FROM links l
+                LEFT JOIN notes n ON n.cid = l.source_cid AND n.parse_error IS NULL
+                WHERE l.target_cid = ?;
+                """,
                 (cid,),
             ).fetchall()
         ]
@@ -795,33 +825,11 @@ class VaultCache:
         ]
         return links, backlinks, sources
 
-    def search(
-        self,
-        query: str,
-        type_: str | None = None,
-        status: str | None = None,
-        trust: str | None = None,
-        tag: str | None = None,
-        domain: str | None = None,
-        limit: int = 20,
-    ) -> list[SearchResult]:
-        """Perform BM25 search across cognitive domain notes with epistemic rank boosting conforming to §4.4."""
-        # The OR fill compares against `limit`, so it must be a real count: a
-        # string broke the comparison and a negative one (SQLite's "no limit")
-        # silently skipped the fill.
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
-            raise ValueError(f"limit must be a positive integer, got {limit!r}")
-        clean_query = sanitize_fts5_query(query)
-        if not clean_query:
-            return []
-
-        # A pure read like every getter here: entry points scan first (§4.3).
-        conn = self.get_connection()
-
+    @staticmethod
+    def _epistemic_multiplier_sql(ranking_cfg: dict[str, Any]) -> str:
+        """Build the SQL expression for `:trust_mult * :status_mult * :domain_mult` (§4.4)."""
         # Multipliers were validated as finite numbers by load_vault_config
         # (§2.6); keys are free-form strings, so they are still SQL-escaped.
-        ranking_cfg = self.vault.config["ranking"]
-
         def safe_case(k: str, v: float) -> str:
             clean_k = k.replace("'", "''")
             return f"WHEN '{clean_k}' THEN {float(v)}"
@@ -831,27 +839,25 @@ class VaultCache:
             # An empty CASE body is a syntax error; a neutral multiplier is not
             return f"CASE {column} {cases} ELSE 1.0 END" if cases else "1.0"
 
-        # Searching the raw layer reads a different index (see _fts_table). The
-        # table name is chosen here, never interpolated from caller input.
-        fts = _fts_table(domain)
-
-        field_hits = " + ".join(
-            f"(CASE WHEN instr(highlight({fts}, {idx}, char(1), char(2)), char(1)) > 0 THEN {w} ELSE 0.0 END)"
-            for idx, w in enumerate(FTS_COLUMN_WEIGHTS)
-        )
-        score_expr = f"""
-            ((-bm25({fts}, {FTS_COLUMN_WEIGHTS[0]}, {FTS_COLUMN_WEIGHTS[1]}, {FTS_COLUMN_WEIGHTS[2]}, {FTS_COLUMN_WEIGHTS[3]}))
-             + ({FTS_FIELD_HIT_FLOOR} * ({field_hits})))
-            * ({multiplier_expr("n.trust_tier", ranking_cfg["trust"])})
+        return f"""
+            ({multiplier_expr("n.trust_tier", ranking_cfg["trust"])})
             * ({multiplier_expr("n.status", ranking_cfg["status"])})
             * ({multiplier_expr("n.layer", ranking_cfg.get("domain", {}))})
         """
 
-        where_clauses = [
-            f"{fts} MATCH :query",
-            "n.parse_error IS NULL",
-        ]
-        params: dict[str, Any] = {"query": clean_query, "limit": limit}
+    @staticmethod
+    def _build_search_filters(
+        *,
+        domain: str | None,
+        type_: str | None,
+        status: str | None,
+        trust: str | None,
+        tag: str | None,
+        limit: int,
+    ) -> tuple[list[str], dict[str, Any]]:
+        """Build the common `WHERE` predicates and query parameters for `search()`."""
+        where_clauses = ["n.parse_error IS NULL"]
+        params: dict[str, Any] = {"limit": limit}
 
         if domain:
             where_clauses.append("n.layer = :domain")
@@ -875,6 +881,56 @@ class VaultCache:
             where_clauses.append("(instr(' ' || n.tags || ' ', ' ' || :tag || ' ') > 0)")
             params["tag"] = tag.lower()
 
+        return where_clauses, params
+
+    @staticmethod
+    def _search_filter_only(
+        conn: sqlite3.Connection,
+        epistemic_mult_expr: str,
+        where_clauses: list[str],
+        params: dict[str, Any],
+    ) -> list[sqlite3.Row]:
+        """Run a filter-only search against `notes` ordered by epistemic multipliers (§4.4)."""
+        sql = f"""
+            SELECT n.cid,
+                   n.title,
+                   n.description,
+                   n.type,
+                   n.status,
+                   n.trust_tier,
+                   {epistemic_mult_expr} AS score,
+                   COALESCE(NULLIF(n.description, ''), substr(n.body, 1, 120), '') AS snippet
+            FROM notes n
+            WHERE {" AND ".join(where_clauses)}
+            ORDER BY score DESC, n.cid ASC
+            LIMIT :limit;
+        """
+        return conn.execute(sql, params).fetchall()
+
+    @staticmethod
+    def _search_fts(
+        conn: sqlite3.Connection,
+        clean_query: str,
+        domain: str | None,
+        limit: int,
+        epistemic_mult_expr: str,
+        where_clauses: list[str],
+        params: dict[str, Any],
+    ) -> list[sqlite3.Row]:
+        """Run an FTS5 BM25 search with field-presence floor and multi-term OR fill (§4.4)."""
+        # Searching the raw layer reads a different index (see _fts_table). The
+        # table name is chosen here, never interpolated from caller input.
+        fts = _fts_table(domain)
+        field_hits = " + ".join(
+            f"(CASE WHEN instr(highlight({fts}, {idx}, char(1), char(2)), char(1)) > 0 THEN {w} ELSE 0.0 END)"
+            for idx, w in enumerate(FTS_COLUMN_WEIGHTS)
+        )
+        score_expr = f"""
+            ((-bm25({fts}, {FTS_COLUMN_WEIGHTS[0]}, {FTS_COLUMN_WEIGHTS[1]}, {FTS_COLUMN_WEIGHTS[2]}, {FTS_COLUMN_WEIGHTS[3]}))
+             + ({FTS_FIELD_HIT_FLOOR} * ({field_hits})))
+            * {epistemic_mult_expr}
+        """
+        fts_params = {**params, "query": clean_query}
         sql = f"""
             SELECT n.cid,
                    n.title,
@@ -886,19 +942,19 @@ class VaultCache:
                    snippet({fts}, 2, '<b>', '</b>', '...', 15) AS snippet
             FROM {fts}
             JOIN notes n ON n.id = {fts}.rowid
-            WHERE {" AND ".join(where_clauses)}
+            WHERE {" AND ".join([f"{fts} MATCH :query", *where_clauses])}
             ORDER BY score DESC, n.cid ASC
             LIMIT :limit;
         """
-
         try:
-            rows = conn.execute(sql, params).fetchall()
+            rows = conn.execute(sql, fts_params).fetchall()
             fallback_query = or_fallback_fts5_query(clean_query)
             if fallback_query is not None and len(rows) < limit:
                 # All-terms matches keep the top slots; partial matches only fill what is left.
                 seen = {r["cid"] for r in rows}
-                extra = conn.execute(sql, {**params, "query": fallback_query}).fetchall()
+                extra = conn.execute(sql, {**fts_params, "query": fallback_query}).fetchall()
                 rows += [r for r in extra if r["cid"] not in seen][: limit - len(rows)]
+            return rows
         except sqlite3.OperationalError as e:
             # Only a MATCH expression FTS5 cannot parse means "no results". A
             # lock or I/O failure must propagate so classify() reports it as
@@ -906,6 +962,54 @@ class VaultCache:
             if "fts5: syntax error" in str(e):
                 return []
             raise
+
+    def search(
+        self,
+        query: str = "",
+        type_: str | None = None,
+        status: str | None = None,
+        trust: str | None = None,
+        tag: str | None = None,
+        domain: str | None = None,
+        limit: int = 20,
+    ) -> list[SearchResult]:
+        """Perform BM25 or filter-only search across cognitive domain notes with epistemic rank boosting (§4.4)."""
+        # The OR fill compares against `limit`, so it must be a real count: a
+        # string broke the comparison and a negative one (SQLite's "no limit")
+        # silently skipped the fill.
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError(f"limit must be a positive integer, got {limit!r}")
+        if query is not None and not isinstance(query, str):
+            raise ValueError("query must be a string")
+
+        raw_query = (query or "").strip()
+        filter_only = not raw_query
+        if filter_only and not any((type_, status, trust, tag, domain)):
+            raise ValueError(
+                "Pass a non-empty search query or at least one filter (domain, type, status, trust, tag)"
+            )
+
+        clean_query = "" if filter_only else sanitize_fts5_query(raw_query)
+        if not filter_only and not clean_query:
+            return []
+
+        # A pure read like every getter here: entry points scan first (§4.3).
+        conn = self.get_connection()
+        epistemic_mult_expr = self._epistemic_multiplier_sql(self.vault.config["ranking"])
+        where_clauses, params = self._build_search_filters(
+            domain=domain,
+            type_=type_,
+            status=status,
+            trust=trust,
+            tag=tag,
+            limit=limit,
+        )
+
+        if filter_only:
+            rows = self._search_filter_only(conn, epistemic_mult_expr, where_clauses, params)
+        else:
+            rows = self._search_fts(conn, clean_query, domain, limit, epistemic_mult_expr, where_clauses, params)
+
         return [
             SearchResult(
                 cid=row["cid"],

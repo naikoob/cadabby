@@ -259,6 +259,12 @@ class TestInMemoryHexagonalUseCases(unittest.TestCase):
         self.assertTrue(grounded_budget[0]["truncated"])
         self.assertIn("[truncated:", grounded_budget[0]["content"])
 
+        # Test #section grounding in memory
+        grounded_sec = ground_uc.execute(["wiki/transformer-architecture#Section 1"])
+        self.assertEqual(grounded_sec[0]["section"], "Section 1")
+        self.assertIn("## Section 1\nDetails 1", grounded_sec[0]["content"])
+        self.assertNotIn("## Section 2", grounded_sec[0]["content"])
+
 
 if __name__ == "__main__":
     unittest.main()

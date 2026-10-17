@@ -19,7 +19,13 @@ from urllib.parse import quote
 from cadabby.adapters.disk_storage import DiskNoteStorage, FileLedger
 from cadabby.cache import VaultCache
 from cadabby.constants import DIR_RAW, DIR_WIKI, FILE_AGENTS, TEMPLATE_TITLE_PLACEHOLDER
-from cadabby.domain import Note, VerificationResult, split_markdown_sections
+from cadabby.domain import (
+    Note,
+    VerificationResult,
+    extract_headings,
+    extract_markdown_section,
+    split_markdown_sections,
+)
 from cadabby.errors import AmbiguousNoteError, HumanAttestationRefusedError, VaultConflictError
 from cadabby.frontmatter import FrontmatterParseError, serialize_frontmatter, split_frontmatter
 from cadabby.graph import (
@@ -38,6 +44,8 @@ from cadabby.graph import (
     relative_note_path,
     resolve_markdown_target,
     resolve_relative_path,
+    split_link_target_and_anchor,
+    strip_link_wrapper,
 )
 from cadabby.okf import utc_now_iso
 from cadabby.ports import IndexCachePort, LedgerPort, NoteStoragePort
@@ -215,6 +223,31 @@ class ScaffoldNoteUseCase:
         self.ledger = ledger
         self.vault = vault
 
+    @staticmethod
+    def _resolve_scaffold_destination(title: str, domain: str, path: str | None) -> tuple[str, str]:
+        """Resolve `(rel_path, cid)` for a newly scaffolded note (§5.1)."""
+        target_domain = domain or DIR_WIKI
+        # An empty path is the same as none: some clients send "" for every
+        # optional string they were not given.
+        if path is not None and path.strip():
+            raw_path, parts = _parse_relative_target(
+                path,
+                absolute_error=f"Path traversal detected in '{path}': absolute paths are forbidden",
+            )
+            if raw_path.endswith("/"):
+                # A trailing slash names a folder, as in vault_move_note.
+                parts.append(sanitize_filename(title))
+            clean_path = "/".join(parts)
+            if len(parts) == 1:
+                clean_path = f"{target_domain}/{clean_path}"
+            elif parts[0] != target_domain and domain != DIR_WIKI:
+                clean_path = f"{domain}/{clean_path}"
+            rel_path = clean_path if clean_path.endswith(".md") else f"{clean_path}.md"
+            return rel_path, path_to_cid(rel_path)
+
+        stem = sanitize_filename(title)
+        return f"{target_domain}/{stem}.md", f"{target_domain}/{stem}"
+
     def execute(
         self,
         title: str,
@@ -245,31 +278,7 @@ class ScaffoldNoteUseCase:
                 TEMPLATE_TITLE_PLACEHOLDER, title
             )
 
-        target_domain = domain or DIR_WIKI
-
-        # An empty path is the same as none: some clients send "" for every
-        # optional string they were not given.
-        if path is not None and path.strip():
-            raw_path, parts = _parse_relative_target(
-                path,
-                absolute_error=f"Path traversal detected in '{path}': absolute paths are forbidden",
-            )
-            if raw_path.endswith("/"):
-                # A trailing slash names a folder, as in vault_move_note.
-                parts.append(sanitize_filename(title))
-            clean_path = "/".join(parts)
-            if len(parts) == 1:
-                clean_path = f"{target_domain}/{clean_path}"
-            elif parts[0] != target_domain and domain != DIR_WIKI:
-                clean_path = f"{domain}/{clean_path}"
-            rel_path = clean_path if clean_path.endswith(".md") else f"{clean_path}.md"
-            cid = path_to_cid(rel_path)
-            target_domain = path_to_layer(rel_path)
-        else:
-            stem = sanitize_filename(title)
-            rel_path = f"{target_domain}/{stem}.md"
-            cid = f"{target_domain}/{stem}"
-
+        rel_path, cid = self._resolve_scaffold_destination(title, domain, path)
         _check_new_location(self.storage, self.vault, rel_path, type_, verb="scaffold")
 
         fm_data = {
@@ -1064,6 +1073,56 @@ class GroundNotesUseCase:
         self.cache = cache
         self.vault = vault
 
+    def _lookup_note(self, target: str, resolver: LinkTargetIndex) -> Note | None:
+        """Resolve `target` by exact CID first, then via `resolver` (§4.4, §5.1)."""
+        if not target:
+            return None
+        note = self.storage.get_note(path_to_cid(target))
+        if note is not None:
+            return note
+        resolved = resolver.resolve(target)
+        return self.storage.get_note(resolved) if resolved else None
+
+    def _resolve_target_and_anchor(
+        self, raw_target: str, resolver: LinkTargetIndex
+    ) -> tuple[Note | None, str | None]:
+        """Resolve `raw_target` into `(note, anchor)`, trying literal `#` filenames before anchor splitting (§5.1)."""
+        unwrapped = strip_link_wrapper(raw_target)
+        if not unwrapped:
+            return None, None
+
+        # Try exact or stem match with '#' intact first so a legacy note whose
+        # filename literally contains '#' (e.g. 'wiki/C#-Basics.md', §5.1)
+        # resolves as a whole note before splitting '#' as a section anchor.
+        if "#" in unwrapped:
+            literal_note = self._lookup_note(unwrapped, resolver)
+            if literal_note is not None:
+                return literal_note, None
+
+        clean, anchor = split_link_target_and_anchor(raw_target)
+        note = self._lookup_note(clean, resolver)
+        if note is None and unwrapped.count("#") > 1:
+            alt_clean, alt_anchor = unwrapped.rsplit("#", 1)
+            note = self._lookup_note(alt_clean.strip(), resolver)
+            if note is not None:
+                anchor = alt_anchor.strip() or None
+        return note, anchor
+
+    @staticmethod
+    def _apply_section_anchor(note: Note, anchor: str | None) -> tuple[Note, str | None]:
+        """Slice `note.body` to the requested ATX `#anchor` section when `anchor` is given (§5.1)."""
+        if anchor is None:
+            return note, None
+        extracted = extract_markdown_section(note.body, anchor)
+        if extracted is None:
+            headings = extract_headings(note.body)
+            available = ", ".join(f"'{h}'" for h in headings) if headings else "none"
+            raise ValueError(
+                f"Section '#{anchor}' not found in '{note.cid}' (available headings: {available})"
+            )
+        matched_section, section_text = extracted
+        return replace(note, body=section_text, raw_text=None), matched_section
+
     def execute(
         self,
         cids: Sequence[str],
@@ -1078,16 +1137,11 @@ class GroundNotesUseCase:
         )
 
         for raw_target in cids:
-            clean = normalize_link_target(raw_target)
-
-            note = self.storage.get_note(path_to_cid(clean))
-            if note is None:
-                resolved = resolver.resolve(clean)
-                if resolved:
-                    note = self.storage.get_note(resolved)
+            note, anchor = self._resolve_target_and_anchor(raw_target, resolver)
             if note is None:
                 continue
 
+            note_for_budget, matched_section = self._apply_section_anchor(note, anchor)
             cid = note.cid
             domain_name = path_to_layer(note.rel_path)
             domain_def = domains.get(domain_name)
@@ -1098,7 +1152,7 @@ class GroundNotesUseCase:
             else:
                 links, backlinks, sources = [], [], []
 
-            content_to_return, truncated = _truncate_to_budget(note, budget_tokens)
+            content_to_return, truncated = _truncate_to_budget(note_for_budget, budget_tokens)
 
             grounded.append(
                 {
@@ -1108,6 +1162,7 @@ class GroundNotesUseCase:
                     "type": note.type,
                     "status": note.status,
                     "trust_tier": note.trust_tier,
+                    "section": matched_section,
                     "directives": directives,
                     "content": content_to_return,
                     "links": links,

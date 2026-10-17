@@ -343,16 +343,36 @@ class LinkTargetIndex:
         return self._stem_map.get(stem)
 
 
+def strip_link_wrapper(text: str) -> str:
+    """Strip surrounding `[[ ]]` (or `![[ ]]`) and any `|alias` while keeping `#` intact."""
+    clean = text.strip()
+    if clean.startswith("![[") and clean.endswith("]]"):
+        clean = clean[3:-2].strip()
+    elif clean.startswith("[[") and clean.endswith("]]"):
+        clean = clean[2:-2].strip()
+    has_alias = "|" in clean
+    without_alias = clean.split("|", 1)[0]
+    if has_alias:
+        without_alias = without_alias.rstrip("\\")
+    return without_alias.strip()
+
+
+def split_link_target_and_anchor(text: str) -> tuple[str, str | None]:
+    """Split a CID, path, stem, or wikilink into `(target_stem, anchor)` (§5.1)."""
+    unwrapped = strip_link_wrapper(text)
+    if "#" not in unwrapped:
+        return unwrapped, None
+    target, anchor = unwrapped.split("#", 1)
+    return target.strip(), (anchor.strip() or None)
+
+
 def normalize_link_target(text: str) -> str:
     """Reduce what a caller typed to a resolvable target: strip `[[ ]]`, `|alias` and `#anchor`.
 
     Shared by `vault_ground` and `cadabby graph`, so both accept the same
     spellings and resolve them through the same `LinkTargetIndex`.
     """
-    clean = text.strip()
-    if clean.startswith("[[") and clean.endswith("]]"):
-        clean = clean[2:-2].strip()
-    return clean.split("|")[0].split("#")[0].strip()
+    return split_link_target_and_anchor(text)[0]
 
 
 def get_note_graph(conn: sqlite3.Connection, target_cid: str) -> dict[str, Any] | None:

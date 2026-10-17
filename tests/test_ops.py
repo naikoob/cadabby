@@ -211,12 +211,14 @@ class TestOps(unittest.TestCase):
         # 2. Wikilink syntax with anchor and alias
         grounded_wiki = ground_notes(
             self.vault,
-            ["[[epistemic-trust-tiers#Tiers]]", "[[sqlite|SQLite Database]]"],
+            ["[[epistemic-trust-tiers#Epistemic Trust Tiers]]", "[[sqlite|SQLite Database]]"],
         )
         self.assertEqual(len(grounded_wiki), 2)
         cids_wiki = [g["cid"] for g in grounded_wiki]
         self.assertIn("wiki/epistemic-trust-tiers", cids_wiki)
         self.assertIn("wiki/sqlite", cids_wiki)
+        self.assertEqual(grounded_wiki[0]["section"], "Epistemic Trust Tiers")
+        self.assertIsNone(grounded_wiki[1]["section"])
 
         # 3. Relative path suffixes and .md extension
         grounded_paths = ground_notes(
@@ -239,6 +241,103 @@ class TestOps(unittest.TestCase):
         self.assertEqual(len(grounded_cust), 1)
         self.assertEqual(grounded_cust[0]["cid"], "customers/Acme-Corp")
         self.assertEqual(grounded_cust[0]["domain"], "customers")
+
+    def test_ground_notes_section_anchor_extracts_target_section_and_subsections(self):
+        """§5.1, §10 C56: #section grounding extracts matching ATX heading and nested subsections, ignores fenced headings, and rejects missing anchors."""
+        note_path = self.vault_root / "wiki" / "storage-engine.md"
+        note_path.write_text(
+            "---\n"
+            "type: concept\n"
+            "title: Storage Engine\n"
+            "description: B-Tree and WAL internals\n"
+            "status: active\n"
+            "---\n"
+            "# Storage Engine\n\n"
+            "Overview paragraph.\n\n"
+            "## B-Tree Indexes (v2)\n\n"
+            "B-Tree body text.\n\n"
+            "```markdown\n"
+            "## Fake Heading Inside Fence\n"
+            "```\n\n"
+            "### Page Splitting\n\n"
+            "Nested subsection under B-Tree.\n\n"
+            "## Write-Ahead Log\n\n"
+            "WAL section text.\n",
+            "utf-8",
+        )
+
+        # 1. Exact heading match and GitHub-slug match both extract the ## section + ### subsection, stopping before next ##
+        for target in (
+            "wiki/storage-engine#B-Tree Indexes (v2)",
+            "[[storage-engine#b-tree-indexes-v2|B-Tree]]",
+        ):
+            grounded = ground_notes(self.vault, [target])
+            self.assertEqual(len(grounded), 1)
+            item = grounded[0]
+            self.assertEqual(item["cid"], "wiki/storage-engine")
+            self.assertEqual(item["section"], "B-Tree Indexes (v2)")
+            self.assertIn("## B-Tree Indexes (v2)", item["content"])
+            self.assertIn("## Fake Heading Inside Fence", item["content"])
+            self.assertIn("### Page Splitting", item["content"])
+            self.assertNotIn("Overview paragraph.", item["content"])
+            self.assertNotIn("## Write-Ahead Log", item["content"])
+
+        # 2. Deeper subsection match extracts only the ### subsection
+        sub_grounded = ground_notes(self.vault, ["storage-engine#Page Splitting"])
+        self.assertEqual(sub_grounded[0]["section"], "Page Splitting")
+        self.assertIn("### Page Splitting", sub_grounded[0]["content"])
+        self.assertNotIn("B-Tree body text.", sub_grounded[0]["content"])
+        self.assertNotIn("## Write-Ahead Log", sub_grounded[0]["content"])
+
+        # 3. Missing anchor raises ValueError (INVALID_ARGUMENT) naming available headings
+        with self.assertRaises(ValueError) as ctx:
+            ground_notes(self.vault, ["wiki/storage-engine#Nonexistent"])
+        self.assertIn("B-Tree Indexes (v2)", str(ctx.exception))
+        self.assertIn("Write-Ahead Log", str(ctx.exception))
+
+        # 4. Legacy filename containing literal '#' still resolves as full note before anchor splitting
+        csharp_path = self.vault_root / "wiki" / "C#-Basics.md"
+        csharp_path.write_text(
+            "---\ntype: concept\ntitle: C# Basics\ndescription: CSharp\nstatus: active\n---\n# C# Basics\n",
+            "utf-8",
+        )
+        cs_grounded = ground_notes(self.vault, ["wiki/C#-Basics"])
+        self.assertEqual(cs_grounded[0]["cid"], "wiki/C#-Basics")
+        self.assertIsNone(cs_grounded[0]["section"])
+
+    def test_ground_notes_enriches_one_hop_links_and_backlinks_with_neighbor_metadata(self):
+        """§5.1, §10 C56: Grounded 1-hop links and backlinks include neighbor title, type, status, trust_tier, and description."""
+        # Add a dead link to sqlite.md so we test both resolved and unresolved forward links
+        sqlite_path = self.vault_root / "wiki" / "sqlite.md"
+        sqlite_text = sqlite_path.read_text("utf-8")
+        sqlite_path.write_text(sqlite_text + "\nSee also [[nonexistent-target]].\n", "utf-8")
+
+        grounded = ground_notes(self.vault, ["wiki/sqlite"])
+        self.assertEqual(len(grounded), 1)
+        item = grounded[0]
+
+        # Resolved forward link to wiki/epistemic-trust-tiers carries full neighbor metadata
+        resolved_link = next(l for l in item["links"] if l["resolved_cid"] == "wiki/epistemic-trust-tiers")
+        self.assertEqual(resolved_link["title"], "Epistemic Trust Tiers")
+        self.assertEqual(resolved_link["type"], "concept")
+        self.assertEqual(resolved_link["status"], "active")
+        self.assertEqual(resolved_link["trust_tier"], "human-reviewed")
+        self.assertTrue(resolved_link["description"])
+
+        # Unresolved forward link has None for neighbor metadata fields
+        dead_link = next(l for l in item["links"] if l["target"] == "nonexistent-target")
+        self.assertIsNone(dead_link["resolved_cid"])
+        self.assertIsNone(dead_link["title"])
+        self.assertIsNone(dead_link["trust_tier"])
+        self.assertIsNone(dead_link["description"])
+
+        # Backlink from wiki/sqlite-vs-duckdb carries full neighbor metadata
+        backlink = next(b for b in item["backlinks"] if b["source_cid"] == "wiki/sqlite-vs-duckdb")
+        self.assertEqual(backlink["title"], "SQLite vs DuckDB")
+        self.assertEqual(backlink["type"], "comparison")
+        self.assertEqual(backlink["status"], "deprecated")
+        self.assertEqual(backlink["trust_tier"], "unverified")
+        self.assertTrue(backlink["description"])
 
     def test_disk_storage_multi_domain_and_pruning(self):
         # Add a custom domain 'customers'
