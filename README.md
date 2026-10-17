@@ -45,6 +45,13 @@ cadabby --help
 Cadabby has **zero runtime dependencies** (pure CPython >= 3.11 standard
 library), so installation never pulls in a transitive dependency tree.
 
+### Upgrading from 0.4.1
+
+0.4.2 adds folder subtree moves (`vault_move_note` / `cadabby move` with a trailing `/`) and `archive/` domain support (`0.5×` search multiplier, active-first stem resolution, and worklist exclusion). After upgrading the package, in each vault:
+
+1. Run `cadabby install --all` to refresh the engine-owned runbooks and plugin.
+2. Optional: if your `.cadabby.json` defines a custom `ranking` block and you want explicit `archive/` downranking configured in the file (the engine already defaults `ranking.domain.archive` to `0.5`), add `"domain": {"archive": 0.5}` under `"ranking"`.
+
 ### Upgrading from 0.4.0
 
 0.4.1 changes no tools, flags or file formats. After upgrading the package, in each vault:
@@ -77,7 +84,7 @@ git clone https://github.com/naikoob/cadabby.git
 cd cadabby
 uv sync                    # or: pip install -e .
 
-# Fast parallel test execution across all CPU cores (~25s, 539 tests):
+# Fast parallel test execution across all CPU cores (~25s, 551 tests):
 python3 tests/run_parallel.py
 
 # Canonical sequential test suite:
@@ -288,7 +295,7 @@ Conforming to §5.1-§5.2 of the Technical Specification, Cadabby exposes exactl
 | **`vault_status`** | Vault health check: tier counts, domain breakdown, verification debt, unprocessed `raw/` files, and `finding_counts` from the six lint gates; `lint=true` returns the findings themselves. |
 | **`vault_scaffold_note`** | Scaffolds a new typed note in any domain with valid OKF frontmatter and generated attribution. |
 | **`vault_update_note`** | Non-destructive frontmatter patch, section append, or section replace with optimistic lock. |
-| **`vault_move_note`** | Moves or renames a note and repoints every link to it; dry-run by default, with each affected note's trust tier before and after and a `plan_token` that binds the apply to the plan shown. |
+| **`vault_move_note`** | Moves or renames a note or folder subtree (`prefix/`) and repoints every link to it; dry-run by default, with each affected note's trust tier before and after and a `plan_token` that binds the apply to the plan shown. |
 | **`vault_verify_note`** | Cryptographically binds an `agent:<client_id>` attestation to the body SHA-256 (refuses `human:*`). |
 
 ### Dynamic Resources
@@ -311,7 +318,7 @@ Conforming to §5.1-§5.2 of the Technical Specification, Cadabby exposes exactl
 | `cadabby ground` | Retrieve note content and 1-hop neighborhood | `cadabby ground wiki/Attention` |
 | `cadabby scaffold` | Scaffold a new typed note in any domain, optionally from an Obsidian template (`--template`) | `cadabby scaffold "Transformer" --type concept --domain wiki --desc "Attention model"` |
 | `cadabby update` | Patch frontmatter or append/replace sections | `cadabby update wiki/Transformer --replace-section "Overview:New text"` |
-| `cadabby move` | Move or rename a note and repoint its links (dry-run by default; `--apply --plan-token <t>` writes what the dry run showed; a trailing `/` moves into a folder) | `cadabby move wiki/Transformer customers/acme/ --apply --plan-token 3f9c…` |
+| `cadabby move` | Move or rename a note or folder subtree (`prefix/`) and repoint its links (dry-run by default; `--apply --plan-token <t>` writes what the dry run showed; a trailing `/` moves into a folder or moves a folder subtree) | `cadabby move wiki/Transformer customers/acme/ --apply --plan-token 3f9c…` |
 | `cadabby verify` | Stamp cryptographic attestation on note | `cadabby verify wiki/Transformer --human` |
 | `cadabby lint` | Run the six normative epistemic linting gates across all domains | `cadabby lint` |
 | `cadabby audit` | Check Git blame provenance of human attestations | `cadabby audit --require-signed` |
@@ -327,16 +334,16 @@ Conforming to §5.1-§5.2 of the Technical Specification, Cadabby exposes exactl
 | Tier | Multiplier | Description |
 | :--- | :---: | :--- |
 | `human-reviewed` | **$2.0\times$** | Certified by a validated human reviewer. Body matches `sha256`. |
-| `machine-confirmed` | **$1.0\times$** | Synthesized and verified by an automated AI agent. |
-| `stale-verified` | **$0.8\times$** | Previously verified, but note prose drifted without re-review (verification debt). |
-| `unverified` | **$0.5\times$** | Newly drafted or imported without verification. |
+| `machine-confirmed` | **$1.2\times$** | Synthesized and verified by an automated AI agent. |
+| `stale-verified` | **$1.0\times$** | Previously verified, but note prose drifted without re-review (verification debt). |
+| `unverified` | **$1.0\times$** | Newly drafted or imported without verification. |
 
-Status multipliers apply on top of trust tiers:
-- `evergreen`: **$1.1\times$**
-- `active`: **$1.0\times$**
-- `draft`: **$0.7\times$**
-- `deprecated`: **$0.3\times$**
-- `stub`: **$0.2\times$**
+Status and domain multipliers apply on top of trust tiers:
+- `evergreen` / `active`: **$1.0\times$**
+- `draft`: **$0.9\times$**
+- `completed`: **$0.85\times$**
+- `deprecated` / `abandoned`: **$0.4\times$**
+- `archive` domain: **$0.5\times$** (compounds with status, e.g. a `completed` note in `archive/` scores $0.85 \times 0.5 = 0.425\times$)
 
 ---
 
@@ -345,7 +352,7 @@ Status multipliers apply on top of trust tiers:
 Cadabby uses standard-library `unittest` with **zero test dependencies**:
 
 ```bash
-# Fast parallel test execution across all CPU cores (~25s, 539 tests):
+# Fast parallel test execution across all CPU cores (~25s, 551 tests):
 python3 tests/run_parallel.py
 
 # Parallel execution with verbose output or target filtering:
