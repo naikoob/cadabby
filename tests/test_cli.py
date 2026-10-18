@@ -1288,6 +1288,37 @@ class TestCliEntryPoint(unittest.TestCase):
         self.assertEqual(self._main("ground", "wiki/does-not-exist", "--vault", str(self.vault_root)), 3)
 
 
+class TestCliWriteJson(unittest.TestCase):
+    """C76: scaffold, update and verify print the MCP payload with --json (§5.3)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.vault_root = copy_demo_vault(Path(self.tmp.name) / "demo-vault")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _json(self, *argv):
+        from cadabby.cli import main
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as ctx:
+                main([*argv, "--vault", str(self.vault_root), "--json"])
+        self.assertEqual(ctx.exception.code, 0, out.getvalue())
+        return json.loads(out.getvalue())
+
+    def test_write_verbs_print_the_mcp_payload(self):
+        made = self._json("scaffold", "Cli Json", "--type", "concept", "--desc", "d", "--body", "# Cli Json\n\nBody text.")
+        self.assertEqual(set(made), {"cid", "rel_path", "source_hash", "trust_tier", "warnings"})
+        self.assertIn("Body text.", (self.vault_root / made["rel_path"]).read_text("utf-8"))
+        edited = self._json("update", made["cid"], "--patch-frontmatter", '{"status": "active"}',
+                            "--expected-hash", made["source_hash"])
+        self.assertNotEqual(edited["source_hash"], made["source_hash"])
+        verified = self._json("verify", made["cid"])
+        self.assertLessEqual({"cid", "actor", "of", "trust_tier", "already_verified", "warnings"}, set(verified))
+
+
 if __name__ == "__main__":
     unittest.main()
 

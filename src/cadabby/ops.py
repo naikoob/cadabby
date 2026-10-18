@@ -28,6 +28,7 @@ from cadabby.domain import (
     split_markdown_sections,
 )
 from cadabby.errors import AmbiguousNoteError, HumanAttestationRefusedError, VaultConflictError, classify
+from cadabby.fsutil import compute_bytes_sha256
 from cadabby.frontmatter import FrontmatterParseError, serialize_frontmatter, split_frontmatter
 from cadabby.graph import (
     LINK_KIND_IMAGE,
@@ -1439,14 +1440,58 @@ def _resolve_adapters(
     return storage or DiskNoteStorage(vault), ledger or FileLedger(vault)
 
 
-def _refresh(cache: IndexCachePort | None) -> None:
+def _refresh(cache: IndexCachePort | None) -> list[str]:
     """End a write with a scan, so search and index.md see it at once (§4.3).
 
     The CLI and MCP both pass their cache; a library caller that passes none
     gets the write without the refresh, and its next scan picks the file up.
+
+    Returns warnings rather than raising: the note is already written and
+    logged, and reporting the call as failed (a stray byte in index.md, a busy
+    cache) sent agents into a retry that met ALREADY_EXISTS or wrote twice.
     """
-    if cache is not None:
+    if cache is None:
+        return []
+    try:
         cache.scan()
+    except Exception as exc:  # noqa: BLE001 -- the write itself succeeded; say what did not
+        info = classify(exc)
+        return [f"The write succeeded, but search and index.md were not refreshed ({info.code}: {info.message})"]
+    return []
+
+
+@dataclass(frozen=True, slots=True)
+class WriteResult:
+    """What a note write returns over MCP and `--json` (§5.1): structured, never prose.
+
+    `source_hash` is the concurrency token of the bytes just written, so it
+    chains straight into the next call's `expected_hash`.
+    """
+
+    cid: str
+    rel_path: str
+    source_hash: str
+    trust_tier: str
+    warnings: tuple[str, ...] = ()
+
+    @classmethod
+    def of(cls, note: Note, warnings: list[str]) -> WriteResult:
+        return cls(
+            cid=note.cid,
+            rel_path=note.rel_path,
+            source_hash=compute_bytes_sha256(note.serialize().encode("utf-8")),
+            trust_tier=note.trust_tier,
+            warnings=tuple(warnings),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "cid": self.cid,
+            "rel_path": self.rel_path,
+            "source_hash": self.source_hash,
+            "trust_tier": self.trust_tier,
+            "warnings": list(self.warnings),
+        }
 
 
 def scaffold_note(
@@ -1466,6 +1511,30 @@ def scaffold_note(
     cache: IndexCachePort | None = None,
 ) -> Path:
     """Scaffold a new note in the directory matching its type or custom path."""
+    result = scaffold_note_result(
+        vault, title, type_, description, tags=tags, sources=sources, body=body, actor=actor,
+        domain=domain, path=path, template=template, storage=storage, ledger=ledger, cache=cache,
+    )
+    return vault.abs_path(result.rel_path)
+
+
+def scaffold_note_result(
+    vault: Vault,
+    title: str,
+    type_: str,
+    description: str,
+    tags: list[str] | None = None,
+    sources: list[str] | None = None,
+    body: str = "",
+    actor: str = "agent:unknown",
+    domain: str = DIR_WIKI,
+    path: str | None = None,
+    template: str | None = None,
+    storage: NoteStoragePort | None = None,
+    ledger: LedgerPort | None = None,
+    cache: IndexCachePort | None = None,
+) -> WriteResult:
+    """`scaffold_note`, returning the structured result the MCP tool and `--json` report."""
     active_storage, active_ledger = _resolve_adapters(vault, storage, ledger)
     uc = ScaffoldNoteUseCase(active_storage, active_ledger, vault=vault)
     note = uc.execute(
@@ -1480,8 +1549,7 @@ def scaffold_note(
         path=path,
         template=template,
     )
-    _refresh(cache)
-    return vault.abs_path(note.rel_path)
+    return WriteResult.of(note, _refresh(cache))
 
 
 def update_note(
@@ -1497,6 +1565,26 @@ def update_note(
     cache: IndexCachePort | None = None,
 ) -> Path:
     """Non-destructively patch note frontmatter and apply ordered body `edits` (§5.1)."""
+    result = update_note_result(
+        vault, cid_or_path, frontmatter_patch, edits=edits, expected_hash=expected_hash, actor=actor,
+        storage=storage, ledger=ledger, cache=cache,
+    )
+    return vault.abs_path(result.rel_path)
+
+
+def update_note_result(
+    vault: Vault,
+    cid_or_path: str,
+    frontmatter_patch: dict[str, Any] | None = None,
+    *,
+    edits: list[dict[str, Any]] | None = None,
+    expected_hash: str | None = None,
+    actor: str = "agent:unknown",
+    storage: NoteStoragePort | None = None,
+    ledger: LedgerPort | None = None,
+    cache: IndexCachePort | None = None,
+) -> WriteResult:
+    """`update_note`, returning the structured result the MCP tool and `--json` report."""
     active_storage, active_ledger = _resolve_adapters(vault, storage, ledger)
     uc = UpdateNoteUseCase(active_storage, active_ledger)
     note = uc.execute(
@@ -1506,8 +1594,7 @@ def update_note(
         actor=actor,
         edits=edits,
     )
-    _refresh(cache)
-    return vault.abs_path(note.rel_path)
+    return WriteResult.of(note, _refresh(cache))
 
 
 def verify_note(
@@ -1531,13 +1618,14 @@ def verify_note(
         is_human_authorized=is_human_authorized,
         expected_body_hash=expected_body_hash,
     )
-    _refresh(cache)
+    warnings = _refresh(cache)
     return {
         "cid": res.cid,
         "actor": res.actor,
         "of": res.of,
         "trust_tier": res.trust_tier,
         "already_verified": res.already_verified,
+        "warnings": warnings,
     }
 
 
@@ -1633,5 +1721,5 @@ def move_note(
                 "run the dry run again and review the new plan"
             )
         uc.apply(plan, actor=actor)
-        _refresh(cache)
-    return plan.to_dict(applied=apply)
+        return plan.to_dict(applied=True) | {"warnings": _refresh(cache)}
+    return plan.to_dict(applied=False)

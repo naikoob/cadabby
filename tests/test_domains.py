@@ -706,7 +706,8 @@ Details here.
                 },
             )
             self.assertFalse(scaffold_res["isError"])
-            self.assertIn("Scaffolded note: customers/beta-client.md", scaffold_res["content"][0]["text"])
+            created = json.loads(scaffold_res["content"][0]["text"])
+            self.assertEqual((created["cid"], created["rel_path"]), ("customers/beta-client", "customers/beta-client.md"))
 
             # Search filtered by domain
             server.cache.scan()

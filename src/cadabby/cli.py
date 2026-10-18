@@ -34,8 +34,8 @@ from cadabby.ops import (
     ground_notes,
     move_note,
     resolve_note_cid,
-    scaffold_note,
-    update_note,
+    scaffold_note_result,
+    update_note_result,
     verify_note,
 )
 from cadabby.vault import Vault
@@ -217,20 +217,31 @@ def cmd_scaffold(args: argparse.Namespace) -> int:
     sources = [s.strip() for s in args.sources.split(",") if s.strip()] if args.sources else None
 
     with VaultCache(vault) as cache:
-        path = scaffold_note(
+        result = scaffold_note_result(
             vault=vault,
             title=args.title,
             type_=args.type,
             description=args.desc,
             tags=tags,
             sources=sources,
+            body=getattr(args, "body", None) or "",
             actor=_default_cli_actor(args),
             domain=getattr(args, "domain", DIR_WIKI),
             path=getattr(args, "path", None),
             template=getattr(args, "template", None),
             cache=cache,
         )
-    print(f"Scaffolded note: {vault.rel_path(path)}")
+    return _report_write(args, result.to_dict(), f"Scaffolded note: {result.rel_path}")
+
+
+def _report_write(args: argparse.Namespace, payload: dict[str, Any], line: str) -> int:
+    """Print a write's result: the MCP payload with --json, else one line; warnings go to stderr."""
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2))
+    else:
+        print(line)
+    for warning in payload.get("warnings", []):
+        print(f"Warning: {warning}", file=sys.stderr)
     return EXIT_OK
 
 
@@ -264,7 +275,7 @@ def cmd_update(args: argparse.Namespace) -> int:
     )
 
     with VaultCache(vault) as cache:
-        path = update_note(
+        result = update_note_result(
             vault=vault,
             cid_or_path=args.cid,
             frontmatter_patch=patch,
@@ -273,8 +284,7 @@ def cmd_update(args: argparse.Namespace) -> int:
             edits=edits,
             cache=cache,
         )
-    print(f"Updated note: {vault.rel_path(path)}")
-    return EXIT_OK
+    return _report_write(args, result.to_dict(), f"Updated note: {result.rel_path} ({result.source_hash[:12]})")
 
 
 def cmd_move(args: argparse.Namespace) -> int:
@@ -385,8 +395,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
             expected_body_hash=reviewed_hash,
         )
     status_label = "already verified" if res.get("already_verified") else "verified"
-    print(f"{status_label.capitalize()}: {res['cid']} as '{res['actor']}' -> tier: '{res['trust_tier']}' ({res['of'][:16]}...)")
-    return EXIT_OK
+    line = f"{status_label.capitalize()}: {res['cid']} as '{res['actor']}' -> tier: '{res['trust_tier']}' ({res['of'][:16]}...)"
+    return _report_write(args, res, line)
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -769,6 +779,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_scaffold.add_argument("--tags", help="Comma-separated tags")
     p_scaffold.add_argument("--sources", help="Comma-separated raw sources")
+    p_scaffold.add_argument("--body", help="Initial note body (Markdown); exclusive with --template")
+    p_scaffold.add_argument("--json", action="store_true", help="Output the result as JSON (the MCP payload)")
     p_scaffold.add_argument(
         "--template",
         help="Obsidian template whose body seeds the note; {{title}} is substituted",
@@ -785,6 +797,7 @@ def build_parser() -> argparse.ArgumentParser:
         help='JSON list of body edits applied atomically, e.g. \'[{"op":"replace_text","old":"..","new":".."}]\'',
     )
     p_update.add_argument("--expected-hash", help="Expected file hash for concurrency safety")
+    p_update.add_argument("--json", action="store_true", help="Output the result as JSON (the MCP payload)")
     p_update.add_argument("--actor", type=parse_cli_actor, help=f"Actor identity (default: {CLI_DEFAULT_ACTOR})")
     p_update.set_defaults(func=cmd_update)
 
@@ -811,6 +824,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify = subparsers.add_parser("verify", parents=[vault_parent], help="Stamp content-bound verification")
     p_verify.add_argument("cid", help="Note CID or path")
     p_verify.add_argument("--method", help="Verification method")
+    p_verify.add_argument("--json", action="store_true", help="Output the result as JSON (the MCP payload)")
     who = p_verify.add_mutually_exclusive_group()
     who.add_argument("--human", action="store_true", help="Stamp as human:<user> (requires TTY)")
     who.add_argument("--agent", help="Stamp as agent:<name>")

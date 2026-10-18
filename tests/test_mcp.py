@@ -859,6 +859,58 @@ class TestMcpReviewTwoFixes(unittest.TestCase):
         self.assertEqual(payload[0]["cid"], "Raw/thing")
 
 
+class TestStructuredWriteResults(unittest.TestCase):
+    """C76: every write tool answers with fields an agent can act on, never a sentence (§5.1, §5.4)."""
+
+    setUp = TestMcpServer.setUp
+    tearDown = TestMcpServer.tearDown
+
+    def _call(self, name, args):
+        res = self.server.handle_tools_call(name, args)
+        self.assertFalse(res.get("isError"), res)
+        return json.loads(res["content"][0]["text"])
+
+    def test_scaffold_returns_the_new_note_and_its_hash(self):
+        out = self._call("vault_scaffold_note", {"title": "Struct Note", "type": "concept", "description": "d"})
+        self.assertEqual(set(out), {"cid", "rel_path", "source_hash", "trust_tier", "warnings"})
+        self.assertEqual(out["cid"], "wiki/struct-note")
+        disk = (self.vault_root / out["rel_path"]).read_bytes()
+        import hashlib
+
+        self.assertEqual(out["source_hash"], hashlib.sha256(disk).hexdigest())
+        self.assertEqual(out["warnings"], [])
+
+    def test_update_hash_chains_into_the_next_expected_hash(self):
+        first = self._call(
+            "vault_update_note", {"cid": "wiki/sqlite", "patch_frontmatter": {"description": "first edit"}}
+        )
+        second = self._call(
+            "vault_update_note",
+            {"cid": "wiki/sqlite", "patch_frontmatter": {"description": "second edit"}, "expected_hash": first["source_hash"]},
+        )
+        self.assertNotEqual(first["source_hash"], second["source_hash"])
+        stale = self.server.handle_tools_call(
+            "vault_update_note",
+            {"cid": "wiki/sqlite", "patch_frontmatter": {"description": "third"}, "expected_hash": first["source_hash"]},
+        )
+        self.assertEqual(json.loads(stale["content"][0]["text"])["error"]["code"], "VAULT_CONFLICT")
+
+    def test_verify_reports_already_verified_as_a_field(self):
+        first = self._call("vault_verify_note", {"cid": "wiki/flash-attention"})
+        again = self._call("vault_verify_note", {"cid": "wiki/flash-attention"})
+        self.assertEqual((first["already_verified"], again["already_verified"]), (False, True))
+        self.assertTrue(first["of"].startswith("sha256:"))
+
+    def test_a_failed_refresh_is_a_warning_on_a_write_that_succeeded(self):
+        from unittest import mock
+
+        with mock.patch("cadabby.indexer.sync_vault_index", side_effect=OSError("index.md is unwritable")):
+            out = self._call("vault_scaffold_note", {"title": "Warned", "type": "concept", "description": "d"})
+        self.assertTrue((self.vault_root / out["rel_path"]).is_file())
+        self.assertEqual(len(out["warnings"]), 1)
+        self.assertIn("index.md is unwritable", out["warnings"][0])
+
+
 if __name__ == "__main__":
     unittest.main()
 

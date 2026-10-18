@@ -17,16 +17,17 @@ from cadabby.cache import VaultCache
 from cadabby.constants import DIR_WIKI
 from cadabby.errors import HUMAN_ATTESTATION_REFUSED, INVALID_ARGUMENT, UNKNOWN_TOOL, classify
 from cadabby.lint import status_report
-from cadabby.ops import graph_view, ground_notes, move_note, scaffold_note, update_note, verify_note
-from cadabby.vault import Vault, path_to_cid
+from cadabby.ops import graph_view, ground_notes, move_note, scaffold_note_result, update_note_result, verify_note
+from cadabby.vault import Vault
 
 
 def _tool_ok(payload: Any) -> dict[str, Any]:
     """Render a successful tool result.
 
-    The counterpart to _tool_error. A str payload is returned verbatim --
-    several tools answer with a human-readable confirmation line rather than
-    a document -- and anything else is serialized as JSON.
+    The counterpart to _tool_error. Every tool answers with a JSON document
+    (§5.1): messages are for people and are never parsed (§5.4), so a result
+    an agent must act on -- the new `source_hash`, `already_verified` -- is a
+    field, not a sentence. A str payload is still returned verbatim.
     """
     text = payload if isinstance(payload, str) else json.dumps(payload, indent=2)
     return {"content": [{"type": "text", "text": text}], "isError": False}
@@ -228,7 +229,13 @@ TOOLS = [
                     },
                     "description": "Ordered body edits applied atomically; if any fails, nothing is written",
                 },
-                "expected_hash": {"type": "string", "description": "Expected file hash for concurrency safety"},
+                "expected_hash": {
+                    "type": "string",
+                    "description": (
+                        "The source_hash a previous scaffold or update returned; the write is refused "
+                        "(VAULT_CONFLICT) if the file changed since"
+                    ),
+                },
             },
             "required": ["cid"],
         },
@@ -455,7 +462,7 @@ class McpServer:
         return _tool_ok(grounded)
 
     def _tool_scaffold_note(self, args: dict[str, Any]) -> dict[str, Any]:
-        path = scaffold_note(
+        result = scaffold_note_result(
             vault=self.vault,
             title=args["title"],
             type_=args["type"],
@@ -469,11 +476,10 @@ class McpServer:
             template=args.get("template"),
             cache=self.cache,
         )
-        rel = self.vault.rel_path(path)
-        return _tool_ok(f"Scaffolded note: {rel} (CID: {path_to_cid(rel)})")
+        return _tool_ok(result.to_dict())
 
     def _tool_update_note(self, args: dict[str, Any]) -> dict[str, Any]:
-        path = update_note(
+        result = update_note_result(
             vault=self.vault,
             cid_or_path=args["cid"],
             frontmatter_patch=args.get("patch_frontmatter"),
@@ -482,8 +488,7 @@ class McpServer:
             edits=args.get("edits"),
             cache=self.cache,
         )
-        rel = self.vault.rel_path(path)
-        return _tool_ok(f"Updated note: {rel}")
+        return _tool_ok(result.to_dict())
 
     def _tool_verify_note(self, args: dict[str, Any]) -> dict[str, Any]:
         res = verify_note(
@@ -494,11 +499,7 @@ class McpServer:
             is_human_authorized=False,
             cache=self.cache,
         )
-        return _tool_ok(
-            f"Attested {res['cid']} by {res['actor']} "
-            f"with content-binding {res['of'][:16]}... "
-            f"-> derived trust tier: '{res['trust_tier']}'"
-        )
+        return _tool_ok(res)
 
     def _tool_status(self, args: dict[str, Any]) -> dict[str, Any]:
         return _tool_ok(status_report(self.vault, self.cache, lint=_bool_arg(args, "lint", default=False)))
