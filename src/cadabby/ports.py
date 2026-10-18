@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 
-from cadabby.domain import Note
+from cadabby.domain import DomainDefinition, Note
 from cadabby.graph import LinkTargetIndex
 
 
@@ -110,4 +110,34 @@ class LedgerPort(Protocol):
 
     def append(self, message: str, actor: str | None = None) -> None:
         """Append an entry to the activity ledger."""
+        ...
+
+
+@runtime_checkable
+class VaultLayoutPort(Protocol):
+    """Secondary port for vault layout, domain manifests, templates, and raw-text rules (§2.2, §7.5, §9.1)."""
+
+    @property
+    def raw_text_extensions(self) -> Sequence[str]:
+        """File extensions under `raw/` that the engine reads as UTF-8 text (§2.4, §2.6)."""
+        ...
+
+    def note_path_violation(self, rel_path: str, *, for_write: bool = False) -> str | None:
+        """Why `rel_path` cannot hold a note in this vault, or None if it can (§2.1, §2.2, §7.5)."""
+        ...
+
+    def discover_domains(self) -> dict[str, DomainDefinition]:
+        """All cognitive domains in the vault and their parsed `AGENTS.md` contracts (§2.2)."""
+        ...
+
+    def read_template_body(self, name: str) -> str:
+        """Body of a named Obsidian template with its frontmatter stripped (§7.5)."""
+        ...
+
+    def has_folder(self, rel_path: str) -> bool:
+        """Whether `rel_path` is an existing directory in the vault (§5.1 `vault_move_note`)."""
+        ...
+
+    def list_folder_files(self, rel_prefix: str) -> Sequence[str]:
+        """Vault-relative paths of visible files under `rel_prefix/` (§5.1 `vault_move_note`)."""
         ...

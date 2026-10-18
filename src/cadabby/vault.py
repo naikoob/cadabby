@@ -8,7 +8,8 @@ from __future__ import annotations
 import json
 import math
 import os
-from collections.abc import Iterator
+import posixpath
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -520,6 +521,11 @@ class Vault:
         """Resolve a vault-relative path to an absolute Path."""
         return (self.root / rel_path).resolve()
 
+    @property
+    def raw_text_extensions(self) -> tuple[str, ...]:
+        """File extensions under `raw/` that the engine reads as UTF-8 text (§2.4, §2.6)."""
+        return tuple(self.config["raw_text_extensions"])
+
     def template_dir(self) -> Path | None:
         """The folder Obsidian's core Templates plugin writes templates into (§7.5)."""
         return obsidian_template_dir(self.root)
@@ -550,12 +556,7 @@ class Vault:
                 f"{DIR_OBSIDIAN}/{FILE_OBSIDIAN_TEMPLATES}"
             )
 
-        # is_absolute is asked of the original, as in template_dir: strip('/')
-        # would turn '/etc/passwd' into a plausible-looking relative name.
-        stem = normalize_rel(name)
-        if not stem or Path(name).is_absolute():
-            raise ValueError(f"Invalid template name '{name}'")
-        filename = stem if stem.endswith(".md") else f"{stem}.md"
+        filename = template_rel_filename(name)
 
         # As in template_dir, containment is tested once, after resolve().
         path = (tpl_dir / filename).resolve()
@@ -566,6 +567,27 @@ class Vault:
 
         _, body = split_frontmatter(path.read_text("utf-8"))
         return body
+
+    def has_folder(self, rel_path: str) -> bool:
+        """Whether `rel_path` is an existing directory in the vault (§5.1 `vault_move_note`)."""
+        clean = normalize_rel(rel_path)
+        return bool(clean) and (self.root / clean).is_dir()
+
+    def list_folder_files(self, rel_prefix: str) -> Sequence[str]:
+        """Vault-relative paths of visible files under `rel_prefix/`, sorted (§5.1 `vault_move_note`)."""
+        clean = normalize_rel(rel_prefix)
+        src_dir = self.root / clean
+        if not clean or not src_dir.is_dir():
+            return ()
+        files: list[str] = []
+        for path in sorted(src_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(self.root).as_posix()
+            if any(part.startswith(".") for part in rel.split("/")):
+                continue
+            files.append(rel)
+        return files
 
     def discover_domains(self) -> dict[str, DomainDefinition]:
         """Discover all cognitive domains in the vault."""
@@ -656,50 +678,72 @@ class Vault:
     def _load_domain_from_agents_md(
         self, name: str, dir_path: Path, agents_md: Path
     ) -> DomainDefinition:
-        """Parse `{domain}/AGENTS.md` into a DomainDefinition (§2.2).
+        """Parse `{domain}/AGENTS.md` into a DomainDefinition (§2.2)."""
+        return parse_domain_manifest(name, agents_md.read_text("utf-8", errors="replace"), dir_path)
 
-        A manifest that cannot be honored is not silently read as "open": the
-        domain still loads permissively so search keeps working, but
-        `manifest_error` says why, lint reports DOMAIN_MANIFEST_INVALID, and
-        scaffold into the domain is refused until it is fixed.
-        """
-        raw_text = agents_md.read_text("utf-8", errors="replace")
-        try:
-            fm, body = parse_frontmatter(raw_text)
-        except FrontmatterParseError as e:
-            _, body = _split_without_parsing(raw_text)
-            domain = DomainDefinition.permissive(name, dir_path)
-            domain.directives_markdown = body.strip()
-            domain.manifest_error = f"frontmatter does not parse: {e}"
-            return domain
 
-        problems: list[str] = []
-        allowed_types = fm.get("allowed_types")
-        allowed_types_list: list[str] | None = None
-        if allowed_types is not None:
-            if isinstance(allowed_types, list) and all(isinstance(t, str) for t in allowed_types):
-                allowed_types_list = list(allowed_types)
-            else:
-                problems.append("'allowed_types' must be a list of strings")
+def template_rel_filename(name: str) -> str:
+    """Validate a template `name` and return its `.md` path relative to the template folder (§7.5).
 
-        require_sources = fm.get("require_sources", False)
-        if not isinstance(require_sources, bool):
-            problems.append("'require_sources' must be true or false")
-            require_sources = False
+    Shared by `Vault` and `InMemoryVaultLayout` so both reject empty, absolute,
+    and parent-climbing names identically.
+    """
+    # is_absolute is asked of the original, as in template_dir: strip('/')
+    # would turn '/etc/passwd' into a plausible-looking relative name.
+    stem = normalize_rel(name)
+    if not stem or Path(name).is_absolute():
+        raise ValueError(f"Invalid template name '{name}'")
+    filename = stem if stem.endswith(".md") else f"{stem}.md"
+    norm = posixpath.normpath(filename)
+    if norm.startswith("../") or norm in ("", ".", ".."):
+        raise ValueError(f"Invalid template name '{name}'")
+    return norm
 
-        declared = fm.get("domain")
-        if declared is not None and declared != name:
-            problems.append(f"'domain: {declared}' does not match the folder name '{name}'")
 
-        return DomainDefinition(
-            name=name,
-            path=dir_path,
-            description=str(fm.get("description") or f"{name.capitalize()} domain"),
-            allowed_types=allowed_types_list,
-            require_sources=require_sources,
-            directives_markdown=body.strip(),
-            manifest_error="; ".join(problems) or None,
-        )
+def parse_domain_manifest(name: str, raw_text: str, dir_path: Path = Path()) -> DomainDefinition:
+    """Parse `{domain}/AGENTS.md` text into a DomainDefinition (§2.2).
+
+    A manifest that cannot be honored is not silently read as "open": the
+    domain still loads permissively so search keeps working, but
+    `manifest_error` says why, lint reports DOMAIN_MANIFEST_INVALID, and
+    scaffold into the domain is refused until it is fixed.
+    """
+    try:
+        fm, body = parse_frontmatter(raw_text)
+    except FrontmatterParseError as e:
+        _, body = _split_without_parsing(raw_text)
+        domain = DomainDefinition.permissive(name, dir_path)
+        domain.directives_markdown = body.strip()
+        domain.manifest_error = f"frontmatter does not parse: {e}"
+        return domain
+
+    problems: list[str] = []
+    allowed_types = fm.get("allowed_types")
+    allowed_types_list: list[str] | None = None
+    if allowed_types is not None:
+        if isinstance(allowed_types, list) and all(isinstance(t, str) for t in allowed_types):
+            allowed_types_list = list(allowed_types)
+        else:
+            problems.append("'allowed_types' must be a list of strings")
+
+    require_sources = fm.get("require_sources", False)
+    if not isinstance(require_sources, bool):
+        problems.append("'require_sources' must be true or false")
+        require_sources = False
+
+    declared = fm.get("domain")
+    if declared is not None and declared != name:
+        problems.append(f"'domain: {declared}' does not match the folder name '{name}'")
+
+    return DomainDefinition(
+        name=name,
+        path=dir_path,
+        description=str(fm.get("description") or f"{name.capitalize()} domain"),
+        allowed_types=allowed_types_list,
+        require_sources=require_sources,
+        directives_markdown=body.strip(),
+        manifest_error="; ".join(problems) or None,
+    )
 
 
 def _split_without_parsing(raw_text: str) -> tuple[str | None, str]:

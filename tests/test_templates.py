@@ -476,18 +476,24 @@ class TestStarterTemplatesAreOptIn(unittest.TestCase):
         self.assertEqual(edited.read_text("utf-8"), "# mine\n")
 
 
-class TestTemplatesRequireAVault(unittest.TestCase):
-    """§9.1. Templates are vault layout, so the hermetic path cannot serve them."""
+class TestTemplatesInMemoryLayout(unittest.TestCase):
+    """§9.1. InMemoryVaultLayout serves and refuses templates by the same rules as Vault."""
 
-    def test_the_vaultless_use_case_refuses_a_template(self):
-        # ScaffoldNoteUseCase is driven through in-memory adapters with no
-        # vault in unit tests. A template name has nowhere to resolve against
-        # there, and saying so beats an AttributeError on None.
-        uc = ScaffoldNoteUseCase(InMemoryNoteStorage(), InMemoryLedger())
-        with self.assertRaises(ValueError) as ctx:
+    def test_the_in_memory_layout_serves_and_refuses_templates_like_disk(self):
+        storage = InMemoryNoteStorage()
+        uc = ScaffoldNoteUseCase(storage, InMemoryLedger())
+        with self.assertRaises(FileNotFoundError) as ctx:
             uc.execute(title="A", type_="concept", description="d", template="concept")
-        self.assertEqual(classify(ctx.exception).code, INVALID_ARGUMENT)
-        self.assertIn("vault", str(ctx.exception))
+        self.assertEqual(classify(ctx.exception).code, NOT_FOUND)
+        self.assertIn("template folder", str(ctx.exception))
+
+        storage.layout.put_template("concept", "---\ntitle: {{title}}\n---\n# {{title}}\n\n## Summary\n")
+        note = uc.execute(title="Flash Attention", type_="concept", description="d", template="concept")
+        self.assertIn("# Flash Attention", note.body)
+        self.assertIn("## Summary", note.body)
+        with self.assertRaises(ValueError) as bad:
+            uc.execute(title="B", type_="concept", description="d", template="../escape")
+        self.assertEqual(classify(bad.exception).code, INVALID_ARGUMENT)
 
 
 if __name__ == "__main__":

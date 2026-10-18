@@ -7,11 +7,11 @@ import unittest
 from pathlib import Path
 
 from cadabby.adapters.disk_storage import DiskNoteStorage, FileLedger
-from cadabby.adapters.memory_storage import InMemoryLedger, InMemoryNoteStorage
+from cadabby.adapters.memory_storage import InMemoryLedger, InMemoryNoteStorage, InMemoryVaultLayout
 from cadabby.cache import VaultCache
 from cadabby.domain import Note
 from cadabby.fsutil import VaultConflictError
-from cadabby.ports import IndexCachePort, LedgerPort, NoteStoragePort
+from cadabby.ports import IndexCachePort, LedgerPort, NoteStoragePort, VaultLayoutPort
 from tests.helpers import create_test_vault
 
 
@@ -28,11 +28,14 @@ class TestAdaptersProtocolConformance(unittest.TestCase):
         mem_storage = InMemoryNoteStorage()
         file_ledger = FileLedger(self.vault)
         mem_ledger = InMemoryLedger()
+        mem_layout = InMemoryVaultLayout()
 
         self.assertIsInstance(disk_storage, NoteStoragePort)
         self.assertIsInstance(mem_storage, NoteStoragePort)
         self.assertIsInstance(file_ledger, LedgerPort)
         self.assertIsInstance(mem_ledger, LedgerPort)
+        self.assertIsInstance(self.vault, VaultLayoutPort)
+        self.assertIsInstance(mem_layout, VaultLayoutPort)
         with VaultCache(self.vault) as cache:
             self.assertIsInstance(cache, IndexCachePort)
 
@@ -628,6 +631,160 @@ class TestMemoryStorageContract(StorageContract, unittest.TestCase):
         for rel in ("raw/.hidden.md", "raw/.git/c.md", "raw/node_modules/d.md", "raw\\a.md"):
             with self.subTest(rel=rel), self.assertRaises(ValueError):
                 storage.put_source(rel, "x")
+
+
+class LayoutContract:
+    """C77: one behavioral contract for `VaultLayoutPort` across `Vault` and `InMemoryVaultLayout` (§9.1).
+
+    Exercises `ScaffoldNoteUseCase`, `MoveNoteUseCase`, and `GroundNotesUseCase`
+    through both layout implementations so domain contracts, templates, folder
+    collisions, leftover files, and `raw_text_extensions` cannot drift between
+    disk and hermetic in-memory tests.
+    """
+
+    def make_env(self) -> tuple[NoteStoragePort, LedgerPort, VaultLayoutPort]:
+        raise NotImplementedError
+
+    def place_domain(self, name: str, manifest: str) -> None:
+        raise NotImplementedError
+
+    def place_template(self, name: str, raw_text: str) -> None:
+        raise NotImplementedError
+
+    def place_source(self, rel_path: str, text: str) -> None:
+        raise NotImplementedError
+
+    def place_folder(self, rel_path: str) -> None:
+        raise NotImplementedError
+
+    def place_file(self, rel_path: str, text: str = "x") -> None:
+        raise NotImplementedError
+
+    def setUp(self):
+        self.storage, self.ledger, self.layout = self.make_env()
+
+    def test_layout_enforces_domain_contracts_and_directives(self):
+        from cadabby.ops import GroundNotesUseCase, MoveNoteUseCase, ScaffoldNoteUseCase
+
+        self.place_domain("customers", "---\nallowed_types:\n  - account\n---\nAlways cite a call.\n")
+        self.place_domain("broken", "---\nallowed_types: [a, b]\n---\n")
+
+        scaffold = ScaffoldNoteUseCase(self.storage, self.ledger, vault=self.layout)
+        move = MoveNoteUseCase(self.storage, self.ledger, vault=self.layout)
+        ground = GroundNotesUseCase(self.storage, vault=self.layout)
+
+        with self.assertRaisesRegex(ValueError, "allowed types"):
+            scaffold.execute("Bad", "concept", "d", domain="customers")
+        with self.assertRaisesRegex(ValueError, "AGENTS.md is invalid"):
+            scaffold.execute("Bad", "concept", "d", domain="broken")
+
+        acc = scaffold.execute("Acme", "account", "d", domain="customers")
+        wiki_note = scaffold.execute("SQLite", "concept", "d", domain="wiki")
+        self.assertEqual(acc.cid, "customers/acme")
+
+        with self.assertRaisesRegex(ValueError, "allowed types"):
+            move.plan("wiki/sqlite", "customers/sqlite")
+        with self.assertRaisesRegex(ValueError, "AGENTS.md is invalid"):
+            move.plan("wiki/sqlite", "broken/sqlite")
+
+        grounded = {g["cid"]: g for g in ground.execute(["customers/acme", "wiki/sqlite"])}
+        self.assertEqual(grounded["customers/acme"]["directives"], "Always cite a call.")
+        self.assertEqual(grounded["wiki/sqlite"]["directives"], "")
+
+    def test_layout_raw_text_extensions_and_templates(self):
+        from cadabby.ops import GroundNotesUseCase, ScaffoldNoteUseCase
+
+        self.place_source("raw/img.png", "binary-bytes")
+        self.place_source("raw/notes.md", "# Raw Heading\n\nEvidence.\n")
+        ground = GroundNotesUseCase(self.storage, vault=self.layout)
+        items = {g["path"]: g for g in ground.execute(["raw/img.png", "raw/notes.md"])}
+        self.assertTrue(items["raw/img.png"]["filename_only"])
+        self.assertIsNone(items["raw/img.png"]["content"])
+        self.assertFalse(items["raw/notes.md"]["filename_only"])
+        self.assertIn("Evidence.", items["raw/notes.md"]["content"] or "")
+
+        self.place_template("concept", "---\ntitle: {{title}}\nverified: [bad]\n---\n# {{title}}\n\n## Summary\n")
+        scaffold = ScaffoldNoteUseCase(self.storage, self.ledger, vault=self.layout)
+        seeded = scaffold.execute("B-Tree", "concept", "d", template="concept")
+        self.assertIn("# B-Tree\n\n## Summary", seeded.body)
+        self.assertEqual(seeded.verified, [])
+        with self.assertRaisesRegex(ValueError, "template folder"):
+            scaffold.execute("Inside Templates", "concept", "d", domain="templates")
+
+    def test_layout_folders_and_leftover_files_on_move(self):
+        from cadabby.ops import MoveNoteUseCase, ScaffoldNoteUseCase
+
+        self.place_folder("customers/empty")
+        self.place_file("customers/acme/logo.png", "png")
+        scaffold = ScaffoldNoteUseCase(self.storage, self.ledger, vault=self.layout)
+        scaffold.execute("Wiki Note", "concept", "d", domain="wiki")
+        scaffold.execute("Acme Deal", "concept", "d", domain="customers", path="customers/acme/deal")
+
+        move = MoveNoteUseCase(self.storage, self.ledger, vault=self.layout)
+        with self.assertRaisesRegex(ValueError, "existing folder"):
+            move.plan("wiki/wiki-note", "customers/empty")
+
+        plan = move.plan("customers/acme/", "customers/beta/")
+        self.assertTrue(any("customers/acme/logo.png" in w for w in plan.warnings), plan.warnings)
+
+
+class TestDiskLayoutContract(LayoutContract, unittest.TestCase):
+    def make_env(self):
+        import json
+
+        self._json = json
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.vault = create_test_vault(Path(self.tmp.name) / "v", subdirs=("wiki", "raw", "log"))
+        return DiskNoteStorage(self.vault), FileLedger(self.vault), self.vault
+
+    def place_domain(self, name: str, manifest: str) -> None:
+        d = self.vault.root / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "AGENTS.md").write_text(manifest, "utf-8")
+
+    def place_template(self, name: str, raw_text: str) -> None:
+        obs = self.vault.root / ".obsidian"
+        obs.mkdir(parents=True, exist_ok=True)
+        (obs / "templates.json").write_text(self._json.dumps({"folder": "templates"}), "utf-8")
+        tpl = self.vault.root / "templates"
+        tpl.mkdir(parents=True, exist_ok=True)
+        fname = name if name.endswith(".md") else f"{name}.md"
+        (tpl / fname).write_text(raw_text, "utf-8")
+
+    def place_source(self, rel_path: str, text: str) -> None:
+        p = self.vault.root / rel_path
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, "utf-8")
+
+    def place_folder(self, rel_path: str) -> None:
+        (self.vault.root / rel_path).mkdir(parents=True, exist_ok=True)
+
+    def place_file(self, rel_path: str, text: str = "x") -> None:
+        p = self.vault.root / rel_path
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, "utf-8")
+
+
+class TestMemoryLayoutContract(LayoutContract, unittest.TestCase):
+    def make_env(self):
+        storage = InMemoryNoteStorage()
+        return storage, InMemoryLedger(), storage.layout
+
+    def place_domain(self, name: str, manifest: str) -> None:
+        self.layout.put_domain(name, manifest)
+
+    def place_template(self, name: str, raw_text: str) -> None:
+        self.layout.put_template(name, raw_text)
+
+    def place_source(self, rel_path: str, text: str) -> None:
+        self.storage.put_source(rel_path, text)
+
+    def place_folder(self, rel_path: str) -> None:
+        self.layout.put_folder(rel_path)
+
+    def place_file(self, rel_path: str, text: str = "x") -> None:
+        self.layout.put_file(rel_path, text)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ from typing import Any
 from urllib.parse import quote
 
 from cadabby.adapters.disk_storage import DiskNoteStorage, FileLedger
+from cadabby.adapters.memory_storage import InMemoryVaultLayout
 from cadabby.cache import VaultCache, is_raw_text_path, moc_overview
 from cadabby.constants import ACTOR_PATTERN, DIR_RAW, DIR_WIKI, FILE_AGENTS, TEMPLATE_TITLE_PLACEHOLDER
 from cadabby.domain import (
@@ -53,8 +54,8 @@ from cadabby.graph import (
     strip_link_wrapper,
 )
 from cadabby.okf import is_valid_actor
-from cadabby.ports import IndexCachePort, LedgerPort, NoteStoragePort
-from cadabby.vault import Vault, cid_to_path, normalize_rel, note_path_violation, path_to_cid, path_to_layer
+from cadabby.ports import IndexCachePort, LedgerPort, NoteStoragePort, VaultLayoutPort
+from cadabby.vault import Vault, cid_to_path, normalize_rel, path_to_cid, path_to_layer
 
 
 def sanitize_filename(title: str) -> str:
@@ -206,9 +207,19 @@ def _name_violation(rel_path: str) -> str | None:
     return None
 
 
+def _default_layout(storage: NoteStoragePort, vault: VaultLayoutPort | None) -> VaultLayoutPort:
+    """Resolve the active `VaultLayoutPort`: explicit `vault`, else `storage`'s layout, else an in-memory default (§9.1)."""
+    if vault is not None:
+        return vault
+    layout = getattr(storage, "layout", None)
+    if isinstance(layout, VaultLayoutPort):
+        return layout
+    return InMemoryVaultLayout()
+
+
 def _check_new_location(
     storage: NoteStoragePort,
-    vault: Vault | None,
+    vault: VaultLayoutPort,
     rel_path: str,
     type_: str,
     *,
@@ -225,26 +236,21 @@ def _check_new_location(
     near-duplicate wikilink target on Linux). `replacing` names the note being
     moved, so a rename that only changes its own letter case is not a collision.
     """
-    if vault is not None:
-        why = vault.note_path_violation(rel_path, for_write=True)
-    else:
-        why = note_path_violation(rel_path, for_write=True)
-    why = why or _name_violation(rel_path)
+    why = vault.note_path_violation(rel_path, for_write=True) or _name_violation(rel_path)
     if why:
         raise ValueError(f"Cannot {verb} at '{rel_path}': {why}")
 
-    if vault is not None:
-        domain = path_to_layer(rel_path)
-        domain_def = vault.discover_domains().get(domain)
-        if domain_def and domain_def.manifest_error:
-            raise ValueError(
-                f"Cannot {verb} into domain '{domain}': its {FILE_AGENTS} is invalid "
-                f"({domain_def.manifest_error}). Fix the manifest first"
-            )
-        if domain_def and domain_def.allowed_types is not None and type_ not in domain_def.allowed_types:
-            raise ValueError(
-                f"Invalid note type '{type_}'. In domain '{domain}', allowed types are {domain_def.allowed_types}"
-            )
+    domain = path_to_layer(rel_path)
+    domain_def = vault.discover_domains().get(domain)
+    if domain_def and domain_def.manifest_error:
+        raise ValueError(
+            f"Cannot {verb} into domain '{domain}': its {FILE_AGENTS} is invalid "
+            f"({domain_def.manifest_error}). Fix the manifest first"
+        )
+    if domain_def and domain_def.allowed_types is not None and type_ not in domain_def.allowed_types:
+        raise ValueError(
+            f"Invalid note type '{type_}'. In domain '{domain}', allowed types are {domain_def.allowed_types}"
+        )
 
     cid = path_to_cid(rel_path)
     excluded = replacing_group | ({replacing} if replacing is not None else set())
@@ -271,10 +277,10 @@ def _check_new_location(
 class ScaffoldNoteUseCase:
     """Driving use case for scaffolding a new typed OKF note (§6)."""
 
-    def __init__(self, storage: NoteStoragePort, ledger: LedgerPort, vault: Vault | None = None) -> None:
+    def __init__(self, storage: NoteStoragePort, ledger: LedgerPort, vault: VaultLayoutPort | None = None) -> None:
         self.storage = storage
         self.ledger = ledger
-        self.vault = vault
+        self.vault = _default_layout(storage, vault)
 
     @staticmethod
     def _resolve_scaffold_destination(title: str, domain: str, path: str | None) -> tuple[str, str]:
@@ -333,8 +339,6 @@ class ScaffoldNoteUseCase:
         if template:
             if body.strip():
                 raise ValueError("Pass either 'body' or 'template', not both")
-            if self.vault is None:
-                raise ValueError("Templates require a vault; none is bound to this use case")
             body = self.vault.read_template_body(template).replace(
                 TEMPLATE_TITLE_PLACEHOLDER, title
             )
@@ -709,10 +713,10 @@ class MoveNoteUseCase:
     must change: verification binds to content, not to the path (§3.4).
     """
 
-    def __init__(self, storage: NoteStoragePort, ledger: LedgerPort, vault: Vault | None = None) -> None:
+    def __init__(self, storage: NoteStoragePort, ledger: LedgerPort, vault: VaultLayoutPort | None = None) -> None:
         self.storage = storage
         self.ledger = ledger
-        self.vault = vault
+        self.vault = _default_layout(storage, vault)
 
     def plan(self, cid_or_path: str, to: str, approve_stale: Sequence[str] = ()) -> MovePlan:
         cids = list(self.storage.list_note_cids())
@@ -876,22 +880,12 @@ class MoveNoteUseCase:
         return None
 
     def _leftover_folder_files(self, src_prefix: str, folder_cids: Sequence[str]) -> list[str]:
-        if self.vault is None:
-            return []
-        src_dir = self.vault.root / src_prefix
-        if not src_dir.is_dir():
-            return []
         moving_rels = {cid_to_path(c).casefold() for c in folder_cids}
-        leftover: list[str] = []
-        for path in sorted(src_dir.rglob("*")):
-            if not path.is_file():
-                continue
-            rel = path.relative_to(self.vault.root).as_posix()
-            if any(part.startswith(".") for part in rel.split("/")):
-                continue
-            if rel.casefold() not in moving_rels:
-                leftover.append(rel)
-        return leftover
+        return [
+            rel
+            for rel in self.vault.list_folder_files(src_prefix)
+            if rel.casefold() not in moving_rels
+        ]
 
     def _folder_destinations(
         self, src_prefix: str, folder_cids: list[str], to: str
@@ -950,9 +944,7 @@ class MoveNoteUseCase:
                 if parent:
                     raw_parts.insert(0, parent)
             folder = "/".join(raw_parts)
-            is_folder = any(c.startswith(folder + "/") for c in cids) or (
-                self.vault is not None and (self.vault.root / folder).is_dir()
-            )
+            is_folder = any(c.startswith(folder + "/") for c in cids) or self.vault.has_folder(folder)
             if is_folder and not raw.lower().endswith(".md"):
                 raise ValueError(
                     f"'{to}' is an existing folder: end it with '/' to move the note into it, "
@@ -1197,11 +1189,11 @@ class GroundNotesUseCase:
         self,
         storage: NoteStoragePort,
         cache: IndexCachePort | None = None,
-        vault: Vault | None = None,
+        vault: VaultLayoutPort | None = None,
     ) -> None:
         self.storage = storage
         self.cache = cache
-        self.vault = vault
+        self.vault = _default_layout(storage, vault)
 
     def _load(self, cid: str) -> Note:
         note = self.storage.get_note(cid)
@@ -1317,8 +1309,7 @@ class GroundNotesUseCase:
         """A raw/ file as evidence: its text and the notes citing it, never a trust tier (§5.1)."""
         cited_by = self.cache.get_source_citers(path) if self.cache is not None else []
         item: dict[str, Any] = {"target": raw_target, "kind": "raw", "path": path, "section": None}
-        text_exts = tuple(self.vault.config["raw_text_extensions"]) if self.vault is not None else None
-        if text_exts is not None and not is_raw_text_path(path, text_exts):
+        if not is_raw_text_path(path, tuple(self.vault.raw_text_extensions)):
             # The engine has no reader for this format; decoding it would hand
             # the caller bytes dressed up as source text.
             return item | {"content": None, "filename_only": True, "truncated": False, "cited_by": cited_by}
@@ -1363,7 +1354,7 @@ class GroundNotesUseCase:
         """
         if isinstance(targets, str) or not targets:
             raise ValueError("targets must be a non-empty list of note names or raw/ paths")
-        domains = self.vault.discover_domains() if self.vault is not None else {}
+        domains = self.vault.discover_domains()
         # Names resolve against what storage lists, not the search index, so a
         # note whose frontmatter is broken is named in its error rather than the
         # name silently resolving to another note with the same stem.

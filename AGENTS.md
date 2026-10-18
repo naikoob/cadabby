@@ -19,7 +19,7 @@ Each rule is cheap to break and hard to see once broken.
 - **The MCP tool count is fixed by §5.1.** New capability goes into an existing tool's parameters or an MCP resource; adding a tool is a spec change first, never a code-only change.
 - **Persona behavior lives only in `src/cadabby/assets/skills/<persona>/SKILL.md`** (installed as `.agents/skills/` in a vault). Agent manifests, slash commands, and plugin files are thin pointers (§7.1).
 - **Anything shipped into a vault lives under `src/cadabby/assets/`.** Outside it, the file is missing from the wheel (§9).
-- **Use cases go through ports.** `ops.py` depends on `ports.py` protocols; the storage and ledger ports each have a disk adapter and an in-memory twin for hermetic tests, while the cache port deliberately has none (§9.1).
+- **Use cases go through ports.** `ops.py` depends on `ports.py` protocols; the storage, layout, and ledger ports each have a disk adapter and an in-memory twin for hermetic tests, while the cache port deliberately has none (§9.1).
 - **No human attestation without a human.** MCP refuses `human:*` outright, and CLI writes default to `process:cli` even on a TTY (§3.5, §5.3).
 - **No engine-generated files inside cognitive domains**, including no `{domain}/index.md` (§2.2, §2.5).
 - **Templates seed the body only, and `templates/` is never reserved by default.** The reasons are in §7.5; read it before touching either.

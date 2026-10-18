@@ -51,8 +51,10 @@ library), so installation never pulls in a transitive dependency tree.
 
 - `vault_ground`'s `cids` is now `targets`, and `cadabby ground` takes the same names.
 - `vault_update_note` no longer takes `append_section` or `replace_section`, and `cadabby update` no longer takes `--append-section` or `--replace-section`. Pass them as entries in `edits` / `--edits`: `[{"op": "append_section", "heading": "...", "body": "..."}]`.
+- `vault_scaffold_note`, `vault_update_note`, and `vault_verify_note` now return structured JSON objects (`cid`, `rel_path`, `trust_tier`, `source_hash`, `warnings`, and `already_verified` on `vault_verify_note`) instead of plain confirmation prose, so callers can chain `source_hash` directly into `expected_hash` without re-grounding. `cadabby scaffold --json`, `cadabby update --json`, and `cadabby verify --json` emit the same JSON payloads.
 - `cadabby log` is removed. `log.md` records the write tools and nothing else.
 - `cadabby graph` takes a target or `--mocs`. Its JSON output gains neighbor metadata and per-list totals.
+- CLI `--actor` on `scaffold` and `update` now validates the `<kind>:<id>` grammar at parse time and refuses `human:*` (human attestation remains exclusively `cadabby verify --human` on an interactive TTY).
 
 An agent that sends an old argument name is told the new one. After upgrading the package, in each vault:
 
@@ -98,7 +100,7 @@ git clone https://github.com/naikoob/cadabby.git
 cd cadabby
 uv sync                    # or: pip install -e .
 
-# Fast parallel test execution across all CPU cores (~12s, 661 tests):
+# Fast parallel test execution across all CPU cores (~12s, 745 tests):
 python3 tests/run_parallel.py
 
 # Canonical sequential test suite:
@@ -332,7 +334,7 @@ The first eight commands mirror the eight MCP tools; the rest are operator comma
 | `cadabby ground` | Retrieve note content and 1-hop neighborhood, or a `raw/` source and the notes citing it | `cadabby ground wiki/Attention raw/paper.md#Results` |
 | `cadabby status` | Report note counts, trust tiers, verification debt, and the worklists; `--lint` adds every finding | `cadabby status --lint` |
 | `cadabby graph` | Link structure without note text: a note's neighborhood, or `--mocs` for every MOC's link counts and overlaps | `cadabby graph wiki/Attention` |
-| `cadabby scaffold` | Scaffold a new typed note in any domain, optionally from an Obsidian template (`--template`) | `cadabby scaffold "Transformer" --type concept --domain wiki --desc "Attention model"` |
+| `cadabby scaffold` | Scaffold a new typed note in any domain, optionally with initial prose (`--body`) or from an Obsidian template (`--template`) | `cadabby scaffold "Transformer" --type concept --domain wiki --desc "Attention model"` |
 | `cadabby update` | Patch frontmatter and apply an atomic list of body edits | `cadabby update wiki/Transformer --edits '[{"op":"replace_section","heading":"Overview","body":"New text"}]'` |
 | `cadabby move` | Move or rename a note or folder subtree (`prefix/`) and repoint its links (dry-run by default; `--apply --plan-token <t>` writes what the dry run showed; a trailing `/` moves into a folder or moves a folder subtree) | `cadabby move wiki/Transformer customers/acme/ --apply --plan-token 3f9c…` |
 | `cadabby verify` | Stamp cryptographic attestation on note | `cadabby verify wiki/Transformer --human` |
@@ -368,7 +370,7 @@ Status and domain multipliers apply on top of trust tiers:
 Cadabby uses standard-library `unittest` with **zero test dependencies**:
 
 ```bash
-# Fast parallel test execution across all CPU cores (~12s, 661 tests):
+# Fast parallel test execution across all CPU cores (~12s, 745 tests):
 python3 tests/run_parallel.py
 
 # Parallel execution with verbose output or target filtering:
