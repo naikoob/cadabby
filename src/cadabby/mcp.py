@@ -47,6 +47,12 @@ def _tool_error(tool: str, code: str, message: str, *, retryable: bool) -> dict[
     }
 
 
+# Upper bounds on what one call may ask for (§5.1). Unbounded, `limit: 1e30`
+# reached SQLite as an overflow (INTERNAL) and a target list had no ceiling.
+MAX_LIMIT = 1000
+MAX_TARGETS = 50
+MAX_BUDGET_TOKENS = 1_000_000
+
 TOOLS = [
     {
         "name": "vault_search",
@@ -73,7 +79,7 @@ TOOLS = [
                 "status": {"type": "string", "description": "Filter by note status"},
                 "trust": {"type": "string", "description": "Filter by trust tier (human-reviewed, machine-confirmed, …)"},
                 "tag": {"type": "string", "description": "Filter by note tag"},
-                "limit": {"type": "integer", "minimum": 1, "default": 20, "description": "Max results"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "default": 20, "description": "Max results"},
             },
         },
     },
@@ -94,6 +100,7 @@ TOOLS = [
                     "type": "array",
                     "items": {"type": "string", "minLength": 1},
                     "minItems": 1,
+                    "maxItems": MAX_TARGETS,
                     "description": (
                         "Notes (CIDs, stems, relative paths, or wikilinks) and raw sources ('raw/paper.md'); "
                         "append '#heading' to ground only that section"
@@ -102,6 +109,7 @@ TOOLS = [
                 "budget_tokens": {
                     "type": "integer",
                     "minimum": 1,
+                    "maximum": MAX_BUDGET_TOKENS,
                     "description": (
                         "Optional cap on returned text to protect context; never derive it from a requested "
                         "output length. Truncates at section boundaries."
@@ -154,7 +162,7 @@ TOOLS = [
                     "minLength": 1,
                     "description": "Note (CID, path, stem, or wikilink); required for 'neighborhood', refused for 'mocs'",
                 },
-                "limit": {"type": "integer", "minimum": 1, "default": 20, "description": "Max entries per list"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "default": 20, "description": "Max entries per list"},
             },
         },
     },
@@ -340,10 +348,14 @@ def _schema_violation(name: str, value: Any, schema: dict[str, Any]) -> str | No
         return f"'{name}' must be one of {schema['enum']}"
     if "minimum" in schema and value < schema["minimum"]:
         return f"'{name}' must be at least {schema['minimum']}"
+    if "maximum" in schema and value > schema["maximum"]:
+        return f"'{name}' must be at most {schema['maximum']}"
     if "minLength" in schema and len(value) < schema["minLength"]:
         return f"'{name}' must not be empty"
     if "minItems" in schema and len(value) < schema["minItems"]:
         return f"'{name}' must have at least {schema['minItems']} item(s)"
+    if "maxItems" in schema and len(value) > schema["maxItems"]:
+        return f"'{name}' must have at most {schema['maxItems']} item(s)"
     if expected == "array" and "items" in schema:
         for i, item in enumerate(value):
             if why := _schema_violation(f"{name}[{i}]", item, schema["items"]):
@@ -541,7 +553,8 @@ class McpServer:
         # reading it back is the only way the two cannot drift. A JSON null
         # means "not given" (§5.1), for required arguments too.
         retired = _RETIRED_ARGUMENTS.get(name, {})
-        if stale := sorted(k for k in args if k in retired):
+        # A JSON null means "not given" (§5.1), for retired names too.
+        if stale := sorted(k for k in args if k in retired and args[k] is not None):
             return _tool_error(
                 name,
                 INVALID_ARGUMENT,
@@ -576,7 +589,8 @@ class McpServer:
                 "Verification by human:* cannot be performed over MCP.",
                 retryable=False,
             )
-        unknown = sorted(k for k in args if k not in _PROPERTIES[name])
+        # A JSON null means "not given" (§5.1), so an unknown key sent as null is ignored.
+        unknown = sorted(k for k in args if k not in _PROPERTIES[name] and args[k] is not None)
         if unknown:
             return _tool_error(
                 name,
@@ -673,9 +687,13 @@ class McpServer:
 
     def dispatch_request(self, req: dict[str, Any]) -> dict[str, Any] | None:
         """Route a parsed JSON-RPC 2.0 request object and return its response (or None for notifications)."""
-        req_id = req.get("id")
-        if req_id is None:
+        # A notification is a request with no `id` member. `"id": null` is a
+        # request the client will wait on, so it is answered, not dropped.
+        if "id" not in req:
             return None
+        req_id = req["id"]
+        if isinstance(req_id, bool) or not isinstance(req_id, (str, int)):
+            return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request: 'id' must be a string or an integer"}}
 
         method = req.get("method")
         params = req.get("params")
@@ -777,7 +795,7 @@ def _is_notification_only_batch(payload: Any) -> bool:
     return (
         isinstance(payload, list)
         and bool(payload)
-        and all(isinstance(item, dict) and item.get("id") is None for item in payload)
+        and all(isinstance(item, dict) and "id" not in item for item in payload)
     )
 
 

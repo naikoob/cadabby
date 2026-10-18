@@ -784,6 +784,81 @@ class TestEightToolSurface(unittest.TestCase):
         self.assertNotIn("cids", tools["vault_ground"]["inputSchema"]["properties"])
 
 
+class TestMcpReviewTwoFixes(unittest.TestCase):
+    """C75: graph on broken notes, JSON-RPC ids, argument ceilings, raw/ routing and caps."""
+
+    setUp = TestMcpServer.setUp
+    tearDown = TestMcpServer.tearDown
+
+    def _call(self, name, args):
+        res = self.server.handle_tools_call(name, args)
+        return res, json.loads(res["content"][0]["text"])
+
+    def test_graph_on_an_unparseable_note_is_unparseable_not_empty(self):
+        (self.vault_root / "wiki" / "broken.md").write_text("---\ntitle: a\ntitle: b\n---\n# B\n", "utf-8")
+        res, payload = self._call("vault_graph", {"target": "wiki/broken"})
+        self.assertTrue(res["isError"])
+        self.assertEqual(payload["error"]["code"], "FRONTMATTER_UNPARSEABLE")
+
+    def test_null_and_malformed_ids_are_answered_not_dropped(self):
+        for bad_id in (None, [1], {"a": 1}, True):
+            with self.subTest(id=bad_id):
+                resp = self.server.dispatch_request({"jsonrpc": "2.0", "id": bad_id, "method": "ping"})
+                self.assertEqual(resp["error"]["code"], -32600)
+        self.assertIsNone(self.server.dispatch_request({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+        self.assertEqual(self.server.dispatch_request({"jsonrpc": "2.0", "id": "x", "method": "ping"})["result"], {})
+
+    def test_a_retired_argument_sent_as_null_is_not_given(self):
+        res, payload = self._call("vault_ground", {"targets": ["wiki/sqlite"], "cids": None})
+        self.assertFalse(res.get("isError"), payload)
+
+    def test_arguments_have_ceilings(self):
+        cases = (
+            ("vault_search", {"query": "sqlite", "limit": 10**30}),
+            ("vault_graph", {"view": "mocs", "limit": 1001}),
+            ("vault_ground", {"targets": ["wiki/sqlite"] * 51}),
+            ("vault_ground", {"targets": ["wiki/sqlite"], "budget_tokens": 10**7}),
+        )
+        for name, args in cases:
+            with self.subTest(name=name, args=list(args)):
+                res, payload = self._call(name, args)
+                self.assertEqual(payload["error"]["code"], "INVALID_ARGUMENT")
+
+    def test_a_huge_raw_file_is_read_only_up_to_the_cap(self):
+        from unittest import mock
+
+        from cadabby.adapters.disk_storage import DiskNoteStorage
+        from cadabby.ops import RAW_GROUND_MAX_BYTES
+
+        big = self.vault_root / "raw" / "dump.md"
+        big.write_text("# Dump\n" + ("x" * 99 + "\n") * 30_000, "utf-8")  # ~3 MB
+        seen = []
+        real = DiskNoteStorage.read_source
+
+        def spy(storage, rel_path, max_bytes=None):
+            seen.append(max_bytes)
+            return real(storage, rel_path, max_bytes)
+
+        with mock.patch.object(DiskNoteStorage, "read_source", spy):
+            res, payload = self._call("vault_ground", {"targets": ["raw/dump.md"]})
+        self.assertFalse(res.get("isError"), payload)
+        self.assertTrue(payload[0]["truncated"])
+        self.assertLessEqual(len(payload[0]["content"].encode("utf-8")), RAW_GROUND_MAX_BYTES)
+        self.assertTrue(seen and all(m is not None and m <= RAW_GROUND_MAX_BYTES + 1 for m in seen))
+
+    def test_a_domain_named_raw_with_a_capital_holds_notes(self):
+        folder = self.vault_root / "Raw"
+        if folder.exists():  # `raw/` answers to `Raw` on a case-insensitive filesystem
+            self.skipTest("case-insensitive filesystem")
+        folder.mkdir()
+        (folder / "thing.md").write_text(
+            "---\ntype: concept\ntitle: Thing\ndescription: d\nstatus: active\n---\n# Thing\n", "utf-8"
+        )
+        res, payload = self._call("vault_ground", {"targets": ["Raw/thing"]})
+        self.assertFalse(res.get("isError"), payload)
+        self.assertEqual(payload[0]["cid"], "Raw/thing")
+
+
 if __name__ == "__main__":
     unittest.main()
 

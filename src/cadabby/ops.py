@@ -482,7 +482,16 @@ class VerifyNoteUseCase:
         actor: str,
         method: str = "manual-review",
         is_human_authorized: bool = False,
+        expected_body_hash: str | None = None,
     ) -> VerificationResult:
+        """Stamp an attestation bound to the note's current body hash.
+
+        `expected_body_hash` is the hash the attester actually reviewed. Given,
+        a body changed since then is a VAULT_CONFLICT and nothing is signed:
+        `verify --human` showed one hash and re-read the note to stamp, so an
+        agent editing the body while the person typed the token got a human
+        attestation on text the person never saw (§3.5).
+        """
         if actor.startswith("human:") and not is_human_authorized:
             raise HumanAttestationRefusedError(
                 f"Cannot stamp '{actor}': human verification requires the interactive CLI (cadabby verify --human)."
@@ -491,6 +500,11 @@ class VerifyNoteUseCase:
         # Actor syntax is validated once, by Note.add_attestation.
 
         note = load_existing_note(self.storage, cid_or_path)
+        if expected_body_hash is not None and note.body_hash != expected_body_hash:
+            raise VaultConflictError(
+                f"VAULT_CONFLICT: {note.rel_path} changed since it was reviewed "
+                f"(reviewed {expected_body_hash[:19]}..., now {note.body_hash[:19]}...); nothing was signed"
+            )
 
         attestation, new_tier, already_verified = note.add_attestation(actor=actor, method=method)
 
@@ -1335,9 +1349,15 @@ class GroundNotesUseCase:
             # The engine has no reader for this format; decoding it would hand
             # the caller bytes dressed up as source text.
             return item | {"content": None, "filename_only": True, "truncated": False, "cited_by": cited_by}
-        text = self.storage.read_source(path)
+        # Read no more than can be returned: raw dumps (CSVs, logs) run to
+        # hundreds of megabytes, and a budget of 50 tokens read the whole file.
+        cap = RAW_GROUND_MAX_BYTES if budget_tokens is None else min(RAW_GROUND_MAX_BYTES, budget_tokens * 16)
+        text = self.storage.read_source(path, max_bytes=cap + 1)
         if text is None:
             raise FileNotFoundError(f"Source not found: {path}")
+        cut_at_read = len(text.encode("utf-8")) > cap
+        if cut_at_read:
+            text = text.encode("utf-8")[:cap].decode("utf-8", errors="ignore")
         if anchor is not None:
             extracted = extract_markdown_section(text, anchor)
             if extracted is None:
@@ -1347,7 +1367,12 @@ class GroundNotesUseCase:
             else:
                 item["section"], text = extracted
         content, truncated = _truncate_sections(text, text, budget_tokens, lambda body: body)
-        return item | {"content": content, "filename_only": False, "truncated": truncated, "cited_by": cited_by}
+        return item | {
+            "content": content,
+            "filename_only": False,
+            "truncated": truncated or cut_at_read,
+            "cited_by": cited_by,
+        }
 
     def execute(
         self,
@@ -1378,7 +1403,8 @@ class GroundNotesUseCase:
         for raw_target in targets:
             try:
                 unwrapped = _strip_dot_slash(strip_link_wrapper(raw_target))
-                if unwrapped.casefold().startswith(f"{DIR_RAW}/"):
+                # Exactly `raw/`: a domain folder named `Raw/` holds notes (§2.1).
+                if unwrapped.startswith(f"{DIR_RAW}/"):
                     if sources is None:
                         sources = list(self.storage.list_source_paths())
                     path, anchor = self._resolve_source(unwrapped, raw_target.strip(), sources)
@@ -1493,6 +1519,7 @@ def verify_note(
     storage: NoteStoragePort | None = None,
     ledger: LedgerPort | None = None,
     cache: IndexCachePort | None = None,
+    expected_body_hash: str | None = None,
 ) -> dict[str, Any]:
     """Appends a content-bound verification attestation to a note."""
     active_storage, active_ledger = _resolve_adapters(vault, storage, ledger)
@@ -1502,6 +1529,7 @@ def verify_note(
         actor=actor,
         method=method,
         is_human_authorized=is_human_authorized,
+        expected_body_hash=expected_body_hash,
     )
     _refresh(cache)
     return {
@@ -1531,6 +1559,9 @@ def ground_notes(
     return uc.execute(targets=targets, budget_tokens=budget_tokens)
 
 
+# The most of a raw/ file vault_ground reads; more is reported as truncated.
+RAW_GROUND_MAX_BYTES = 1024 * 1024
+
 GRAPH_VIEWS = ("neighborhood", "mocs")
 
 
@@ -1559,15 +1590,17 @@ def graph_view(
         return {"view": "mocs"} | moc_overview(cache.get_connection(), limit)
     if not target or not target.strip():
         raise ValueError("view 'neighborhood' needs a 'target' note")
-    if _strip_dot_slash(strip_link_wrapper(target)).casefold().startswith(f"{DIR_RAW}/"):
+    if _strip_dot_slash(strip_link_wrapper(target)).startswith(f"{DIR_RAW}/"):
         raise ValueError("raw/ sources are not graph nodes; vault_ground a raw/ path lists the notes citing it")
     active_storage, _ = _resolve_adapters(vault, storage)
     listed = list(active_storage.list_note_cids())
     cid = resolve_note_cid(active_storage, target, LinkTargetIndex(listed), cids=listed)
+    # Read first, as ground and update do: a note whose frontmatter does not
+    # parse is FRONTMATTER_UNPARSEABLE, not a node with no title and "no
+    # backlinks" (links into it never resolve, so that would be false).
+    load_existing_note(active_storage, cid)
     data = get_note_graph(cache.get_connection(), cid, limit=limit)
     if data is None:
-        # Listed but not indexed: its frontmatter does not parse (§4.4).
-        load_existing_note(active_storage, cid)
         raise FileNotFoundError(f"Note not found: {cid_to_path(cid)}")
     return {"view": "neighborhood"} | data
 

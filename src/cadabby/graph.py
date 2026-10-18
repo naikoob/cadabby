@@ -397,7 +397,7 @@ def get_note_graph(conn: sqlite3.Connection, target_cid: str, *, limit: int | No
     """
     # 1. Check note existence
     cur = conn.execute(
-        "SELECT cid, title, type, status, trust_tier, rel_path FROM notes WHERE cid = ?;",
+        "SELECT cid, title, type, status, trust_tier, rel_path FROM notes WHERE cid = ? AND parse_error IS NULL;",
         (target_cid,),
     )
     row = cur.fetchone()

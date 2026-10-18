@@ -45,10 +45,16 @@ class DiskNoteStorage(NoteStoragePort):
         data = target.read_bytes()
         cid = path_to_cid(rel_path)
         try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            # The file, not the caller's arguments, is at fault; search already
+            # shows this note (the scan decodes leniently), so name it.
+            raise FrontmatterParseError(f"not valid UTF-8 at byte {exc.start} (in {rel_path})", 1) from None
+        try:
             return Note.from_raw(
                 cid=cid,
                 rel_path=rel_path,
-                raw_text=data.decode("utf-8"),
+                raw_text=text,
                 source_hash=compute_bytes_sha256(data),
             )
         except FrontmatterParseError as exc:
@@ -109,7 +115,7 @@ class DiskNoteStorage(NoteStoragePort):
         # iter_raw_files already leaves out a symlink resolving outside raw/.
         return sorted({self.vault.rel_path(p) for p in self.vault.iter_raw_files()})
 
-    def read_source(self, rel_path: str) -> str | None:
+    def read_source(self, rel_path: str, max_bytes: int | None = None) -> str | None:
         parts = rel_path.replace("\\", "/").split("/")
         if len(parts) < 2 or parts[0] != DIR_RAW or any(p in ("", ".", "..") for p in parts):
             return None
@@ -119,7 +125,10 @@ class DiskNoteStorage(NoteStoragePort):
         target = (self.vault.root / Path(*parts)).resolve()
         if not target.is_relative_to(self.vault.raw_dir.resolve()) or not target.is_file():
             return None
-        return target.read_bytes().decode("utf-8", errors="replace")
+        if max_bytes is None:
+            return target.read_bytes().decode("utf-8", errors="replace")
+        with open(target, "rb") as fh:
+            return fh.read(max_bytes).decode("utf-8", errors="replace")
 
 
 class FileLedger(LedgerPort):

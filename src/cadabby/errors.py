@@ -17,6 +17,7 @@ anything.
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 
 # --- Codes -----------------------------------------------------------------
@@ -138,6 +139,9 @@ class AmbiguousNoteError(ValueError):
 # FileExistsError and PermissionError are all OSError subclasses, so OSError
 # must come last or it swallows them.
 _BUILTIN_CODES: tuple[tuple[type[BaseException], str, bool], ...] = (
+    # A decode error nobody anticipated is the engine's surprise, not bad input:
+    # UnicodeError is a ValueError and used to read as INVALID_ARGUMENT.
+    (UnicodeError, INTERNAL, False),
     (FileNotFoundError, NOT_FOUND, False),
     (FileExistsError, ALREADY_EXISTS, False),
     (PermissionError, PERMISSION_DENIED, False),
@@ -164,6 +168,11 @@ ALL_CODES: frozenset[str] = frozenset(
 )
 
 
+def _is_sqlite_contention(exc: sqlite3.OperationalError) -> bool:
+    message = str(exc).lower()
+    return "locked" in message or "busy" in message
+
+
 def classify(exc: BaseException) -> ErrorInfo:
     """Assign a stable code to any exception reaching the boundary.
 
@@ -174,6 +183,10 @@ def classify(exc: BaseException) -> ErrorInfo:
     """
     if isinstance(exc, CadabbyError):
         return ErrorInfo(exc.code, str(exc), exc.retryable)
+    if isinstance(exc, sqlite3.OperationalError) and _is_sqlite_contention(exc):
+        # Another process holds the cache (the MCP server and a CLI on one vault
+        # is the designed setup): transient, so say so, rather than INTERNAL.
+        return ErrorInfo(LOCK_TIMEOUT, f"The vault cache is busy in another process: {exc}", True)
 
     for exc_type, code, retryable in _BUILTIN_CODES:
         if isinstance(exc, exc_type):

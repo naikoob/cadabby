@@ -373,6 +373,30 @@ class TestIndexLinksForUnsafeStems(IndexerFixture):
         self.assertIn("[[plain]]", text)
 
 
+class TestPostWriteRefreshRobustness(IndexerFixture):
+    """C75: engine-owned files with odd bytes never fail a write that already succeeded."""
+
+    def test_a_stray_byte_in_index_md_is_simply_replaced(self):
+        self._note("alpha")
+        with VaultCache(self.vault) as cache:
+            cache.scan()
+            self.vault.index_path.write_bytes(self.vault.index_path.read_bytes() + b"\xff\xfe junk")
+            self.assertTrue(sync_vault_index(self.vault, cache))
+        self.vault.index_path.read_text("utf-8")  # valid again
+
+    def test_a_failed_rotation_puts_the_ledger_back(self):
+        import cadabby.indexer as indexer
+
+        self.vault.config["log_rotate_bytes"] = 10
+        self.vault.log_path.write_text("# Activity Ledger (2026)\n\n- entry one with padding\n", "utf-8")
+        before = self.vault.log_path.read_bytes()
+        with unittest.mock.patch.object(indexer, "_archive_ledger", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                rotate_vault_log(self.vault)
+        self.assertEqual(self.vault.log_path.read_bytes(), before)
+        self.assertEqual(list(self.vault.log_dir.glob(".rotating-*")) if self.vault.log_dir.exists() else [], [])
+
+
 if __name__ == "__main__":
     unittest.main()
 

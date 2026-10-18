@@ -1093,6 +1093,51 @@ class TestCarriageReturnForgery(unittest.TestCase):
         self.assertIsNone(row["trust_tier"])
 
 
+class TestCacheContention(unittest.TestCase):
+    """C75: another process holding the cache never fails a read, and a blocked write is retryable."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.vault = Vault(copy_demo_vault(Path(self.tmp.name) / "demo-vault"))
+        with VaultCache(self.vault) as cache:
+            cache.scan()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_reads_work_while_another_process_holds_the_write_lock(self):
+        import sqlite3
+        import time
+
+        holder = sqlite3.connect(str(self.vault.cache_db_path))
+        self.addCleanup(holder.close)
+        holder.execute("BEGIN IMMEDIATE")
+        start = time.perf_counter()
+        with VaultCache(self.vault) as cache:
+            cache.scan()  # nothing changed: no write needed
+            self.assertTrue(cache.search("sqlite"))
+        self.assertLess(time.perf_counter() - start, 2.0, "opening the cache must not wait for the write lock")
+
+    def test_a_locked_cache_is_a_retryable_lock_timeout(self):
+        import sqlite3
+
+        from cadabby.errors import classify
+
+        info = classify(sqlite3.OperationalError("database is locked"))
+        self.assertEqual((info.code, info.retryable), ("LOCK_TIMEOUT", True))
+        self.assertEqual(classify(sqlite3.OperationalError("no such table: x")).code, "INTERNAL")
+
+    def test_the_fts5_probe_never_touches_the_cache_file(self):
+        with VaultCache(self.vault) as cache:
+            names = {r[0] for r in cache.get_connection().execute("SELECT name FROM sqlite_master")}
+        self.assertNotIn("_fts5_probe", names)
+
+    def test_integrity_check_leaves_no_transaction_open(self):
+        with VaultCache(self.vault) as cache:
+            self.assertTrue(cache.check_fts_integrity())
+            self.assertFalse(cache.get_connection().in_transaction)
+
+
 if __name__ == "__main__":
     unittest.main()
 

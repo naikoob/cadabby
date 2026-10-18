@@ -91,14 +91,20 @@ class TestDiskNoteStorage(unittest.TestCase):
         self.assertIsNone(self.storage.get_note("../../etc/passwd"))
         self.assertIsNone(self.storage.get_note("/etc/passwd"))
 
-    def test_get_note_non_utf8_bytes_raises_unicodedecodeerror(self):
+    def test_get_note_non_utf8_bytes_is_unparseable_and_named(self):
+        """C75: the file is at fault, not the caller: FRONTMATTER_UNPARSEABLE with its path."""
+        from cadabby.errors import classify
+        from cadabby.frontmatter import FrontmatterParseError
+
         note_path = self.vault_dir / "wiki" / "concepts" / "Binary.md"
         # Write bytes containing invalid UTF-8 byte 0xff
         note_path.write_bytes(
             b"---\ntype: concept\ntitle: Binary\ndescription: Invalid UTF8\nstatus: active\n---\n# Binary\n\xff\n"
         )
-        with self.assertRaises(UnicodeDecodeError):
+        with self.assertRaises(FrontmatterParseError) as ctx:
             self.storage.get_note("wiki/concepts/Binary")
+        self.assertEqual(classify(ctx.exception).code, "FRONTMATTER_UNPARSEABLE")
+        self.assertIn("wiki/concepts/Binary.md", str(ctx.exception))
 
     def test_save_note_success(self):
         note = Note(

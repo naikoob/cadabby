@@ -68,14 +68,20 @@ def rotate_vault_log(vault: Vault) -> Path | None:
         target_rotated.parent.mkdir(parents=True, exist_ok=True)
         pending = vault.contained_path(vault.log_dir / f".rotating-{uuid.uuid4().hex}.md")
         os.replace(log_file, pending)
-
-        content = pending.read_text("utf-8")
-        _archive_ledger(target_rotated, content, ledger_year)
-        # A writer that opened log.md before the rename appends to `pending`;
-        # one more read catches what it wrote while we archived.
-        tail = pending.read_text("utf-8")[len(content):]
-        if tail:
-            append_ledger(target_rotated, tail)
+        try:
+            content = pending.read_text("utf-8")
+            _archive_ledger(target_rotated, content, ledger_year)
+            # A writer that opened log.md before the rename appends to `pending`;
+            # one more read catches what it wrote while we archived.
+            tail = pending.read_text("utf-8")[len(content):]
+            if tail:
+                append_ledger(target_rotated, tail)
+        except BaseException:
+            # Never leave the whole ledger in a hidden `.rotating-*` file: put it
+            # back unless an append has already started a new log.md.
+            if not log_file.exists():
+                os.replace(pending, log_file)
+            raise
         pending.unlink()
 
         # O_EXCL: if an append already created the new ledger, keep its entries
@@ -256,10 +262,10 @@ def sync_vault_index(vault: Vault, cache: VaultCache) -> bool:
     # a newer report with the older snapshot it read first.
     with advisory_lock(vault.contained_path(vault.lock_path)):
         new_content = generate_index_markdown(vault, cache=cache)
-        if index_path.exists():
-            existing = index_path.read_text("utf-8")
-            if existing == new_content:
-                return False
+        # Bytes: index.md is engine-owned, and a stray non-UTF-8 byte in it made
+        # the strict decode fail every write *after* the note was committed.
+        if index_path.exists() and index_path.read_bytes() == new_content.encode("utf-8"):
+            return False
 
         atomic_write(index_path, new_content)
         return True

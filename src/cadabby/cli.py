@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import os
 import secrets
 import sys
 from pathlib import Path
@@ -316,13 +317,16 @@ def cmd_move(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _confirm_human_attestation(vault: Vault, cid: str) -> bool:
+def _confirm_human_attestation(vault: Vault, cid: str) -> tuple[bool, str | None]:
     """Ask the person at the keyboard to type back a one-time token (§3.5).
 
     The TTY check alone is satisfied by any pseudo-terminal, which is exactly
     what agent harnesses run commands in. A token printed now and typed back
     now cannot be answered by a pre-piped `y`, so an endorsement can no longer
     be made by accident.
+
+    Returns (confirmed, the body hash shown). The stamp is bound to that hash:
+    if the body changes while the person reads and types, nothing is signed.
     """
     storage = DiskNoteStorage(vault)
     try:
@@ -331,16 +335,17 @@ def _confirm_human_attestation(vault: Vault, cid: str) -> bool:
         note = None
     if note is None:
         # Let verify_note raise its normal NOT_FOUND error with the usual wording.
-        return True
+        return True, None
     token = secrets.token_hex(2)
+    shown = note.body_hash
     print(f"You are about to record that you personally reviewed '{note.title}'.")
     print(f"  cid:  {note.cid}")
-    print(f"  body: {note.body_hash[:23]}...")
+    print(f"  body: {shown}")
     try:
         answer = input(f"Type {token} to sign, anything else to abort: ")
     except EOFError:
-        return False
-    return answer.strip() == token
+        return False, shown
+    return answer.strip() == token, shown
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
@@ -355,16 +360,19 @@ def cmd_verify(args: argparse.Namespace) -> int:
     if args.human:
         if not sys.stdin.isatty():
             raise ValueError("--human requires an interactive TTY")
-        if not _confirm_human_attestation(vault, args.cid):
+        confirmed, reviewed_hash = _confirm_human_attestation(vault, args.cid)
+        if not confirmed:
             raise ValueError("Aborted: confirmation token did not match; nothing was written")
         actor = f"human:{getpass.getuser()}"
         is_human = True
     elif args.agent:
         actor = args.agent if args.agent.startswith(("agent:", "process:")) else f"agent:{args.agent}"
         is_human = False
+        reviewed_hash = None
     else:
         actor = CLI_DEFAULT_ACTOR  # see _default_cli_actor
         is_human = False
+        reviewed_hash = None
 
     with VaultCache(vault) as cache:
         res = verify_note(
@@ -374,6 +382,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
             method=args.method or ("manual-review" if is_human else "automated-check"),
             is_human_authorized=is_human,
             cache=cache,
+            expected_body_hash=reviewed_hash,
         )
     status_label = "already verified" if res.get("already_verified") else "verified"
     print(f"{status_label.capitalize()}: {res['cid']} as '{res['actor']}' -> tier: '{res['trust_tier']}' ({res['of'][:16]}...)")
@@ -657,6 +666,13 @@ class _StrictArgumentParser(argparse.ArgumentParser):
         super().__init__(*args, **kwargs)
 
 
+def _non_blank(text: str) -> str:
+    """argparse type for a name that must say something: `""` is a usage error (exit 2)."""
+    if not text.strip():
+        raise argparse.ArgumentTypeError("must not be empty")
+    return text
+
+
 def _positive_int(text: str) -> int:
     """argparse type for counts: 1 or more. `--limit -1` once read as "no limit" by accident of SQLite."""
     try:
@@ -736,7 +752,7 @@ def build_parser() -> argparse.ArgumentParser:
         "graph", parents=[vault_parent], help="Link structure without note text: a note's neighborhood, or --mocs"
     )
     graph_what = p_graph.add_mutually_exclusive_group(required=True)
-    graph_what.add_argument("target", nargs="?", help="Note CID, stem, path or wikilink to centre on")
+    graph_what.add_argument("target", nargs="?", type=_non_blank, help="Note CID, stem, path or wikilink to centre on")
     graph_what.add_argument("--mocs", action="store_true", help="Every MOC's link counts and overlaps, for splits and merges")
     p_graph.add_argument("--limit", type=_positive_int, default=20, help="Max entries per list, at least 1 (default: 20)")
     p_graph.add_argument("--json", action="store_true", help="Output as JSON")
@@ -859,7 +875,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     """CLI entry point.
 
     Failures exit with a status derived from the error taxonomy (§5.4) so a
@@ -868,9 +884,16 @@ def main() -> None:
     those was exit 1.
     """
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
         sys.exit(args.func(args))
+    except BrokenPipeError:
+        # `cadabby search x | head -1`: the reader left, which is not a failure
+        # of ours. Point stdout at devnull so the interpreter's final flush
+        # cannot raise again, and exit cleanly.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(EXIT_OK)
     except Exception as e:  # noqa: BLE001
         info = classify(e)
         print(f"Error [{info.code}]: {info.message}", file=sys.stderr)

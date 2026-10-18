@@ -49,11 +49,13 @@ class NoteStoragePort(Protocol):
         """Vault-relative paths of every file under raw/ that is evidence (§2.4), sorted."""
         ...
 
-    def read_source(self, rel_path: str) -> str | None:
+    def read_source(self, rel_path: str, max_bytes: int | None = None) -> str | None:
         """Text of the raw/ file at exactly `rel_path`, or None (§2.4, §5.1 `vault_ground`).
 
         Never a note and never a file outside raw/, whatever `..` or symlink
         the path carries: the confinement is the adapter's, not the caller's.
+        With `max_bytes`, at most that many bytes are read (raw dumps can be
+        hundreds of megabytes).
         """
         ...
 

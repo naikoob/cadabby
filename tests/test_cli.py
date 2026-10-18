@@ -310,6 +310,31 @@ class TestCli(unittest.TestCase):
                     self._run_verify_on_tty(self._verify_args(vault_root, human=True), answer=answer)
                 self.assertEqual(note.read_bytes(), before)
 
+    def test_human_verify_signs_only_the_body_that_was_shown(self):
+        """C75, S4: an agent editing the body while the person types the token gets nothing signed."""
+        from cadabby.errors import VaultConflictError
+        from cadabby.frontmatter import parse_frontmatter
+
+        vault_root = copy_demo_vault(self.dir / "race-vault")
+        note = vault_root / "wiki" / "sqlite.md"
+        entries_before = len(parse_frontmatter(note.read_text("utf-8"))[0].get("verified", []))
+
+        def agent_edits_then_person_types(prompt):
+            note.write_text(note.read_text("utf-8") + "\nThe agent's new claim.\n", "utf-8")
+            return "ab12"
+
+        with (
+            unittest.mock.patch("sys.stdin.isatty", return_value=True),
+            unittest.mock.patch("cadabby.cli.secrets.token_hex", return_value="ab12"),
+            unittest.mock.patch("builtins.input", side_effect=agent_edits_then_person_types),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            with self.assertRaisesRegex(VaultConflictError, "nothing was signed"):
+                cmd_verify(self._verify_args(vault_root, human=True))
+        fm, body = parse_frontmatter(note.read_text("utf-8"))
+        self.assertIn("The agent's new claim.", body)
+        self.assertEqual(len(fm.get("verified", [])), entries_before, "no attestation was added")
+
     def test_human_verify_without_tty_is_invalid_argument(self):
         vault_root = copy_demo_vault(self.dir / "no-tty-vault")
         with unittest.mock.patch("sys.stdin.isatty", return_value=False):
@@ -1225,6 +1250,42 @@ class TestCliActorFlag(unittest.TestCase):
         with self.assertRaises(ValueError):
             _default_cli_actor(DummyArgs(actor="human:alice"))
         self.assertEqual(_default_cli_actor(DummyArgs(actor=None)), "process:cli")
+
+
+class TestCliEntryPoint(unittest.TestCase):
+    """C75: main(argv) is testable in-process; usage and pipe edge cases exit as specified."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.vault_root = copy_demo_vault(Path(self.tmp.name) / "demo-vault")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _main(self, *argv):
+        from cadabby.cli import main
+
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as ctx:
+            main(list(argv))
+        return ctx.exception.code
+
+    def test_an_empty_graph_target_is_a_usage_error(self):
+        self.assertEqual(self._main("graph", "", "--vault", str(self.vault_root)), 2)
+
+    def test_a_closed_pipe_is_not_a_failure(self):
+        from unittest import mock
+
+        import cadabby.cli as cli
+
+        with (
+            mock.patch.object(cli, "cmd_status", side_effect=BrokenPipeError),
+            mock.patch.object(cli.os, "open", return_value=99),
+            mock.patch.object(cli.os, "dup2"),
+        ):
+            self.assertEqual(self._main("status", "--vault", str(self.vault_root)), 0)
+
+    def test_main_runs_in_process_with_the_taxonomy_exit_code(self):
+        self.assertEqual(self._main("ground", "wiki/does-not-exist", "--vault", str(self.vault_root)), 3)
 
 
 if __name__ == "__main__":

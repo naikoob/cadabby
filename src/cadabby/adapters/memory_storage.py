@@ -102,10 +102,13 @@ class InMemoryNoteStorage(NoteStoragePort):
     def list_source_paths(self) -> Sequence[str]:
         return sorted(self._sources)
 
-    def read_source(self, rel_path: str) -> str | None:
+    def read_source(self, rel_path: str, max_bytes: int | None = None) -> str | None:
         # Keys are only ever raw/ paths (see put_source), so an exact lookup
         # is the whole confinement rule here.
-        return self._sources.get(rel_path)
+        text = self._sources.get(rel_path)
+        if text is None or max_bytes is None:
+            return text
+        return text.encode("utf-8")[:max_bytes].decode("utf-8", errors="replace")
 
     def put_source(self, rel_path: str, text: str) -> None:
         """Test seam: place a raw/ file. Memory plays the human who curates raw/."""

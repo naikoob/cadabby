@@ -5,6 +5,8 @@ Conforms strictly to Cadabby Technical Specification §4.
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import json
 import os
 import posixpath
@@ -398,17 +400,34 @@ def _fts_table(layer: str | None) -> str:
     return "raw_fts" if layer == DIR_RAW else "notes_fts"
 
 
-def check_fts5_capability(conn: sqlite3.Connection) -> None:
-    """Verify that SQLite was compiled with FTS5 virtual table support."""
-    try:
-        conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS _fts5_probe USING fts5(x);")
-        conn.execute("DROP TABLE IF EXISTS _fts5_probe;")
-    except sqlite3.OperationalError as e:
+@functools.cache
+def _fts5_available() -> bool:
+    """Whether this interpreter's SQLite has FTS5, asked once of a throwaway database.
+
+    The probe used to CREATE and DROP a table in the user's cache.db on every
+    open: a write, so every command -- reads included -- needed the write lock,
+    and a lock held by another process surfaced as "FTS5 is not available".
+    """
+    with contextlib.closing(sqlite3.connect(":memory:")) as probe:
+        try:
+            probe.execute("CREATE VIRTUAL TABLE _fts5_probe USING fts5(x);")
+        except sqlite3.OperationalError:
+            return False
+    return True
+
+
+def check_fts5_capability(conn: sqlite3.Connection | None = None) -> None:
+    """Verify that SQLite was compiled with FTS5 virtual table support.
+
+    `conn` is accepted for compatibility and ignored: the answer is a property
+    of the interpreter's SQLite, not of any one database.
+    """
+    if not _fts5_available():
         raise RuntimeError(
             f"SQLite FTS5 extension is not available in Python {sys.version} "
             f"(sqlite_version={sqlite3.sqlite_version}). "
             "Please use a Python interpreter compiled with SQLite FTS5 support."
-        ) from e
+        )
 
 
 def reset_cache_files(db_path: Path) -> None:
@@ -421,19 +440,26 @@ def reset_cache_files(db_path: Path) -> None:
         Path(f"{db_path}{suffix}").unlink(missing_ok=True)
 
 
-def _schema_is_current(conn: sqlite3.Connection) -> bool:
-    """True for an empty database or one recorded at SCHEMA_VERSION.
+def _schema_state(conn: sqlite3.Connection) -> str:
+    """`"empty"`, `"current"` (recorded at SCHEMA_VERSION) or `"stale"` (anything else).
 
     Compared as text so a corrupt, non-integer version reads as stale instead
-    of raising from `int()`.
+    of raising from `int()`. Only an empty database needs its tables created:
+    re-running the DDL and rewriting `schema_version` on every open made every
+    command, reads included, take the write lock.
     """
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table';")}
     if not tables:
-        return True
+        return "empty"
     if "cache_meta" not in tables:
-        return False
+        return "stale"
     row = conn.execute("SELECT value FROM cache_meta WHERE key = 'schema_version';").fetchone()
-    return row is not None and str(row[0]) == str(SCHEMA_VERSION)
+    return "current" if row is not None and str(row[0]) == str(SCHEMA_VERSION) else "stale"
+
+
+def _schema_is_current(conn: sqlite3.Connection) -> bool:
+    """True for an empty database or one recorded at SCHEMA_VERSION."""
+    return _schema_state(conn) != "stale"
 
 
 class VaultCache:
@@ -454,22 +480,30 @@ class VaultCache:
         any table a newer schema added.
         """
         if self._conn is None:
+            conn: sqlite3.Connection | None = None
             try:
                 conn = self._open()
-                current = _schema_is_current(conn)
+                state = _schema_state(conn)
             except sqlite3.DatabaseError:
                 # Not a database at all, or a corrupt page: the cache is
                 # disposable, so a damaged one is rebuilt rather than failing
                 # every command as INTERNAL (§4.2). A second failure is real.
-                current = False
+                # Closed first: deleting a file under an open handle leaks it,
+                # and fails outright on Windows.
+                if conn is not None:
+                    conn.close()
+                state = "stale"
                 conn = None
-            if not current:
+            if state == "stale":
                 if conn is not None:
                     conn.close()
                 reset_cache_files(self.db_path)
                 conn = self._open()
+                state = "empty"
+            assert conn is not None
             self._conn = conn
-            self._create_tables(conn)
+            if state == "empty":
+                self._create_tables(conn)
         return self._conn
 
     def _open(self) -> sqlite3.Connection:
@@ -1315,6 +1349,11 @@ class VaultCache:
             return True
         except sqlite3.DatabaseError:  # FTS5 reports an index/content mismatch as SQLITE_CORRUPT
             return False
+        finally:
+            # The INSERT opened an implicit transaction; left open it held the
+            # write lock against every other process.
+            if conn.in_transaction:
+                conn.rollback()
 
     def close(self) -> None:
         """Close SQLite database connection if open."""
