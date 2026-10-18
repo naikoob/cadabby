@@ -27,6 +27,7 @@ from cadabby.errors import (
 from cadabby.indexer import rotate_vault_log, sync_vault_index
 from cadabby.installer import InitRefusedError, init_vault
 from cadabby.lint import run_vault_lint, status_report
+from cadabby.okf import is_actor_human, is_valid_actor
 from cadabby.ops import (
     graph_view,
     ground_notes,
@@ -63,7 +64,27 @@ def _default_cli_actor(args: argparse.Namespace) -> str:
     `human:<user>` from it let an agent's flagless call sign as a human. The
     only path to a `human:*` attestation is `verify --human`.
     """
-    return getattr(args, "actor", None) or CLI_DEFAULT_ACTOR
+    actor = getattr(args, "actor", None) or CLI_DEFAULT_ACTOR
+    try:
+        return parse_cli_actor(actor)  # programmatic callers bypass argparse's `type=`
+    except argparse.ArgumentTypeError as e:
+        raise ValueError(str(e)) from None
+
+
+def parse_cli_actor(value: str) -> str:
+    """argparse `type=` for `--actor`: the §3.4 grammar, and never `human:*` (§3.5).
+
+    Unchecked, `--actor` went straight into `generated.by` and log.md: a
+    newline forged ledger lines, and `human:alice` claimed a person's
+    authorship with no person present.
+    """
+    if not is_valid_actor(value):
+        raise argparse.ArgumentTypeError(f"invalid actor {value!r}: expected agent:<id> or process:<id>")
+    if is_actor_human(value):
+        raise argparse.ArgumentTypeError(
+            f"{value!r}: a human:* actor is recorded only by `cadabby verify --human`, never claimed by a flag"
+        )
+    return value
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -735,7 +756,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--template",
         help="Obsidian template whose body seeds the note; {{title}} is substituted",
     )
-    p_scaffold.add_argument("--actor", help=f"Actor identity (default: {CLI_DEFAULT_ACTOR})")
+    p_scaffold.add_argument("--actor", type=parse_cli_actor, help=f"Actor identity (default: {CLI_DEFAULT_ACTOR})")
     p_scaffold.set_defaults(func=cmd_scaffold)
 
     # update
@@ -747,7 +768,7 @@ def build_parser() -> argparse.ArgumentParser:
         help='JSON list of body edits applied atomically, e.g. \'[{"op":"replace_text","old":"..","new":".."}]\'',
     )
     p_update.add_argument("--expected-hash", help="Expected file hash for concurrency safety")
-    p_update.add_argument("--actor", help=f"Actor identity (default: {CLI_DEFAULT_ACTOR})")
+    p_update.add_argument("--actor", type=parse_cli_actor, help=f"Actor identity (default: {CLI_DEFAULT_ACTOR})")
     p_update.set_defaults(func=cmd_update)
 
     # move
@@ -765,7 +786,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="A human-reviewed note allowed to go stale-verified (repeat the flag for each)",
     )
     p_move.add_argument("--plan-token", help="The dry run's plan_token: --apply refuses if the plan has changed since")
-    p_move.add_argument("--actor", help=f"Actor identity (default: {CLI_DEFAULT_ACTOR})")
+    p_move.add_argument("--actor", type=parse_cli_actor, help=f"Actor identity (default: {CLI_DEFAULT_ACTOR})")
     p_move.add_argument("--json", action="store_true", help="Output as JSON")
     p_move.set_defaults(func=cmd_move)
 

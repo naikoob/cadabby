@@ -251,6 +251,67 @@ class TestAtomicWriteDurability(unittest.TestCase):
         spy.assert_called_once_with(target.resolve().parent)
 
 
+class TestWriteHardening(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp_dir.name).resolve()
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def test_contained_refuses_links_out_and_allows_links_in(self):
+        from cadabby.errors import VaultEscapeError
+        from cadabby.fsutil import contained
+
+        root = self.dir / "root"
+        (root / "real").mkdir(parents=True)
+        (root / "inside").symlink_to(root / "real", target_is_directory=True)
+        (root / "out").symlink_to(self.dir, target_is_directory=True)
+        self.assertEqual(contained(root, root / "inside" / "x.md"), root / "real" / "x.md")
+        with self.assertRaises(VaultEscapeError):
+            contained(root, root / "out" / "x.md")
+        with self.assertRaises(VaultEscapeError):
+            contained(root, root / ".." / "x.md")
+
+    def test_the_temp_file_is_never_more_permissive_than_the_target(self):
+        """S10: a 0600 secret is not world-readable while it is being rewritten."""
+        from unittest import mock
+
+        import cadabby.fsutil as fsutil
+
+        target = self.dir / "secret.json"
+        target.write_text("{}", "utf-8")
+        os.chmod(target, 0o600)
+        modes = []
+        real_fsync = os.fsync
+
+        def spy(fd):
+            modes.extend(stat.S_IMODE(p.stat().st_mode) for p in self.dir.glob(".tmp_*"))
+            return real_fsync(fd)
+
+        with mock.patch.object(fsutil.os, "fsync", side_effect=spy):
+            atomic_write(target, '{"k": 1}')
+        self.assertTrue(modes)
+        self.assertTrue(all(m & 0o077 == 0 for m in modes), [oct(m) for m in modes])
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
+
+    def test_a_new_file_gets_the_ordinary_mode(self):
+        target = self.dir / "new.md"
+        atomic_write(target, "x")
+        umask = os.umask(0)
+        os.umask(umask)
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o644 & ~umask)
+
+    def test_a_future_dated_lock_is_stale(self):
+        """S9: a planted `1:<far future>` lock never blocks writers."""
+        lock = self.dir / "vault.lock"
+        lock.write_text(f"1:{time.time() + 10**9:.3f}\n", "utf-8")
+        start = time.monotonic()
+        with advisory_lock(lock, timeout=0.5):
+            pass
+        self.assertLess(time.monotonic() - start, 0.5)
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -10,6 +10,7 @@ from collections.abc import Sequence
 
 from cadabby.constants import DIR_RAW
 from cadabby.domain import Note
+from cadabby.okf import ledger_line
 from cadabby.fsutil import VaultConflictError, check_expected_hash, compute_bytes_sha256
 from cadabby.ports import LedgerPort, NoteStoragePort
 from cadabby.vault import cid_to_path, note_path_violation, path_to_cid
@@ -121,4 +122,5 @@ class InMemoryLedger(LedgerPort):
         self.entries: list[tuple[str, str | None]] = []
 
     def append(self, message: str, actor: str | None = None) -> None:
+        ledger_line(message, actor)  # the disk ledger's rules: one line, a valid actor
         self.entries.append((message, actor))

@@ -441,7 +441,8 @@ class VaultCache:
 
     def __init__(self, vault: Vault) -> None:
         self.vault = vault
-        self.db_path = vault.cache_db_path
+        # A `.cadabby -> elsewhere` symlink would put every cache write outside the vault (§8).
+        self.db_path = vault.contained_path(vault.cache_db_path)
         self._conn: sqlite3.Connection | None = None
 
     def get_connection(self) -> sqlite3.Connection:

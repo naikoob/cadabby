@@ -108,6 +108,18 @@ class HumanAttestationRefusedError(CadabbyError):
     code = HUMAN_ATTESTATION_REFUSED
 
 
+class VaultEscapeError(CadabbyError, PermissionError):
+    """A write would land outside the vault, through a symlink or otherwise (§8).
+
+    A vault is a folder anyone can hand you: a clone, a template, a synced
+    share. `log.md -> ~/.bashrc` made every ledger append a write into the
+    user's shell startup file. PermissionError stays in the bases so existing
+    `except PermissionError` handlers keep catching it.
+    """
+
+    code = PERMISSION_DENIED
+
+
 class AmbiguousNoteError(ValueError):
     """A note name matches more than one note, and a write must not guess (§5.1).
 

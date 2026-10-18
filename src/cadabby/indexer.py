@@ -13,7 +13,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from cadabby.okf import utc_now_iso
+from cadabby.okf import ledger_line, utc_now_iso
 
 from cadabby.cache import VaultCache, unfiled_note_rows, unprocessed_raw_paths, verification_debt_rows
 from cadabby.constants import LEDGER_TITLE, TYPE_MOC
@@ -37,11 +37,7 @@ def _detect_ledger_year(content: str, fallback_year: str) -> str:
 
 def append_vault_log(vault: Vault, message: str, actor: str | None = None) -> None:
     """Append a timestamped entry to the active log.md ledger."""
-    prefix = f"[{utc_now_iso()}]"
-    if actor:
-        prefix += f" {actor}:"
-    entry = f"- {prefix} {message}"
-    append_ledger(vault.log_path, entry)
+    append_ledger(vault.contained_path(vault.log_path), ledger_line(message, actor))
 
 
 def rotate_vault_log(vault: Vault) -> Path | None:
@@ -56,10 +52,10 @@ def rotate_vault_log(vault: Vault) -> Path | None:
     entry appended in between; after the rename, a new append creates a new
     log.md instead, and nothing overwrites it.
     """
-    log_file = vault.log_path
+    log_file = vault.contained_path(vault.log_path)
     max_bytes = vault.config["log_rotate_bytes"]
 
-    with advisory_lock(vault.lock_path):
+    with advisory_lock(vault.contained_path(vault.lock_path)):
         if not log_file.exists():
             return None
         content = log_file.read_text("utf-8")
@@ -68,9 +64,9 @@ def rotate_vault_log(vault: Vault) -> Path | None:
         if len(content.encode("utf-8")) < max_bytes and ledger_year == current_year:
             return None
 
-        target_rotated = vault.log_dir / f"{ledger_year}.md"
+        target_rotated = vault.contained_path(vault.log_dir / f"{ledger_year}.md")
         target_rotated.parent.mkdir(parents=True, exist_ok=True)
-        pending = vault.log_dir / f".rotating-{uuid.uuid4().hex}.md"
+        pending = vault.contained_path(vault.log_dir / f".rotating-{uuid.uuid4().hex}.md")
         os.replace(log_file, pending)
 
         content = pending.read_text("utf-8")
@@ -86,7 +82,7 @@ def rotate_vault_log(vault: Vault) -> Path | None:
         # and go without the heading (year detection falls back to the first
         # entry's timestamp) rather than overwrite them.
         try:
-            fd = os.open(log_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            fd = os.open(log_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
         except FileExistsError:
             pass
         else:
@@ -254,11 +250,11 @@ def sync_vault_index(vault: Vault, cache: VaultCache) -> bool:
 
     Returns True if file was rewritten, False if unchanged.
     """
-    index_path = vault.index_path
+    index_path = vault.contained_path(vault.index_path)
 
     # Generated under the lock: built outside it, a slower writer could replace
     # a newer report with the older snapshot it read first.
-    with advisory_lock(vault.lock_path):
+    with advisory_lock(vault.contained_path(vault.lock_path)):
         new_content = generate_index_markdown(vault, cache=cache)
         if index_path.exists():
             existing = index_path.read_text("utf-8")

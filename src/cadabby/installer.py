@@ -31,7 +31,7 @@ from cadabby.constants import (
     LEDGER_HEADER,
 )
 from cadabby.errors import EXIT_ENVIRONMENT, EXIT_OK, INVALID_ARGUMENT, CadabbyError
-from cadabby.fsutil import atomic_replace_checked, atomic_write, compute_bytes_sha256
+from cadabby.fsutil import atomic_replace_checked, atomic_write, compute_bytes_sha256, contained
 from cadabby.vault import obsidian_template_dir
 
 
@@ -106,12 +106,34 @@ ENGINE_OWNED_SHIMS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _sync_tree(src_root: Path, dest_root: Path, dry_run: bool = False, skip: frozenset[str] = frozenset()) -> list[str]:
+def _write_within(root: Path, dst: Path, data: str | bytes) -> None:
+    """atomic_write to `dst`, refusing a destination a symlink sends outside `root` (§8).
+
+    A vault is a folder anyone can hand you, and `install` is the documented
+    re-run verb: `.agents/skills/librarian/SKILL.md -> ~/.ssh/authorized_keys`
+    made it overwrite the user's keys with skill text. A symlink that stays
+    inside `root` (`CLAUDE.md -> AGENTS.md`) is still written through.
+    """
+    target = contained(root, dst)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(target, data)
+
+
+def _sync_tree(
+    src_root: Path,
+    dest_root: Path,
+    dry_run: bool = False,
+    skip: frozenset[str] = frozenset(),
+    *,
+    within: Path | None = None,
+) -> list[str]:
     """Copy src_root onto dest_root, writing only files whose bytes differ.
 
     Returns the vault-relative paths actually changed, so an unchanged install
     can report itself as a no-op (§7.6 idempotency) rather than claiming work.
+    Every write must land inside `within` (default: dest_root itself).
     """
+    root = within if within is not None else dest_root
     changed: list[str] = []
     for src in sorted(src_root.rglob("*")):
         if not src.is_file():
@@ -125,15 +147,14 @@ def _sync_tree(src_root: Path, dest_root: Path, dry_run: bool = False, skip: fro
             continue
         changed.append(rel)
         if not dry_run:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write(dst, data)
+            _write_within(root, dst, data)
     return changed
 
 
 def _write_bound_plugin(repo_plugin: Path, dest: Path, mcp_cfg: dict[str, Any]) -> None:
     """Copy the bundled plugin tree to dest and write its vault-bound mcp_config.json."""
     _sync_tree(repo_plugin, dest, skip=frozenset({"mcp_config.json"}))
-    atomic_write(dest / "mcp_config.json", json.dumps(mcp_cfg, indent=2) + "\n")
+    _write_within(dest, dest / "mcp_config.json", json.dumps(mcp_cfg, indent=2) + "\n")
 
 
 def refresh_vault_shims(vault_path: Path | str, dry_run: bool = False) -> tuple[bool, str]:
@@ -150,7 +171,7 @@ def refresh_vault_shims(vault_path: Path | str, dry_run: bool = False) -> tuple[
     for subdir, rel_dest in ENGINE_OWNED_SHIMS:
         src_root = assets / subdir
         if src_root.is_dir():
-            changed += [f"{rel_dest}/{rel}" for rel in _sync_tree(src_root, vault / rel_dest, dry_run)]
+            changed += [f"{rel_dest}/{rel}" for rel in _sync_tree(src_root, vault / rel_dest, dry_run, within=vault)]
 
     if not changed:
         return True, f"Vault shims already up-to-date in {vault} (unchanged)."
@@ -204,12 +225,11 @@ def init_vault(
                 report.append(f"Existing file left untouched: {dst.name} (use --force to overwrite)")
                 return False
             report.append(f"Overwrote existing file: {dst.name}")
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write(dst, src.read_bytes())
+        _write_within(root, dst, src.read_bytes())
         return True
 
     def bind_mcp(dst: Path) -> None:
-        atomic_write(dst, json.dumps({"mcpServers": {"cadabby": make_mcp_server_entry(root)}}, indent=2) + "\n")
+        _write_within(root, dst, json.dumps({"mcpServers": {"cadabby": make_mcp_server_entry(root)}}, indent=2) + "\n")
 
     # Refuse before writing anything, so a refused init leaves no half-vault.
     declared = obsidian_template_dir(root)
@@ -231,7 +251,7 @@ def init_vault(
     else:
         cfg_data = json.loads((vault_tpl / FILE_CONFIG).read_text("utf-8"))
         cfg_data["vault_name"] = name
-        atomic_write(cfg_dst, _dump_json_like(cfg_data))
+        _write_within(root, cfg_dst, _dump_json_like(cfg_data))
     for filename in _USER_OWNED_FILES:
         write_once(vault_tpl / filename, root / filename)
 
@@ -244,12 +264,12 @@ def init_vault(
 
     # Engine-owned: identical to what `install` refreshes.
     for subdir, rel_dest in ENGINE_OWNED_SHIMS:
-        _sync_tree(assets / subdir, root / rel_dest)
-    _sync_tree(get_repo_plugin_dir(), plugin_dst, skip=frozenset({"mcp_config.json"}))
+        _sync_tree(assets / subdir, root / rel_dest, within=root)
+    _sync_tree(get_repo_plugin_dir(), plugin_dst, skip=frozenset({"mcp_config.json"}), within=root)
 
     # Generated: seeded empty, maintained by the engine from here on.
     if not (root / FILE_LOG).exists():
-        atomic_write(root / FILE_LOG, LEDGER_HEADER)
+        _write_within(root, root / FILE_LOG, LEDGER_HEADER)
 
     # Obsidian. --obsidian-templates implies --obsidian: starter templates are
     # useless to a vault Obsidian cannot open.
@@ -493,7 +513,7 @@ def install_antigravity(
 
             if entry_stale:
                 cur_cfg.setdefault("mcpServers", {})["cadabby"] = desired_entry
-                atomic_write(mcp_file, _dump_json_like(cur_cfg, mcp_file.read_text("utf-8")))
+                _write_within(dest, mcp_file, _dump_json_like(cur_cfg, mcp_file.read_text("utf-8")))
             return True, f"Configured Antigravity plugin at {dest} (vault: {resolved_vault})"
         else:
             if not force:
@@ -578,6 +598,16 @@ def _read_claude_config(dest: Path) -> tuple[dict[str, Any] | None, str, str | N
     return cfg, raw, None, compute_bytes_sha256(data)
 
 
+def _claude_dest(dest_path: Path | None, vault_path: Path | str | None, is_global: bool) -> Path:
+    """Where the Claude config lives. The vault's own `.mcp.json` must stay inside the vault (§8)."""
+    if dest_path is not None:
+        return dest_path.resolve()  # chosen explicitly by the user
+    default = default_claude_path(vault_path, is_global)
+    if vault_path is not None and not is_global:
+        return contained(Path(vault_path), default)
+    return default.resolve()
+
+
 def install_claude(
     dest_path: Path | None = None,
     vault_path: Path | str | None = None,
@@ -586,7 +616,7 @@ def install_claude(
     dry_run: bool = False,
 ) -> tuple[bool, str]:
     """Non-destructively register Cadabby MCP server in Claude configuration."""
-    dest = (dest_path or default_claude_path(vault_path, is_global)).resolve()
+    dest = _claude_dest(dest_path, vault_path, is_global)
     if (problem := _wrong_kind(dest, "file")) is not None:
         return False, problem
     cfg_data, existing_content, err, token = _read_claude_config(dest)
@@ -628,7 +658,7 @@ def uninstall_claude(
     force: bool = False,
 ) -> tuple[bool, str]:
     """Uninstall Cadabby MCP entry from Claude configuration, preserving other keys."""
-    dest = (dest_path or default_claude_path(vault_path, is_global)).resolve()
+    dest = _claude_dest(dest_path, vault_path, is_global)
     if (problem := _wrong_kind(dest, "file")) is not None:
         return False, problem
     if not dest.exists():

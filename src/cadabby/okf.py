@@ -187,3 +187,19 @@ def latest_stale_actor(verified_list: list[Any] | None, current_body_hash: str |
             if of_hash != current_body_hash:
                 latest = actor
     return latest
+
+
+def ledger_line(message: str, actor: str | None = None, *, at_iso: str | None = None) -> str:
+    """One ledger entry, guaranteed to be exactly one line (§8).
+
+    A note name may contain a newline, and every entry names a note: written
+    raw, it forged a second, fully formed entry. The actor is attribution, so
+    it must match the §3.4 grammar; both ledgers apply this one rule.
+    """
+    if actor is not None and not is_valid_actor(actor):
+        raise ValueError(f"Invalid actor format {actor!r} for a ledger entry")
+    flat = " ".join(message.splitlines())
+    prefix = f"[{at_iso or utc_now_iso()}]"
+    if actor:
+        prefix += f" {actor}:"
+    return f"- {prefix} {flat}"

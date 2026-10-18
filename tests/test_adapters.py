@@ -127,7 +127,8 @@ class TestDiskNoteStorage(unittest.TestCase):
         )
         with self.assertRaises(ValueError) as ctx:
             self.storage.save_note(escaping_note)
-        self.assertIn("Cannot save note outside vault root", str(ctx.exception))
+        self.assertIn("Cannot save note at '../outside.md'", str(ctx.exception))
+        self.assertFalse((self.vault.root.parent / "outside.md").exists())
 
     def test_save_note_expected_hash_conflict(self):
         note = Note(
@@ -411,6 +412,141 @@ class TestFileLedger(unittest.TestCase):
         assert from_disk is not None and from_mem is not None
         self.assertEqual(from_mem.frontmatter, from_disk.frontmatter)
         self.assertEqual(from_mem.tags, ["storage", "b_tree"])
+
+
+class TestWriteContainment(unittest.TestCase):
+    """C72: no engine write lands outside the vault through a symlink (§8).
+
+    A vault is a folder anyone can hand you (a clone, a template, a share).
+    Reading through your own symlinked folders stays a feature; writing
+    through a link that leaves the vault is refused, and the target untouched.
+    """
+
+    NOTE = "---\ntype: concept\ntitle: T\ndescription: d\nstatus: active\n---\n# T\n"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name).resolve()
+        self.outside = base / "outside"
+        self.outside.mkdir()
+        self.victim = self.outside / "victim.txt"
+        self.victim.write_text("precious\n", "utf-8")
+        self.root = base / "vault"
+        self.vault = create_test_vault(self.root, subdirs=("wiki", "customers", "raw"))
+        (self.root / "wiki" / "sqlite.md").write_text(self.NOTE, "utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def assertVictimUntouched(self):
+        self.assertEqual(self.victim.read_text("utf-8"), "precious\n")
+
+    def test_ledger_symlinked_outside_is_refused(self):
+        from cadabby.errors import VaultEscapeError
+        from cadabby.indexer import append_vault_log
+        from cadabby.ops import update_note
+
+        (self.root / "log.md").symlink_to(self.victim)
+        with self.assertRaises(VaultEscapeError):
+            append_vault_log(self.vault, "Updated notes/$(touch PWNED).md", actor="process:cli")
+        with self.assertRaises(PermissionError):
+            update_note(self.vault, "wiki/sqlite", frontmatter_patch={"status": "evergreen"}, actor="agent:t")
+        self.assertVictimUntouched()
+
+    def test_index_and_cache_symlinked_outside_are_refused(self):
+        from cadabby.errors import VaultEscapeError
+        from cadabby.indexer import sync_vault_index
+
+        (self.root / "index.md").symlink_to(self.victim)
+        with VaultCache(self.vault) as cache, self.assertRaises(VaultEscapeError):
+            sync_vault_index(self.vault, cache)
+        self.assertVictimUntouched()
+
+        (self.root / "index.md").unlink()
+        (self.root / ".cadabby").symlink_to(self.outside, target_is_directory=True)
+        with self.assertRaises(VaultEscapeError):
+            VaultCache(self.vault)
+        self.assertEqual(sorted(p.name for p in self.outside.iterdir()), ["victim.txt"])
+
+    def test_note_write_through_a_symlinked_domain_is_refused(self):
+        """T2: the containment check is the only thing stopping this write."""
+        from cadabby.errors import VaultEscapeError
+
+        escape_dir = self.outside / "evil"
+        escape_dir.mkdir()
+        (self.root / "customers" / "evil").symlink_to(escape_dir, target_is_directory=True)
+        storage = DiskNoteStorage(self.vault)
+        note = Note.from_raw("customers/evil/escape", "customers/evil/escape.md", self.NOTE)
+        with self.assertRaises(VaultEscapeError) as ctx:
+            storage.save_note(note)
+        self.assertEqual(ctx.exception.code, "PERMISSION_DENIED")
+        self.assertEqual(list(escape_dir.iterdir()), [])
+
+    def test_dangling_link_into_raw_is_refused(self):
+        (self.root / "wiki" / "meeting.md").symlink_to(Path("..") / "raw" / "planted.md")
+        storage = DiskNoteStorage(self.vault)
+        note = Note.from_raw("wiki/meeting", "wiki/meeting.md", self.NOTE)
+        with self.assertRaisesRegex(ValueError, "symlink to 'raw/planted.md'"):
+            storage.save_note(note)
+        self.assertFalse((self.root / "raw" / "planted.md").exists())
+
+    def test_symlinks_inside_the_vault_still_work(self):
+        real = self.root / "customers" / "acme"
+        real.mkdir()
+        (self.root / "customers" / "alias").symlink_to(real, target_is_directory=True)
+        storage = DiskNoteStorage(self.vault)
+        storage.save_note(Note.from_raw("customers/alias/n", "customers/alias/n.md", self.NOTE))
+        self.assertTrue((real / "n.md").is_file())
+
+    def test_a_folder_symlinked_in_from_outside_is_read_under_its_vault_name(self):
+        """D2: reads still follow your own symlinks, and the CID is the in-vault name."""
+        notes = self.outside / "notes"
+        notes.mkdir()
+        (notes / "a.md").write_text(self.NOTE, "utf-8")
+        (self.root / "docs").symlink_to(notes, target_is_directory=True)
+        with VaultCache(self.vault) as cache:
+            cache.scan()
+            cids = {r["cid"] for r in cache.get_connection().execute("SELECT cid FROM notes;")}
+        self.assertIn("docs/a", cids)
+        self.assertFalse(any(c.startswith(("tmp/", "home/", "private/")) for c in cids), cids)
+
+    def test_install_refuses_a_shim_symlinked_outside(self):
+        from cadabby.errors import VaultEscapeError
+        from cadabby.installer import init_vault, install_claude, refresh_vault_shims
+
+        init_vault(self.root, vault_name="v")
+        shim = self.root / ".agents" / "skills" / "librarian" / "SKILL.md"
+        shim.unlink()
+        shim.symlink_to(self.victim)
+        with self.assertRaises(VaultEscapeError):
+            refresh_vault_shims(self.root)
+        self.assertVictimUntouched()
+
+        mcp = self.root / ".mcp.json"
+        mcp.unlink()
+        mcp.symlink_to(self.victim)
+        with self.assertRaises(VaultEscapeError):
+            install_claude(vault_path=self.root, force=True)
+        self.assertVictimUntouched()
+
+
+class TestLedgerLines(unittest.TestCase):
+    """C72: a ledger entry is one line with a valid actor, in both ledgers."""
+
+    def test_newlines_in_a_message_cannot_forge_entries(self):
+        from cadabby.okf import ledger_line
+
+        line = ledger_line("Updated wiki/a\n- [2099-01-01T00:00:00Z] human:eve: Verified x.md", "agent:t")
+        self.assertEqual(len(line.splitlines()), 1)
+
+    def test_both_ledgers_refuse_an_invalid_actor(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        vault = create_test_vault(Path(tmp.name) / "v", subdirs=("wiki",))
+        for ledger in (InMemoryLedger(), FileLedger(vault)):
+            with self.subTest(ledger=type(ledger).__name__), self.assertRaises(ValueError):
+                ledger.append("Updated x", actor="agent:a\nhuman:eve")
+        self.assertFalse(vault.log_path.exists())
 
 
 if __name__ == "__main__":

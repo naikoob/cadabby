@@ -121,6 +121,16 @@ def _match_listed_path(cids: Sequence[str], raw: str, shown: str) -> str | None:
     return folded[0] if folded else None
 
 
+def _require_actor(actor: str) -> None:
+    """Refuse an actor outside the §3.4 grammar before anything is written.
+
+    Every write ends in a ledger entry attributed to `actor`; checking only at
+    the ledger would leave the note written and the call failed.
+    """
+    if not is_valid_actor(actor):
+        raise ValueError(f"Invalid actor format {actor!r}. Must match {ACTOR_PATTERN}")
+
+
 def resolve_note_cid(
     storage: NoteStoragePort,
     cid_or_path: str,
@@ -314,9 +324,8 @@ class ScaffoldNoteUseCase:
                 raise ValueError(f"Note {name} must not be empty")
         if path is not None and not isinstance(path, str):
             raise ValueError("Note path must be a string")
-        if not is_valid_actor(actor):
-            # generated.by is attribution like verified[].by, so the same grammar binds (§3.4).
-            raise ValueError(f"Invalid actor format '{actor}'. Must match {ACTOR_PATTERN}")
+        # generated.by is attribution like verified[].by, so the same grammar binds (§3.4).
+        _require_actor(actor)
 
         if template:
             if body.strip():
@@ -424,6 +433,7 @@ class UpdateNoteUseCase:
         actor: str = "agent:unknown",
         edits: list[dict[str, Any]] | None = None,
     ) -> Note:
+        _require_actor(actor)
         validated = _validate_edits(list(edits) if edits is not None else [])
         _validate_frontmatter_patch(frontmatter_patch)
 
@@ -790,6 +800,7 @@ class MoveNoteUseCase:
 
     def apply(self, plan: MovePlan, actor: str) -> None:
         """Write the plan destination-first, so a crash leaves a duplicate, never a lost note."""
+        _require_actor(actor)
         if plan.blocked:
             raise ValueError("Move refused: " + "; ".join(plan.blocked))
         steps = _write_steps(plan.moved)  # computed before any write; raises on a cycle

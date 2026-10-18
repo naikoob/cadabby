@@ -1202,6 +1202,31 @@ class TestCliPolish(unittest.TestCase):
         self.assertIn("INVALID_ARGUMENT", res.stderr)
 
 
+class TestCliActorFlag(unittest.TestCase):
+    """C72: --actor is attribution, so it obeys §3.4 and never claims a human."""
+
+    def test_parser_refuses_human_and_malformed_actors(self):
+        import contextlib
+        import io
+
+        parser = build_parser()
+        for bad in ("human:alice", "agent:a\nhuman:eve", "bob"):
+            for argv in (["scaffold", "T", "--type", "concept", "--description", "d", "--actor", bad],
+                         ["update", "wiki/x", "--actor", bad]):
+                with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as ctx:
+                        parser.parse_args(argv)
+                    self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(parser.parse_args(["update", "wiki/x", "--actor", "agent:me"]).actor, "agent:me")
+
+    def test_programmatic_callers_get_invalid_argument(self):
+        from cadabby.cli import _default_cli_actor
+
+        with self.assertRaises(ValueError):
+            _default_cli_actor(DummyArgs(actor="human:alice"))
+        self.assertEqual(_default_cli_actor(DummyArgs(actor=None)), "process:cli")
+
+
 if __name__ == "__main__":
     unittest.main()
 

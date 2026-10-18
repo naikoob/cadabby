@@ -42,6 +42,7 @@ from cadabby.domain import DomainDefinition
 # `from cadabby.vault import VaultConfigError` still resolves.
 from cadabby.errors import VaultConfigError  # noqa: F401
 from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter, split_frontmatter
+from cadabby.fsutil import contained
 
 
 def is_vault_root(path: Path | str) -> bool:
@@ -469,13 +470,29 @@ class Vault:
         return self.root / FILE_LOG
 
     def rel_path(self, path: Path | str) -> str:
-        """Convert an absolute or relative path to a vault-relative path with POSIX separators."""
+        """Convert an absolute or relative path to a vault-relative path with POSIX separators.
+
+        A path inside the vault that a symlink sends elsewhere (`docs ->
+        ~/Documents/notes`, followed on read by design) keeps its in-vault
+        name: falling back to the absolute path minted CIDs like
+        `home/me/Documents/notes/a`.
+        """
         path_obj = Path(path)
-        p = path_obj.resolve() if path_obj.is_absolute() else (self.root / path_obj).resolve()
+        lexical = path_obj if path_obj.is_absolute() else self.root / path_obj
+        p = lexical.resolve()
         try:
             return p.relative_to(self.root).as_posix()
         except ValueError:
+            pass
+        try:
+            return Path(os.path.normpath(lexical)).relative_to(self.root).as_posix()
+        except ValueError:
             return path_obj.as_posix()
+
+    def contained_path(self, path: Path | str) -> Path:
+        """The real path a write to `path` would land on; VaultEscapeError if outside the vault (§8)."""
+        p = Path(path)
+        return contained(self.root, p if p.is_absolute() else self.root / p)
 
     def abs_path(self, rel_path: str | Path) -> Path:
         """Resolve a vault-relative path to an absolute Path."""
@@ -604,11 +621,15 @@ class Vault:
         """
         if not self.raw_dir.exists():
             return
+        # raw/ itself may be a symlink to a shared corpus; a file inside it that
+        # links somewhere else entirely is not evidence this vault holds (§2.4).
+        raw_real = self.raw_dir.resolve()
         for root, dirs, files in os.walk(self.raw_dir, topdown=True):
             dirs[:] = sorted(d for d in dirs if not is_excluded_dir(d))
             for f in sorted(files):
-                if not f.startswith("."):
-                    yield Path(root) / f
+                path = Path(root) / f
+                if not f.startswith(".") and path.resolve().is_relative_to(raw_real):
+                    yield path
 
     def _load_domain_from_agents_md(
         self, name: str, dir_path: Path, agents_md: Path

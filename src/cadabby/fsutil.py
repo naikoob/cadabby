@@ -17,7 +17,23 @@ from pathlib import Path
 # and every existing `from cadabby.fsutil import VaultConflictError` still
 # resolves.
 from cadabby.constants import BODY_HASH_PREFIX
-from cadabby.errors import LockTimeoutError, VaultConflictError
+from cadabby.errors import LockTimeoutError, VaultConflictError, VaultEscapeError
+
+
+def contained(root: Path | str, path: Path | str) -> Path:
+    """The real path of `path`, refusing one that resolves outside `root` (§8).
+
+    realpath follows every symlink, dangling ones included, so `log.md ->
+    ~/.bashrc` and `wiki/x.md -> ../raw/p.md` are judged by where a write
+    would land rather than by the name it was asked for. Symlinks that stay
+    inside `root` are fine. Only writers call this: reading through your own
+    symlinked folders is a feature, not a leak.
+    """
+    root_real = Path(os.path.realpath(root))
+    real = Path(os.path.realpath(path))
+    if real != root_real and not real.is_relative_to(root_real):
+        raise VaultEscapeError(f"Refusing to write '{path}': it resolves outside {root_real} (through a symlink?)")
+    return real
 
 
 def compute_file_sha256(path: Path | str) -> str:
@@ -72,6 +88,16 @@ def fsync_dir(directory: Path) -> None:
         os.close(fd)
 
 
+# Read once: os.umask can only be read by setting it. New files get the mode an
+# ordinary open(..., 0o644) would have given them.
+_UMASK = os.umask(0o022)
+os.umask(_UMASK)
+_NEW_FILE_MODE = 0o644 & ~_UMASK
+
+# Refuse to follow a symlink in the last path component where the OS can.
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
 def atomic_write(target_path: Path | str, content: str | bytes, encoding: str = "utf-8") -> None:
     """Atomically write content to target_path using same-directory temp file and fsync.
 
@@ -84,7 +110,9 @@ def atomic_write(target_path: Path | str, content: str | bytes, encoding: str = 
     tmp_path = target.parent / _temp_name(target.name)
 
     try:
-        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        # 0600 while the bytes go in: a private (0600) target such as
+        # ~/.claude.json must not sit world-readable in a temp file meanwhile.
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
             total_written = 0
             while total_written < len(data):
@@ -99,8 +127,11 @@ def atomic_write(target_path: Path | str, content: str | bytes, encoding: str = 
         # A replace swaps in a new inode, so the target's permission bits would
         # otherwise reset to the temp file's: a 0600 private note or a 0664
         # shared one silently becomes 0644 on every edit.
-        with contextlib.suppress(FileNotFoundError):
-            os.chmod(tmp_path, target.stat().st_mode & 0o7777)
+        try:
+            mode = target.stat().st_mode & 0o7777
+        except FileNotFoundError:
+            mode = _NEW_FILE_MODE
+        os.chmod(tmp_path, mode)
 
         os.replace(tmp_path, target)
     except BaseException:
@@ -156,8 +187,10 @@ def append_ledger(ledger_path: Path | str, entry: str, encoding: str = "utf-8") 
     """Append a single line to an append-only ledger using atomic O_APPEND.
 
     Guarantees atomicity for single-line appends below pipe-buffer size without file locking.
+    Callers pass a path already checked with `contained()`; it is not resolved
+    again, and O_NOFOLLOW refuses a symlink swapped in since that check.
     """
-    target = Path(ledger_path).resolve()
+    target = Path(ledger_path)
     target.parent.mkdir(parents=True, exist_ok=True)
 
     if not entry.endswith("\n"):
@@ -165,7 +198,7 @@ def append_ledger(ledger_path: Path | str, entry: str, encoding: str = "utf-8") 
 
     data = entry.encode(encoding)
 
-    fd = os.open(target, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    fd = os.open(target, os.O_WRONLY | os.O_APPEND | os.O_CREAT | _O_NOFOLLOW, 0o644)
     try:
         total_written = 0
         while total_written < len(data):
@@ -221,6 +254,10 @@ def _remove_if_unchanged(target: Path, expected: bytes) -> bool:
             pass
 
 
+# How far ahead of our clock a lock's timestamp may be before it counts as forged.
+_LOCK_CLOCK_SKEW = 5.0
+
+
 @contextlib.contextmanager
 def advisory_lock(
     lock_path: Path | str,
@@ -264,7 +301,14 @@ def advisory_lock(
                     pid_str, ts_str = raw_info.split(":", 1)
                     lock_pid = int(pid_str)
                     lock_ts = float(ts_str)
-                    is_stale = (now - lock_ts > stale_age) or not _is_process_alive(lock_pid)
+                    # A timestamp in the future was never written by a live
+                    # holder's clock: a lock planted as `1:99999999999` would
+                    # otherwise never age out (pid 1 always looks alive).
+                    is_stale = (
+                        now - lock_ts > stale_age
+                        or lock_ts - now > _LOCK_CLOCK_SKEW
+                        or not _is_process_alive(lock_pid)
+                    )
                 except ValueError:
                     is_stale = now - target.stat().st_mtime > stale_age
 

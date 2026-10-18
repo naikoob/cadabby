@@ -57,11 +57,15 @@ class DiskNoteStorage(NoteStoragePort):
             raise FrontmatterParseError(f"{exc.message} (in {rel_path})", exc.line_number) from None
 
     def save_note(self, note: Note, expected_hash: str | None = None) -> None:
-        target = self.vault.abs_path(note.rel_path)
-        if not target.is_relative_to(self.vault.root):
-            raise ValueError(f"Cannot save note outside vault root: {note.rel_path}")
         if why := self.vault.note_path_violation(note.rel_path):
             raise ValueError(f"Cannot save note at '{note.rel_path}': {why}")
+        # Judged by where the bytes would land (§8): a symlink leaving the vault
+        # is refused, and one inside it (even dangling) must point at a place a
+        # note may live -- `wiki/x.md -> ../raw/p.md` would write into raw/.
+        target = self.vault.contained_path(note.rel_path)
+        landing = self.vault.rel_path(target)
+        if landing != note.rel_path and (why := self.vault.note_path_violation(landing, for_write=True)):
+            raise ValueError(f"Cannot save note at '{note.rel_path}': it is a symlink to '{landing}', and {why}")
         serialized = note.serialize()
         atomic_replace_checked(target, serialized, expected_hash=expected_hash)
 
@@ -102,10 +106,8 @@ class DiskNoteStorage(NoteStoragePort):
 
     def list_source_paths(self) -> Sequence[str]:
         # The scan's own walk (§2.4), so this lists exactly the cache's raw rows;
-        # a symlink resolving outside raw/ is not evidence and is left out.
-        return sorted(
-            rel for rel in {self.vault.rel_path(p) for p in self.vault.iter_raw_files()} if rel.startswith(f"{DIR_RAW}/")
-        )
+        # iter_raw_files already leaves out a symlink resolving outside raw/.
+        return sorted({self.vault.rel_path(p) for p in self.vault.iter_raw_files()})
 
     def read_source(self, rel_path: str) -> str | None:
         parts = rel_path.replace("\\", "/").split("/")
