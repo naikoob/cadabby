@@ -187,6 +187,17 @@ def split_frontmatter(content: str) -> tuple[str | None, str]:
     if closing_index == -1:
         raise FrontmatterParseError("Unterminated frontmatter block: missing closing '---'", 1)
 
+    # A lone carriage return is a line break to this parser but not to Git,
+    # which counts `\n` only: a `\r`-joined `verified:` entry hid on one Git
+    # line and borrowed the blame of an older, genuine endorsement (§3.5).
+    # `\r\n` -> `\n` maps one character to one, so offsets still line up.
+    crlf_folded = content.replace("\r\n", "\n")
+    head_len = sum(len(line) + 1 for line in lines[: closing_index + 1])
+    lone_cr = crlf_folded.find("\r", 0, head_len)
+    if lone_cr != -1:
+        line_no = crlf_folded.count("\n", 0, lone_cr) + crlf_folded.count("\r", 0, lone_cr) + 1
+        raise FrontmatterParseError("A carriage return without a line feed is not a line break in frontmatter", line_no)
+
     raw_fm = "\n".join(lines[1:closing_index])
     body = "\n".join(lines[closing_index + 1 :])
     return raw_fm, body

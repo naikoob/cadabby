@@ -506,7 +506,8 @@ def cmd_audit(args: argparse.Namespace) -> int:
 
     print(f"\nAudit Findings: {len(findings)} issue(s) detected\n")
     for f in findings:
-        print(f"[{f.code}] {f.rel_path}:{f.line} ({f.actor} in {f.commit[:8]}) - {f.message}")
+        where = f" ({f.actor} in {f.commit[:8]})" if f.actor and f.commit else (f" ({f.actor})" if f.actor else "")
+        print(f"[{f.code}] {f.rel_path}:{f.line}{where} - {f.message}")
     print()
     return EXIT_FINDINGS
 

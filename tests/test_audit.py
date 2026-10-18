@@ -81,6 +81,10 @@ class TestAudit(unittest.TestCase):
             "author Mallory\n"
             "author-mail <mallory@evil.com>\n"
             "\t  - by: human:alice\n"
+            "commit123 2 2\n"
+            "\t    at: '2026-10-01T00:00:00Z'\n"
+            "commit123 3 3\n"
+            "\t    of: sha256:abc\n"
         )
 
         with (
@@ -106,6 +110,10 @@ class TestAudit(unittest.TestCase):
             "author Alice\n"
             "author-mail <alice@example.com>\n"
             "\t  - by: human:alice\n"
+            "commit123 2 2\n"
+            "\t    at: '2026-10-01T00:00:00Z'\n"
+            "commit123 3 3\n"
+            "\t    of: sha256:abc\n"
         )
 
         with (
@@ -128,6 +136,10 @@ class TestAudit(unittest.TestCase):
             "author Bob\n"
             "author-mail <bob@example.com>\n"
             "\t  - by: human:bob\n"
+            "commit123 2 2\n"
+            "\t    at: '2026-10-01T00:00:00Z'\n"
+            "commit123 3 3\n"
+            "\t    of: sha256:abc\n"
         )
 
         with (
@@ -220,6 +232,10 @@ class TestAudit(unittest.TestCase):
             "author Alice\n"
             "author-mail <alice@example.com>\n"
             "\t  - by: human:alice\n"
+            "commit456 2 2\n"
+            "\t    at: '2026-10-01T00:00:00Z'\n"
+            "commit456 3 3\n"
+            "\t    of: sha256:abc\n"
         )
 
         with (
@@ -254,6 +270,10 @@ class TestAudit(unittest.TestCase):
             "author Alice\n"
             "author-mail <alice@example.com>\n"
             "\t  - by: human:alice\n"
+            "commit456 2 2\n"
+            "\t    at: '2026-10-01T00:00:00Z'\n"
+            "commit456 3 3\n"
+            "\t    of: sha256:abc\n"
         )
 
         with (
@@ -358,6 +378,10 @@ class TestAudit(unittest.TestCase):
             "author Alice\n"
             "author-mail <alice@example.com>\n"
             "\t  - by: human:alice\n"
+            "commit456 2 2\n"
+            "\t    at: '2026-10-01T00:00:00Z'\n"
+            "commit456 3 3\n"
+            "\t    of: sha256:abc\n"
         )
         commands_run: list[list[str]] = []
         with (
@@ -409,13 +433,100 @@ class TestAudit(unittest.TestCase):
         vault = Vault(root)
 
         def fake_run(cmd, **kwargs):
-            if cmd[1] == "rev-parse":
+            if "rev-parse" in cmd:
                 return subprocess.CompletedProcess(cmd, 0, stdout="true\n", stderr="")
             raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
 
         with patch("cadabby.audit.subprocess.run", side_effect=fake_run):
             with self.assertRaises(GitTimeoutError):
                 run_vault_audit(vault)
+
+    # --- C73: real-Git bypasses from code review 2 --------------------------
+
+    def _git_env(self, name: str, email: str) -> dict[str, str]:
+        return {
+            **os.environ,
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_AUTHOR_NAME": name,
+            "GIT_AUTHOR_EMAIL": email,
+            "GIT_COMMITTER_NAME": name,
+            "GIT_COMMITTER_EMAIL": email,
+        }
+
+    def _commit_as(self, name: str, email: str, message: str) -> None:
+        env = self._git_env(name, email)
+        subprocess.run(["git", "add", "-A"], cwd=self.vault_root, check=True, env=env)
+        subprocess.run(["git", "commit", "-q", "-m", message], cwd=self.vault_root, check=True, env=env)
+
+    def _alice_endorsed_repo(self) -> Path:
+        subprocess.run(["git", "init", "-q"], cwd=self.vault_root, check=True, env=self._git_env("a", "a@x"))
+        note = self._write_note(
+            "Endorsed",
+            frontmatter_extra="verified:\n  - by: human:alice\n    at: '2026-10-01T00:00:00Z'\n"
+            "    method: manual-review\n    of: 'sha256:" + "a" * 64 + "'",
+        )
+        self._commit_as("Alice", "alice@example.com", "alice reviews")
+        return note
+
+    @unittest.skipUnless(shutil.which("git"), "git not installed")
+    def test_rewriting_only_the_of_line_is_caught(self):
+        """S2a: the agent edits the body and re-points alice's `of:`; her `by:` line keeps her commit."""
+        note = self._alice_endorsed_repo()
+        text = note.read_text("utf-8").replace("a" * 64, "b" * 64).replace("# Note", "# Note\n\nAgent text.")
+        note.write_text(text, "utf-8")
+        self._commit_as("Agent", "agent@bot.invalid", "agent edits")
+        with patch.dict(os.environ, self._git_env("x", "x@x")):
+            findings, notice = run_vault_audit(Vault(self.vault_root))
+        self.assertIsNone(notice)
+        self.assertEqual([f.code for f in findings], ["PROVENANCE_MISMATCH"])
+        of_line = next(n for n, l in enumerate(text.split("\n"), start=1) if l.strip().startswith("of:"))
+        self.assertEqual(findings[0].line, of_line)
+        self.assertIn("agent@bot.invalid", findings[0].message)
+
+    @unittest.skipUnless(shutil.which("git"), "git not installed")
+    def test_an_untouched_endorsement_stays_clean(self):
+        self._alice_endorsed_repo()
+        with patch.dict(os.environ, self._git_env("x", "x@x")):
+            findings, _ = run_vault_audit(Vault(self.vault_root))
+        self.assertEqual(findings, [])
+
+    @unittest.skipUnless(shutil.which("git"), "git not installed")
+    def test_a_carriage_return_forgery_is_unparseable_and_reported(self):
+        """S2b: a `\\r`-joined entry on one Git line no longer borrows another line's blame."""
+        from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter
+
+        note = self._alice_endorsed_repo()
+        forged = self._write_note("Forged-CR")
+        self._commit_as("Agent", "agent@bot.invalid", "plain note")
+        text = forged.read_text("utf-8").replace(
+            'status: active\n',
+            "status: active\rverified:\r  - by: human:alice\r    at: '2026-10-01T00:00:00Z'\r"
+            "    of: 'sha256:" + "c" * 64 + "'\n",
+        )
+        forged.write_bytes(text.encode("utf-8"))
+        self._commit_as("Agent", "agent@bot.invalid", "forge")
+        with self.assertRaises(FrontmatterParseError):
+            parse_frontmatter(text)
+        with patch.dict(os.environ, self._git_env("x", "x@x")):
+            findings, _ = run_vault_audit(Vault(self.vault_root))
+        self.assertEqual([(f.code, f.rel_path) for f in findings], [("PROVENANCE_MISMATCH", "wiki/Forged-CR.md")])
+        self.assertIn("cannot be audited", findings[0].message)
+        self.assertTrue(note.exists())
+
+    @unittest.skipUnless(shutil.which("git"), "git not installed")
+    def test_repository_config_cannot_run_code_during_an_audit(self):
+        """S11: a shipped .git/config naming a core.fsmonitor program is not executed."""
+        self._alice_endorsed_repo()
+        sentinel = Path(self.tmp_dir.name) / "PWNED"
+        hook = Path(self.tmp_dir.name) / "fsmonitor.sh"
+        hook.write_text(f"#!/bin/sh\ntouch '{sentinel}'\n", "utf-8")
+        hook.chmod(0o755)
+        subprocess.run(["git", "config", "core.fsmonitor", str(hook)], cwd=self.vault_root, check=True,
+                       env=self._git_env("x", "x@x"))
+        with patch.dict(os.environ, self._git_env("x", "x@x")):
+            run_vault_audit(Vault(self.vault_root))
+        self.assertFalse(sentinel.exists())
 
 
 if __name__ == "__main__":

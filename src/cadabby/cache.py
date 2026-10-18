@@ -803,7 +803,10 @@ class VaultCache:
     ) -> None:
         """Index one note with its graph edges, or record why its frontmatter does not parse."""
         cid = path_to_cid(rel_path)
-        content = abs_path.read_text("utf-8", errors="replace")
+        # Bytes, not read_text(): text mode turns a lone `\r` into `\n`, so the
+        # cache would parse (and give a trust tier to) frontmatter the storage
+        # adapter and the parser refuse -- a `\r`-joined forged attestation (§3.2).
+        content = abs_path.read_bytes().decode("utf-8", errors="replace")
         try:
             fm, body = parse_frontmatter(content)
         except FrontmatterParseError as e:
@@ -868,7 +871,7 @@ class VaultCache:
                 mtime=st.st_mtime,
                 file_size=st.st_size,
                 file_hash=f_hash,
-                body=abs_path.read_text("utf-8", errors="replace") if is_text else "",
+                body=abs_path.read_bytes().decode("utf-8", errors="replace") if is_text else "",
                 title=abs_path.stem,
                 type_="source",
                 status="raw",

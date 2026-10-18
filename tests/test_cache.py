@@ -1072,6 +1072,27 @@ class TestSearchOperators(unittest.TestCase):
         self.assertEqual(dashed, filtered)
 
 
+class TestCarriageReturnForgery(unittest.TestCase):
+    """C73: the cache refuses the same `\\r`-joined frontmatter the parser refuses."""
+
+    def test_a_lone_cr_attestation_gets_no_trust_tier(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = copy_demo_vault(Path(tmp.name) / "demo-vault")
+        forged = (
+            "---\ntype: concept\ntitle: Forged\ndescription: d\nstatus: active\rverified:\r"
+            "  - by: human:alice\r    at: '2026-10-01T00:00:00Z'\r    of: 'sha256:" + "0" * 64 + "'\n---\n# F\n"
+        )
+        (root / "wiki" / "forged.md").write_bytes(forged.encode("utf-8"))
+        with VaultCache(Vault(root)) as cache:
+            cache.scan()
+            row = cache.get_connection().execute(
+                "SELECT parse_error, trust_tier FROM notes WHERE cid = 'wiki/forged';"
+            ).fetchone()
+        self.assertIsNotNone(row["parse_error"])
+        self.assertIsNone(row["trust_tier"])
+
+
 if __name__ == "__main__":
     unittest.main()
 
