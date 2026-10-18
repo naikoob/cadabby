@@ -5,6 +5,7 @@ Conforms strictly to Cadabby Technical Specification §5.1, §5.2.
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 import sys
@@ -54,7 +55,7 @@ MAX_LIMIT = 1000
 MAX_TARGETS = 50
 MAX_BUDGET_TOKENS = 1_000_000
 
-TOOLS = [
+_TOOL_SPECS: list[dict[str, Any]] = [
     {
         "name": "vault_search",
         "description": (
@@ -297,17 +298,26 @@ TOOLS = [
     },
 ]
 
-# Unknown keys are refused, not ignored (§5.1): `qurey` or `patch` silently
-# dropped turns a typo into a call that "succeeds" doing something else.
-for _tool in TOOLS:
-    _tool["inputSchema"]["additionalProperties"] = False  # type: ignore[index]
 
-_REQUIRED_ARGS: dict[str, tuple[str, ...]] = {
-    t["name"]: tuple(t["inputSchema"].get("required", ())) for t in TOOLS  # type: ignore[index]
-}
-_PROPERTIES: dict[str, dict[str, Any]] = {
-    t["name"]: t["inputSchema"].get("properties", {}) for t in TOOLS  # type: ignore[index,union-attr]
-}
+
+def _closed(spec: dict[str, Any]) -> dict[str, Any]:
+    """A tool declaration whose schema refuses unknown keys (§5.1).
+
+    `qurey` or `patch` silently dropped turns a typo into a call that
+    "succeeds" doing something else. Built as a copy rather than by mutating
+    the literal at import time.
+    """
+    closed = copy.deepcopy(spec)
+    closed["inputSchema"]["additionalProperties"] = False
+    return closed
+
+
+# The one tool registry: what tools/list serves, and what every argument is
+# validated against. A tuple, so no caller can append a ninth tool to it.
+TOOLS: tuple[dict[str, Any], ...] = tuple(_closed(spec) for spec in _TOOL_SPECS)
+
+_REQUIRED_ARGS: dict[str, tuple[str, ...]] = {t["name"]: tuple(t["inputSchema"].get("required", ())) for t in TOOLS}
+_PROPERTIES: dict[str, dict[str, Any]] = {t["name"]: t["inputSchema"].get("properties", {}) for t in TOOLS}
 # Tools removed from the surface, mapped to what replaces them. Only ever read
 # to word an UNKNOWN_TOOL error: an agent still following a 0.3.x vault's
 # AGENTS.md can correct itself, and the surface stays at eight tools (§5.1).
@@ -436,7 +446,8 @@ class McpServer:
         }
 
     def handle_tools_list(self) -> dict[str, Any]:
-        return {"tools": TOOLS}
+        # A copy: the registry is shared by every request and must not be edited through a reply.
+        return {"tools": copy.deepcopy(list(TOOLS))}
 
     def _tool_search(self, args: dict[str, Any]) -> dict[str, Any]:
         self.cache.scan()

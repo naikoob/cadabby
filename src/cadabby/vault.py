@@ -316,6 +316,28 @@ def is_excluded_dir(name: str) -> bool:
     return name.startswith(".") or name in DEFAULT_IGNORED_DIRS
 
 
+def source_path_violation(rel_path: str) -> str | None:
+    """Why `rel_path` cannot name raw evidence, or None if it can (§2.4).
+
+    The one statement of "which raw/ paths are sources", shared by both storage
+    adapters (the scan's walk prunes the same names): the in-memory twin once
+    accepted `raw/.git/x` and `raw/node_modules/x`, states the disk adapter can
+    never produce, and the two disagreed on backslashes.
+    """
+    if "\\" in rel_path:
+        return "a source path uses '/' separators"
+    parts = rel_path.split("/")
+    if len(parts) < 2 or parts[0] != DIR_RAW:
+        return f"a source lives under {DIR_RAW}/"
+    if any(p in ("", ".", "..") for p in parts):
+        return "empty, '.' or '..' segments are not allowed"
+    if any(is_excluded_dir(p) for p in parts[1:-1]):
+        return "it is inside a hidden or ignored folder"
+    if parts[-1].startswith("."):
+        return "a hidden file is not evidence"
+    return None
+
+
 def note_path_violation(rel_path: str, template_rel: str | None = None, *, for_write: bool = False) -> str | None:
     """Why `rel_path` cannot hold a note, or None if it can (§2.1, §2.2, §7.5).
 

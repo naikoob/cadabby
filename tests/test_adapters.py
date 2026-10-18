@@ -555,5 +555,80 @@ class TestLedgerLines(unittest.TestCase):
         self.assertFalse(vault.log_path.exists())
 
 
+class StorageContract:
+    """C77: one behavioral contract, run against both NoteStoragePort adapters (§9.1).
+
+    The in-memory twin is only worth its hermetic speed if it behaves like the
+    disk adapter; these are the same assertions, not two parallel suites.
+    """
+
+    NOTE = "---\ntype: concept\ntitle: T\ndescription: d\nstatus: active\n---\n# T\n"
+
+    def make_storage(self) -> NoteStoragePort:
+        raise NotImplementedError
+
+    def place_source(self, storage, rel_path: str, text: str) -> None:
+        raise NotImplementedError
+
+    def setUp(self):
+        self.storage = self.make_storage()
+
+    def test_round_trip_and_listing(self):
+        self.storage.save_note(Note.from_raw("wiki/a", "wiki/a.md", self.NOTE))
+        note = self.storage.get_note("wiki/a")
+        self.assertEqual((note.cid, note.title), ("wiki/a", "T"))
+        self.assertIn("wiki/a", self.storage.list_note_cids())
+        self.assertTrue(self.storage.note_exists("wiki/a"))
+
+    def test_expected_hash_conflict_and_delete(self):
+        self.storage.save_note(Note.from_raw("wiki/a", "wiki/a.md", self.NOTE))
+        token = self.storage.get_note("wiki/a").source_hash
+        with self.assertRaises(VaultConflictError):
+            self.storage.save_note(Note.from_raw("wiki/a", "wiki/a.md", self.NOTE + "x\n"), expected_hash="0" * 64)
+        self.storage.delete_note("wiki/a", expected_hash=token)
+        self.assertIsNone(self.storage.get_note("wiki/a"))
+
+    def test_paths_that_are_never_notes_are_refused(self):
+        for rel in ("index.md", "raw/x.md", "log/2026.md", ".cadabby/x.md"):
+            with self.subTest(rel=rel), self.assertRaises(ValueError):
+                self.storage.save_note(Note.from_raw(rel.removesuffix(".md"), rel, self.NOTE))
+
+    def test_only_evidence_paths_are_sources(self):
+        self.place_source(self.storage, "raw/a.md", "alpha")
+        self.assertEqual(list(self.storage.list_source_paths()), ["raw/a.md"])
+        for rel in ("raw/.hidden.md", "raw/.git/c.md", "raw/node_modules/d.md", "raw\\a.md", "raw/../x.md", "wiki/a.md"):
+            with self.subTest(rel=rel):
+                self.assertIsNone(self.storage.read_source(rel))
+        self.assertEqual(self.storage.read_source("raw/a.md"), "alpha")
+        self.assertEqual(self.storage.read_source("raw/a.md", max_bytes=2), "al")
+
+
+class TestDiskStorageContract(StorageContract, unittest.TestCase):
+    def make_storage(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.vault = create_test_vault(Path(self.tmp.name) / "v", subdirs=("wiki", "raw", "log"))
+        return DiskNoteStorage(self.vault)
+
+    def place_source(self, storage, rel_path, text):
+        path = self.vault.root / rel_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, "utf-8")
+
+
+class TestMemoryStorageContract(StorageContract, unittest.TestCase):
+    def make_storage(self):
+        return InMemoryNoteStorage()
+
+    def place_source(self, storage, rel_path, text):
+        storage.put_source(rel_path, text)
+
+    def test_the_twin_cannot_hold_sources_disk_would_never_list(self):
+        storage = InMemoryNoteStorage()
+        for rel in ("raw/.hidden.md", "raw/.git/c.md", "raw/node_modules/d.md", "raw\\a.md"):
+            with self.subTest(rel=rel), self.assertRaises(ValueError):
+                storage.put_source(rel, "x")
+
+
 if __name__ == "__main__":
     unittest.main()

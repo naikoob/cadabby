@@ -21,8 +21,10 @@ from cadabby.adapters.disk_storage import DiskNoteStorage, FileLedger
 from cadabby.cache import VaultCache, is_raw_text_path, moc_overview
 from cadabby.constants import ACTOR_PATTERN, DIR_RAW, DIR_WIKI, FILE_AGENTS, TEMPLATE_TITLE_PLACEHOLDER
 from cadabby.domain import (
+    ENGINE_OWNED_FIELDS,  # noqa: F401 -- re-exported: callers imported it from ops
     Note,
     VerificationResult,
+    validate_frontmatter_patch,
     extract_headings,
     extract_markdown_section,
     split_markdown_sections,
@@ -50,7 +52,7 @@ from cadabby.graph import (
     split_link_target_and_anchor,
     strip_link_wrapper,
 )
-from cadabby.okf import is_valid_actor, utc_now_iso
+from cadabby.okf import is_valid_actor
 from cadabby.ports import IndexCachePort, LedgerPort, NoteStoragePort
 from cadabby.vault import Vault, cid_to_path, normalize_rel, note_path_violation, path_to_cid, path_to_layer
 
@@ -340,22 +342,17 @@ class ScaffoldNoteUseCase:
         rel_path, cid = self._resolve_scaffold_destination(title, domain, path)
         _check_new_location(self.storage, self.vault, rel_path, type_, verb="scaffold")
 
-        fm_data = {
-            "type": type_,
-            "title": title,
-            "description": description,
-            "status": "draft",
-            "tags": tags or [],
-            "sources": sources or [],
-            "verified": [],
-            "generated": {
-                "by": actor,
-                "at": utc_now_iso(),
-            },
-        }
-
-        initial_body = body.strip() or f"# {title}\n\n"
-        note = Note(cid=cid, rel_path=rel_path, frontmatter=fm_data, body=initial_body)
+        note = Note.new(
+            cid=cid,
+            rel_path=rel_path,
+            type_=type_,
+            title=title,
+            description=description,
+            tags=tags,
+            sources=sources,
+            actor=actor,
+            body=body,
+        )
         self.storage.save_note(note)
         self.ledger.append(f"Scaffolded {rel_path}", actor=actor)
         return note
@@ -388,34 +385,9 @@ def _validate_edits(edits: list[dict[str, Any]]) -> list[dict[str, str]]:
     return clean
 
 
-# Written by the engine alone: `verified` only by vault_verify_note / cadabby
-# verify, `generated` only at scaffold. A patch able to set them could mint a
-# `human:*` attestation that vault_verify_note refuses, or erase the audit trail.
-ENGINE_OWNED_FIELDS: tuple[str, ...] = ("verified", "generated")
-_STRING_FIELDS: tuple[str, ...] = ("title", "description", "type", "status")
-
-
-def _validate_frontmatter_patch(patch: dict[str, Any] | None) -> None:
-    """Refuse a patch that touches engine-owned fields or gives a core field a non-string value (§3.4, §5.1)."""
-    if patch is None:
-        return
-    if not isinstance(patch, dict):
-        raise ValueError("patch_frontmatter must be an object of field: value pairs")
-    owned = [k for k in ENGINE_OWNED_FIELDS if k in patch]
-    if owned:
-        entries = patch.get("verified")
-        entries = entries if isinstance(entries, list) else [entries]
-        if any(isinstance(e, dict) and str(e.get("by", "")).startswith("human:") for e in entries):
-            raise HumanAttestationRefusedError(
-                "A human:* attestation cannot be written by patching frontmatter; the person runs cadabby verify --human."
-            )
-        raise ValueError(
-            f"{', '.join(owned)} {'is' if len(owned) == 1 else 'are'} engine-owned: attest with vault_verify_note "
-            "(or cadabby verify), and never remove attestation history"
-        )
-    for key in _STRING_FIELDS:
-        if patch.get(key) is not None and not isinstance(patch[key], str):
-            raise ValueError(f"'{key}' must be a string")
+# The engine-owned-field guard lives on the aggregate (domain.Note.patch_frontmatter);
+# ops calls it early too, so a bad patch is refused before the note is even read.
+_validate_frontmatter_patch = validate_frontmatter_patch
 
 
 class UpdateNoteUseCase:

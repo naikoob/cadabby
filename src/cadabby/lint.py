@@ -28,8 +28,6 @@ from cadabby.domain import (
     DomainDefinition,
     anchor_matches as _anchor_matches,
     extract_headings as _extract_headings,
-    heading_slug as _heading_slug,
-    iter_fence_states,
 )
 from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter
 from cadabby.graph import (

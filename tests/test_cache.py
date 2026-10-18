@@ -1138,6 +1138,24 @@ class TestCacheContention(unittest.TestCase):
             self.assertFalse(cache.get_connection().in_transaction)
 
 
+class TestCacheLeakIsVisible(unittest.TestCase):
+    """C77: a VaultCache dropped with its connection open warns, as CPython does for sqlite."""
+
+    def test_an_unclosed_cache_warns(self):
+        import gc
+        import warnings
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        cache = VaultCache(Vault(copy_demo_vault(Path(tmp.name) / "v")))
+        cache.get_connection()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            del cache
+            gc.collect()
+        self.assertTrue(any(issubclass(w.category, ResourceWarning) for w in caught))
+
+
 if __name__ == "__main__":
     unittest.main()
 

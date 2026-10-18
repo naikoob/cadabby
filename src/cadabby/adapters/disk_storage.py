@@ -9,13 +9,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
-from cadabby.constants import DIR_RAW
 from cadabby.domain import Note
 from cadabby.frontmatter import FrontmatterParseError
 from cadabby.fsutil import atomic_replace_checked, check_expected_hash, compute_bytes_sha256
 from cadabby.indexer import append_vault_log
 from cadabby.ports import LedgerPort, NoteStoragePort
-from cadabby.vault import Vault, cid_to_path, is_excluded_dir, path_to_cid
+from cadabby.vault import Vault, cid_to_path, path_to_cid, source_path_violation
 
 
 class DiskNoteStorage(NoteStoragePort):
@@ -116,13 +115,9 @@ class DiskNoteStorage(NoteStoragePort):
         return sorted({self.vault.rel_path(p) for p in self.vault.iter_raw_files()})
 
     def read_source(self, rel_path: str, max_bytes: int | None = None) -> str | None:
-        parts = rel_path.replace("\\", "/").split("/")
-        if len(parts) < 2 or parts[0] != DIR_RAW or any(p in ("", ".", "..") for p in parts):
+        if source_path_violation(rel_path):
             return None
-        # The same pruning as iter_raw_files: no dot or ignored folder, no dotfile.
-        if any(is_excluded_dir(p) for p in parts[1:-1]) or parts[-1].startswith("."):
-            return None
-        target = (self.vault.root / Path(*parts)).resolve()
+        target = (self.vault.root / rel_path).resolve()
         if not target.is_relative_to(self.vault.raw_dir.resolve()) or not target.is_file():
             return None
         if max_bytes is None:

@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import unquote
 
 from cadabby.constants import ACTOR_PATTERN
+from cadabby.errors import HumanAttestationRefusedError
 from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter, serialize_frontmatter
 from cadabby.okf import compute_body_hash, derive_trust_tier, is_valid_actor, utc_now_iso
 
@@ -244,6 +245,36 @@ def replace_markdown_section(body: str, heading: str, new_content: str) -> str:
     return "".join(new_sections)
 
 
+# Written by the engine alone: `verified` only by vault_verify_note / cadabby
+# verify, `generated` only at scaffold. A patch able to set them could mint a
+# `human:*` attestation that vault_verify_note refuses, or erase the audit trail.
+ENGINE_OWNED_FIELDS: tuple[str, ...] = ("verified", "generated")
+_STRING_FIELDS: tuple[str, ...] = ("title", "description", "type", "status")
+
+
+def validate_frontmatter_patch(patch: dict[str, Any] | None) -> None:
+    """Refuse a patch that touches engine-owned fields or gives a core field a non-string value (§3.4, §5.1)."""
+    if patch is None:
+        return
+    if not isinstance(patch, dict):
+        raise ValueError("patch_frontmatter must be an object of field: value pairs")
+    owned = [k for k in ENGINE_OWNED_FIELDS if k in patch]
+    if owned:
+        entries = patch.get("verified")
+        entries = entries if isinstance(entries, list) else [entries]
+        if any(isinstance(e, dict) and str(e.get("by", "")).startswith("human:") for e in entries):
+            raise HumanAttestationRefusedError(
+                "A human:* attestation cannot be written by patching frontmatter; the person runs cadabby verify --human."
+            )
+        raise ValueError(
+            f"{', '.join(owned)} {'is' if len(owned) == 1 else 'are'} engine-owned: attest with vault_verify_note "
+            "(or cadabby verify), and never remove attestation history"
+        )
+    for key in _STRING_FIELDS:
+        if patch.get(key) is not None and not isinstance(patch[key], str):
+            raise ValueError(f"'{key}' must be a string")
+
+
 @dataclass
 class Note:
     """Core domain aggregate representing a typed knowledge note."""
@@ -307,7 +338,13 @@ class Note:
         return derive_trust_tier(self.verified, self.body_hash)
 
     def patch_frontmatter(self, patch: dict[str, Any]) -> None:
-        """Apply frontmatter updates (None value removes key)."""
+        """Apply frontmatter updates (None value removes key).
+
+        The engine-owned-field guard is the aggregate's own invariant, not a
+        caller's courtesy: no path through `patch_frontmatter` can write
+        `verified` or `generated` (§3.4).
+        """
+        validate_frontmatter_patch(patch)
         for k, v in patch.items():
             if v is None:
                 self.frontmatter.pop(k, None)
@@ -399,6 +436,34 @@ class Note:
             if first_end > 0 and self.raw_text[first_end - 1] == "\r":
                 return "\r\n"
         return "\n"
+
+    @classmethod
+    def new(
+        cls,
+        *,
+        cid: str,
+        rel_path: str,
+        type_: str,
+        title: str,
+        description: str,
+        actor: str,
+        tags: list[str] | None = None,
+        sources: list[str] | None = None,
+        body: str = "",
+        at_iso: str | None = None,
+    ) -> Note:
+        """A freshly scaffolded note: draft, unverified, attributed to `actor` (§3.1, §3.4)."""
+        frontmatter: dict[str, Any] = {
+            "type": type_,
+            "title": title,
+            "description": description,
+            "status": "draft",
+            "tags": tags or [],
+            "sources": sources or [],
+            "verified": [],
+            "generated": {"by": actor, "at": at_iso or utc_now_iso()},
+        }
+        return cls(cid=cid, rel_path=rel_path, frontmatter=frontmatter, body=body.strip() or f"# {title}\n\n")
 
     @classmethod
     def from_raw(cls, cid: str, rel_path: str, raw_text: str, source_hash: str | None = None) -> Note:

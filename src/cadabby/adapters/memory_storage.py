@@ -8,12 +8,11 @@ from __future__ import annotations
 import copy
 from collections.abc import Sequence
 
-from cadabby.constants import DIR_RAW
 from cadabby.domain import Note
 from cadabby.okf import ledger_line
 from cadabby.fsutil import VaultConflictError, check_expected_hash, compute_bytes_sha256
 from cadabby.ports import LedgerPort, NoteStoragePort
-from cadabby.vault import cid_to_path, note_path_violation, path_to_cid
+from cadabby.vault import cid_to_path, note_path_violation, path_to_cid, source_path_violation
 
 
 def _content_hash(note: Note) -> str:
@@ -105,16 +104,15 @@ class InMemoryNoteStorage(NoteStoragePort):
     def read_source(self, rel_path: str, max_bytes: int | None = None) -> str | None:
         # Keys are only ever raw/ paths (see put_source), so an exact lookup
         # is the whole confinement rule here.
-        text = self._sources.get(rel_path)
+        text = None if source_path_violation(rel_path) else self._sources.get(rel_path)
         if text is None or max_bytes is None:
             return text
         return text.encode("utf-8")[:max_bytes].decode("utf-8", errors="replace")
 
     def put_source(self, rel_path: str, text: str) -> None:
         """Test seam: place a raw/ file. Memory plays the human who curates raw/."""
-        parts = rel_path.split("/")
-        if len(parts) < 2 or parts[0] != DIR_RAW or any(p in ("", ".", "..") for p in parts):
-            raise ValueError(f"Not a raw/ path: {rel_path}")
+        if why := source_path_violation(rel_path):
+            raise ValueError(f"Not a source path: {rel_path} ({why})")
         self._sources[rel_path] = text
 
 

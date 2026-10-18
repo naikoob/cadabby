@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from cadabby.mcp import McpServer, run_mcp_server
+from cadabby.mcp import TOOLS, McpServer, run_mcp_server
 from cadabby.vault import Vault
 from tests.helpers import copy_demo_vault
 
@@ -909,6 +909,26 @@ class TestStructuredWriteResults(unittest.TestCase):
         self.assertTrue((self.vault_root / out["rel_path"]).is_file())
         self.assertEqual(len(out["warnings"]), 1)
         self.assertIn("index.md is unwritable", out["warnings"][0])
+
+
+class TestToolRegistry(unittest.TestCase):
+    """C77: one registry; every declared tool has a handler and no reply can edit it."""
+
+    def test_every_tool_has_exactly_one_handler(self):
+        self.assertIsInstance(TOOLS, tuple)
+        self.assertEqual({t["name"] for t in TOOLS}, set(McpServer._TOOL_HANDLERS))
+        self.assertTrue(all(t["inputSchema"]["additionalProperties"] is False for t in TOOLS))
+
+    def test_a_tools_list_reply_is_a_copy(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with McpServer(Vault(copy_demo_vault(Path(tmp.name) / "v"))) as server:
+            reply = server.handle_tools_list()
+            reply["tools"][0]["inputSchema"]["properties"]["injected"] = {"type": "string"}
+            reply["tools"].append({"name": "vault_ninth"})
+            again = server.handle_tools_list()
+        self.assertEqual(len(again["tools"]), len(TOOLS))
+        self.assertNotIn("injected", again["tools"][0]["inputSchema"]["properties"])
 
 
 if __name__ == "__main__":

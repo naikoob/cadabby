@@ -13,6 +13,7 @@ import posixpath
 import re
 import sqlite3
 import sys
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
@@ -1378,8 +1379,12 @@ class VaultCache:
     def __del__(self) -> None:
         # Finalizers must not raise: a partially constructed instance can fail
         # in close() with AttributeError, which the interpreter would otherwise
-        # print as an "Exception ignored" traceback on stderr.
+        # print as an "Exception ignored" traceback on stderr. A connection
+        # still open here is a leak, reported the way CPython reports its own,
+        # so `-W error::ResourceWarning` can still see it.
         try:
+            if getattr(self, "_conn", None) is not None:
+                warnings.warn(f"unclosed VaultCache for {self.db_path}", ResourceWarning, stacklevel=2)
             self.close()
         except Exception:  # noqa: BLE001
             pass

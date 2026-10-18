@@ -316,5 +316,25 @@ class TestOneSectionModel(unittest.TestCase):
         self.assertIn("## intro\n\nnew", out)
 
 
+class TestNoteAggregateInvariants(unittest.TestCase):
+    """C77: engine-owned fields are guarded by the aggregate itself (§3.4)."""
+
+    def test_patch_frontmatter_refuses_engine_owned_fields(self):
+        note = Note.new(cid="wiki/n", rel_path="wiki/n.md", type_="concept", title="N", description="d", actor="agent:a")
+        with self.assertRaises(HumanAttestationRefusedError):
+            note.patch_frontmatter({"verified": [{"by": "human:mallory", "at": "2026-01-01T00:00:00Z", "of": "x"}]})
+        for field in ("verified", "generated"):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                note.patch_frontmatter({field: None})
+        self.assertEqual(note.verified, [])
+        self.assertEqual(note.generated["by"], "agent:a")
+
+    def test_new_notes_are_draft_unverified_and_attributed(self):
+        note = Note.new(cid="wiki/n", rel_path="wiki/n.md", type_="concept", title="N", description="d",
+                        actor="agent:a", at_iso="2026-01-02T03:04:05Z")
+        self.assertEqual((note.status, note.trust_tier, note.body), ("draft", "unverified", "# N\n\n"))
+        self.assertEqual(note.generated, {"by": "agent:a", "at": "2026-01-02T03:04:05Z"})
+
+
 if __name__ == "__main__":
     unittest.main()
