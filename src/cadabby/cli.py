@@ -17,7 +17,7 @@ from typing import Any
 from cadabby.adapters.disk_storage import DiskNoteStorage
 from cadabby.audit import run_vault_audit
 from cadabby.cache import VaultCache, reset_cache_files
-from cadabby.constants import DIR_WIKI, NOTE_TYPES, TRUST_TIERS
+from cadabby.constants import DIR_RAW, DIR_WIKI, NOTE_TYPES, TRUST_TIERS
 from cadabby.errors import (
     EXIT_ENVIRONMENT,
     EXIT_FINDINGS,
@@ -144,6 +144,18 @@ def cmd_search(args: argparse.Namespace) -> int:
             domain=getattr(args, "domain", None),
             limit=args.limit,
         )
+        # Unfiltered search excludes raw/ by design (§4.4), so "no results"
+        # can hide the one place the term occurs. Only an unscoped text search
+        # gets the hint: a filter is a deliberate narrowing, and --json must
+        # stay the bare list vault_search returns.
+        scoped = any((args.type, args.status, args.trust, args.tag, getattr(args, "domain", None)))
+        raw_hit = bool(
+            not results
+            and args.query
+            and not scoped
+            and not args.json
+            and cache.search(query=args.query, domain=DIR_RAW, limit=1)
+        )
 
     if args.json:
         out = [r.to_dict() for r in results]
@@ -153,6 +165,8 @@ def cmd_search(args: argparse.Namespace) -> int:
     label = f"'{args.query}'" if args.query else "active filters"
     if not results:
         print(f"No results found matching {label}.")
+        if raw_hit:
+            print(f"Sources in {DIR_RAW}/ match; search them with --domain {DIR_RAW}.")
         return EXIT_OK
 
     cid_w = max(42, max(len(r.cid) for r in results) + 2)

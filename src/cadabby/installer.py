@@ -180,9 +180,22 @@ def refresh_vault_shims(vault_path: Path | str, dry_run: bool = False) -> tuple[
 
 
 class InitRefusedError(CadabbyError, ValueError):
-    """`init` declined to proceed because doing so would hide existing notes (§7.5)."""
+    """`init` declined to proceed because doing so would hide existing notes (§7.5)
+    or plant a vault inside another one (§5.3)."""
 
     code = INVALID_ARGUMENT
+
+
+def enclosing_vault(target: Path) -> Path | None:
+    """The nearest ancestor of `target` that holds `.cadabby.json`, or None (§5.3).
+
+    Only the Cadabby marker counts: a plain `.obsidian/` folder above is a
+    notes tree nobody scans, while a Cadabby vault above would index the new
+    vault's CLAUDE.md, STYLE.md, index.md... as notes and fail gate 1.
+    Deliberately not find_vault_root(): that also accepts `.obsidian/` and
+    consults $CADABBY_VAULT, neither of which says where `target` sits.
+    """
+    return next((p for p in target.parents if (p / FILE_CONFIG).is_file()), None)
 
 
 # User-owned vault documents (§7.6): written once by `init`, overwritten only
@@ -208,7 +221,9 @@ def init_vault(
 
     Raises:
         InitRefusedError: if `obsidian_templates` would reserve a folder that
-            already holds notes, which would drop a domain out of the vault.
+            already holds notes, which would drop a domain out of the vault;
+            or if `target` lies inside another Cadabby vault, whose scans
+            would read this vault's files as notes. `force` overrides neither.
     """
     root = Path(target).resolve()
     name = vault_name or root.name or "vault"
@@ -232,6 +247,12 @@ def init_vault(
         _write_within(root, dst, json.dumps({"mcpServers": {"cadabby": make_mcp_server_entry(root)}}, indent=2) + "\n")
 
     # Refuse before writing anything, so a refused init leaves no half-vault.
+    if (outer := enclosing_vault(root)) is not None:
+        raise InitRefusedError(
+            f"Refusing to create a vault inside the vault at {outer}: its scans would read this "
+            f"vault's files as notes and fail. To keep this material in {outer.name}, make it a "
+            f"cognitive domain folder there (it needs no init); otherwise choose a path outside it."
+        )
     declared = obsidian_template_dir(root)
     tpl_dest = declared if declared is not None else root / DIR_TEMPLATES
     if obsidian_templates and declared is None and tpl_dest.is_dir() and any(tpl_dest.rglob("*.md")):

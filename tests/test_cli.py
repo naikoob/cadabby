@@ -1319,6 +1319,64 @@ class TestCliWriteJson(unittest.TestCase):
         self.assertLessEqual({"cid", "actor", "of", "trust_tier", "already_verified", "warnings"}, set(verified))
 
 
+class TestSimulationRemediations(unittest.TestCase):
+    """C78: init never plants a vault inside another, and search points at raw/ when that is where the term is."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def _init(self, path: Path, **opts) -> tuple[int, str]:
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            code = _run_like_main(cmd_init, DummyArgs(vault=str(path), name=path.name, obsidian=False, **opts))
+        return code, err.getvalue()
+
+    def test_init_refuses_a_path_inside_another_vault(self):
+        parent = self.dir / "parent"
+        self.assertEqual(self._init(parent)[0], 0)
+        nested = parent / "customers" / "sub"
+        for force in (False, True):
+            with self.subTest(force=force):
+                code, err = self._init(nested, force=force)
+                self.assertEqual(code, EXIT_ENVIRONMENT)
+                self.assertIn("INVALID_ARGUMENT", err)
+                self.assertIn(str(parent.resolve()), err)
+                self.assertFalse(nested.exists(), "a refused init must write nothing")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cmd_lint(DummyArgs(vault=str(parent), json=True)), 0)
+
+    def test_init_under_a_plain_obsidian_folder_is_allowed(self):
+        outer = self.dir / "notes"
+        (outer / ".obsidian").mkdir(parents=True)
+        vault = outer / "v"
+        self.assertEqual(self._init(vault)[0], 0)
+        self.assertTrue((vault / ".cadabby.json").is_file())
+        # Re-running init on the vault itself is not nesting.
+        self.assertEqual(self._init(vault)[0], 0)
+
+    def test_search_hints_at_raw_matches_only_when_unscoped(self):
+        vault = self.dir / "v"
+        self.assertEqual(self._init(vault)[0], 0)
+        (vault / "raw" / "study.md").write_text("# Study\nPaxos outperforms Raft here.\n", "utf-8")
+
+        def search(query: str, **opts) -> str:
+            base = dict(vault=str(vault), query=query, domain=None, type=None, status=None,
+                        trust=None, tag=None, limit=10, json=False)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(cmd_search(DummyArgs(**{**base, **opts})), 0)
+            return out.getvalue()
+
+        hint = "--domain raw"
+        self.assertIn(hint, search("Paxos"))
+        self.assertNotIn(hint, search("Paxos", domain="wiki"))
+        self.assertNotIn(hint, search("Paxos", trust="human-reviewed"))
+        self.assertEqual(json.loads(search("Paxos", json=True)), [])
+        self.assertNotIn(hint, search("Zanzibar"))
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -27,7 +27,7 @@ Run `vault_status(lint=true)` when `finding_counts` is non-zero and resolve find
 - `DOMAIN_MANIFEST_INVALID`: `{domain}/AGENTS.md` has unparseable frontmatter, non-list `allowed_types`, non-boolean `require_sources`, or a `domain` key not matching the folder name (blocking `vault_scaffold_note` in that domain). Propose the manifest fix and write it with a file tool only after user consent (`AGENTS.md` §4).
 
 ### Gate 2: Layout Consistency
-- `WIKI_NESTING_DISALLOWED`: Flatten nested `wiki/` notes to `wiki/{stem}.md` with `vault_move_note` (dry-run first) and anchor them into their topical MOC, or propose moving a deliberate hierarchy to a top-level cognitive domain (`wiki/cs182/` → `cs182/`). When moving multiple notes or folders across steps, serialize the operations (`dry_run` then `apply` for each move before planning the next) so link rewrites do not invalidate pending `plan_token`s.
+- `WIKI_NESTING_DISALLOWED`: Flatten nested `wiki/` notes to `wiki/{stem}.md` with `vault_move_note` (dry-run first) and anchor them into their topical MOC, or propose moving a deliberate hierarchy to a top-level cognitive domain (`wiki/cs182/` → `cs182/`). When moving multiple notes or folders across steps, serialize the operations (dry-run, then `apply=true` with its `plan_token`, for each move before planning the next) so link rewrites do not invalidate pending `plan_token`s.
 
 ### Gate 3: Link Integrity
 - `LINK_DEAD`: Search for renamed stems (`vault_search`) and repoint via one `vault_update_note` `replace_text` batch per note, or unlink in place:

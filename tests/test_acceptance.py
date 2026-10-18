@@ -874,6 +874,9 @@ class TestHarnessShimsStayThin(unittest.TestCase):
         # 8. Technician runbook enhancements: audit vs lint distinction and serialized move guidance.
         self.assertIn("Audit vs. Lint Boundary", technician)
         self.assertIn("serialize the operations", technician)
+        # vault_move_note has no `dry_run` argument (it is `apply`); naming one
+        # in code style invites an agent to send it.
+        self.assertNotIn("`dry_run`", technician)
         # 9. Flat wiki/ vs hierarchical domains and archive/ retirement lifecycle guidance.
         self.assertIn("**`archive/`**: the conventional retirement domain", agents_md)
         self.assertIn("Retiring work to `archive/`", librarian)
