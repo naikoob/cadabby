@@ -15,14 +15,15 @@ from typing import Any
 from urllib.parse import unquote
 
 from cadabby.constants import DIR_ARCHIVE, DIR_RAW, DIR_WIKI
-from cadabby.domain import iter_fence_states
+from cadabby.domain import code_spans, iter_fence_states
 from cadabby.vault import cid_to_path, normalize_rel, path_to_cid
 
 # Regex matching [[Target#Anchor|Alias]] (including table-escaped \| aliases)
 # and note transclusions ![[Target#Anchor]], ignoring multiline brackets and
 # code spans. Group 1 is the embed marker; attachment embeds are filtered below.
-RE_WIKILINK = re.compile(r"(!?)\[\[([^\]|#\n]+?)(?:#([^\]|\n]+?))?(?:\\?\|([^\]\n]+))?\]\]")
-RE_INLINE_CODE = re.compile(r"(`+)(?:(?!\1)[^\n])+\1")
+# No group may contain `[`: an unclosed `[[` then ends at the next one instead
+# of rescanning the rest of the line from every opener (quadratic on `[[`*n).
+RE_WIKILINK = re.compile(r"(!?)\[\[([^\[\]|#\n]+?)(?:#([^\[\]|\n]+?))?(?:\\?\|([^\[\]\n]+))?\]\]")
 
 # A final path segment ending in `.ext`, where ext is not `md`. An embed naming
 # such a file (`![[diagram.png]]`, `![[flow.canvas]]`) is an attachment, not a
@@ -37,13 +38,17 @@ def is_attachment_target(target_stem: str) -> bool:
 # Inline Markdown link, not an image embed: [label](target "optional title").
 # The angle-bracket form [label](<My Note.md>) is what Obsidian writes for
 # paths containing spaces, so group 1 takes it and group 2 the bare form.
-RE_MD_LINK = re.compile(r'(?<!!)\[[^\]\n]*\]\(\s*(?:<([^>\n]+)>|([^)\s]+))(?:\s+"[^"\n]*")?\s*\)')
+# Link text may nest one level of brackets ([a [b] c](x)); neither it nor the
+# target may run into another link's opener, which kept every pattern linear.
+_MD_LABEL = r"\[(?:[^\[\]\n]|\[[^\[\]\n]*\])*\]"
+_MD_TARGET = r'\(\s*(?:<([^<>\n]+)>|([^()\s<]+))(?:\s+"[^"\n]*")?\s*\)'
+RE_MD_LINK = re.compile(r"(?<!!)" + _MD_LABEL + _MD_TARGET)
 RE_URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:")
 
 # Paths a note names that are never graph edges, but still go stale when the
 # note moves folders: image embeds `![alt](path)` and reference definitions
 # `[id]: path` (footnotes `[^1]:` excluded). Only `vault_move_note` reads them.
-RE_MD_IMAGE = re.compile(r'!\[[^\]\n]*\]\(\s*(?:<([^>\n]+)>|([^)\s]+))(?:\s+"[^"\n]*")?\s*\)')
+RE_MD_IMAGE = re.compile(r"!" + _MD_LABEL + _MD_TARGET)
 RE_MD_REFDEF = re.compile(r"^[ ]{0,3}\[(?!\^)[^\]\n]+\]:[ \t]*(?:<([^>\n]+)>|(\S+))", re.MULTILINE)
 
 LINK_KIND_WIKI = "wiki"
@@ -71,9 +76,16 @@ def strip_code_spans(text: str) -> str:
     into the result is an offset into `text`. `iter_link_spans` depends on
     that to report where each link target sits in the original body.
     """
-    lines = text.split("\n")
-    unfenced = "\n".join(" " * len(line) if in_fence else line for line, in_fence in iter_fence_states(lines))
-    return RE_INLINE_CODE.sub(lambda m: " " * len(m.group(0)), unfenced)
+    out = []
+    for line, in_fence in iter_fence_states(text.split("\n")):
+        if in_fence:
+            out.append(" " * len(line))
+            continue
+        chars = list(line)
+        for open_, _, _, close in code_spans(line):
+            chars[open_:close] = " " * (close - open_)
+        out.append("".join(chars))
+    return "\n".join(out)
 
 
 @dataclass(frozen=True, slots=True)

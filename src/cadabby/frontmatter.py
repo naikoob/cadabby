@@ -53,7 +53,19 @@ class FrontmatterParseError(CadabbyError, ValueError):
 # What may precede an opening quote: indentation, an optional `- ` item marker
 # and an optional `key: `. A quote anywhere else is a literal character of a
 # bare scalar (`it's`), and must not hide the comment that follows it.
-_RE_QUOTE_OPENER = re.compile(r"[ ]*(?:-[ ]+)?(?:[A-Za-z0-9_-]+:[ ]+)?")
+_RE_QUOTE_OPENER = re.compile(r"([ ]*)(-[ ]+)?([A-Za-z0-9_-]+:[ ]+)?")
+
+
+def _value_starts(line: str) -> frozenset[int]:
+    """Offsets where a scalar may begin: after the indent, the `- `, or the `key: `.
+
+    Computed once per line; testing each quote against a regex anchored at
+    the line start was quadratic in a line of quotes.
+    """
+    m = _RE_QUOTE_OPENER.match(line)
+    assert m is not None  # every group is optional
+    indent, dash, key = (len(g or "") for g in m.groups())
+    return frozenset((indent, indent + dash, indent + dash + key))
 
 
 def split_comment(line: str) -> tuple[str, str | None]:
@@ -61,6 +73,7 @@ def split_comment(line: str) -> tuple[str, str | None]:
     in_single = False
     in_double = False
     escaped = False
+    openers = _value_starts(line)
 
     for i, ch in enumerate(line):
         if escaped:
@@ -70,11 +83,11 @@ def split_comment(line: str) -> tuple[str, str | None]:
             escaped = True
             continue
         if ch == "'" and not in_double:
-            if in_single or _RE_QUOTE_OPENER.fullmatch(line, 0, i):
+            if in_single or i in openers:
                 in_single = not in_single
             continue
         if ch == '"' and not in_single:
-            if in_double or _RE_QUOTE_OPENER.fullmatch(line, 0, i):
+            if in_double or i in openers:
                 in_double = not in_double
             continue
         if ch == "#" and not in_single and not in_double and (i == 0 or line[i - 1].isspace()):

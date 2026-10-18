@@ -7,6 +7,7 @@ Free from filesystem I/O, SQLite dependencies, and network protocols.
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,7 +19,7 @@ from cadabby.constants import ACTOR_PATTERN
 from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter, serialize_frontmatter
 from cadabby.okf import compute_body_hash, derive_trust_tier, is_valid_actor, utc_now_iso
 
-_INLINE_CODE_RE = re.compile(r"`+([^`\n]+)`+")
+_BACKTICK_RUN_RE = re.compile(r"`+")
 _ATX_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(\S.*?)\r?\n?$")
 
 
@@ -48,9 +49,58 @@ def iter_fence_states(lines: Iterable[str]) -> Iterator[tuple[str, bool]]:
             yield line, True
 
 
+def code_spans(line: str) -> list[tuple[int, int, int, int]]:
+    """Inline code spans on one line: `(open, content_start, content_end, close)` offsets.
+
+    CommonMark's rule, in linear time: a backtick run opens a span that the
+    next run of exactly the same length closes; a run with no partner is
+    literal. The regex this replaces, `(`+)(?:(?!\\1)[^\\n])+\\1`, backtracked
+    cubically: one 1 KB line of backticks took 17 s, and every scan of the
+    vault parses every note (§4.3).
+    """
+    runs = [(m.start(), m.end()) for m in _BACKTICK_RUN_RE.finditer(line)]
+    by_len: dict[int, list[int]] = {}
+    for i, (start, end) in enumerate(runs):
+        by_len.setdefault(end - start, []).append(i)
+    spans: list[tuple[int, int, int, int]] = []
+    i = 0
+    while i < len(runs):
+        start, end = runs[i]
+        same = by_len[end - start]
+        k = bisect_right(same, i)
+        if k == len(same):
+            i += 1  # no closing run of this length: literal backticks
+            continue
+        j = same[k]
+        spans.append((start, end, runs[j][0], runs[j][1]))
+        i = j + 1
+    return spans
+
+
+def unwrap_inline_code(text: str) -> str:
+    """`text` with each inline code span replaced by its content (per line)."""
+    out_lines = []
+    for line in text.split("\n"):
+        pieces, pos = [], 0
+        for open_, c_start, c_end, close in code_spans(line):
+            pieces += [line[pos:open_], line[c_start:c_end]]
+            pos = close
+        out_lines.append("".join(pieces) + line[pos:])
+    return "\n".join(out_lines)
+
+
 def _clean_heading_text(raw: str) -> str:
-    """Strip optional closing ATX `#` sequence and unwrap inline code backticks."""
-    return _INLINE_CODE_RE.sub(r"\1", re.sub(r"\s+#+\s*$", "", raw.strip()))
+    """Strip optional closing ATX `#` sequence and unwrap inline code backticks.
+
+    String operations, not `\\s+#+\\s*$`: that pattern was quadratic in a run
+    of spaces. A closing sequence needs whitespace before it (`# C#` keeps
+    its `#`), and a heading of only `#`s is left alone.
+    """
+    text = raw.strip()
+    trimmed = text.rstrip("#")
+    if trimmed != text and trimmed and trimmed[-1] in " \t":
+        text = trimmed.rstrip()
+    return unwrap_inline_code(text)
 
 
 def extract_headings(body: str) -> list[str]:
@@ -60,19 +110,21 @@ def extract_headings(body: str) -> list[str]:
     )
     # `[ \t]`, not `\s`: with MULTILINE, `\s+` crosses the newline after a bare
     # `#`, promoting the next line to an invented heading.
-    raw_headings = re.findall(r"^#{1,6}[ \t]+(\S[^\n]*?)[ \t\r]*$", unfenced, flags=re.MULTILINE)
-    return [_clean_heading_text(h) for h in raw_headings]
+    # Greedy, then trimmed in Python: a lazy body before `[ \t\r]*$` retried the
+    # trailing-whitespace test at every character, quadratic in long lines.
+    raw_headings = re.findall(r"^#{1,6}[ \t]+(\S[^\n]*)$", unfenced, flags=re.MULTILINE)
+    return [_clean_heading_text(h.rstrip(" \t\r")) for h in raw_headings]
 
 
 def heading_slug(text: str) -> str:
     """GitHub-style heading anchor: lowercase, punctuation dropped, spaces to hyphens."""
-    unwrapped = _INLINE_CODE_RE.sub(r"\1", text.strip())
+    unwrapped = unwrap_inline_code(text.strip())
     return re.sub(r"[^\w\- ]", "", unwrapped.lower()).replace(" ", "-")
 
 
 def anchor_matches_heading(anchor: str, heading: str) -> bool:
     """Whether a link or grounding anchor names `heading` (Obsidian or GitHub-slug form)."""
-    a = _INLINE_CODE_RE.sub(r"\1", unquote(anchor).strip())
+    a = unwrap_inline_code(unquote(anchor).strip())
     if not a:
         return False
     a_norm = re.sub(r"[\s-]+", " ", a.lower())
@@ -136,12 +188,17 @@ def split_markdown_sections(body: str) -> list[tuple[str, str]]:
 
     # Line endings are kept so the sections rejoin to the exact body; only
     # "\n" splits, matching the body hash (§3.3).
+    # A level-2 heading by the same ATX rule ground and lint use: `##\tSetup`
+    # and `## Intro ##` are sections too. With a looser `"## "` prefix test,
+    # replace_section could not find a heading ground had just returned, and
+    # appended a duplicate while reporting success.
     for line, in_fence in iter_fence_states(re.findall(r"[^\n]*\n|[^\n]+\Z", body)):
-        if not in_fence and line.startswith("## "):
+        m = None if in_fence else _ATX_HEADING_RE.match(line)
+        if m and len(m.group(1)) == 2:
             if current_lines or current_heading:
                 sections.append((current_heading, "".join(current_lines)))
                 current_lines = []
-            current_heading = line[3:].strip()
+            current_heading = _clean_heading_text(m.group(2))
         current_lines.append(line)
 
     if current_lines or current_heading:
@@ -150,23 +207,39 @@ def split_markdown_sections(body: str) -> list[tuple[str, str]]:
     return sections
 
 
+def section_heading_key(heading: str) -> str:
+    """The form a requested `##` heading is matched in: as cleaned as the body's.
+
+    Exact match after cleaning, never slug or case folding: a write that
+    fuzzily picked a section could overwrite the wrong one.
+    """
+    return _clean_heading_text(heading.lstrip("#"))
+
+
 def replace_markdown_section(body: str, heading: str, new_content: str) -> str:
-    """Replace an existing ## heading section or append if not present, code-fence safe."""
-    clean_heading = heading.lstrip("#").strip()
+    """Replace an existing ## heading section or append if not present, code-fence safe.
+
+    The existing heading line is kept byte for byte (`## Intro ##` stays as
+    written); only the content under it changes.
+    """
+    written = heading.lstrip("#").strip()
+    key = section_heading_key(heading)
     sections = split_markdown_sections(body)
     found = False
-    new_section_text = f"## {clean_heading}\n\n{new_content.strip()}\n\n"
 
     new_sections = []
     for h, content in sections:
-        if h == clean_heading and not found:
-            new_sections.append(new_section_text)
+        if h == key and not found:
+            heading_line = content.splitlines(keepends=True)[0]
+            if not heading_line.endswith("\n"):
+                heading_line += "\n"
+            new_sections.append(f"{heading_line}\n{new_content.strip()}\n\n")
             found = True
         else:
             new_sections.append(content)
 
     if not found:
-        return body.rstrip() + f"\n\n## {clean_heading}\n\n{new_content.strip()}\n"
+        return body.rstrip() + f"\n\n## {written}\n\n{new_content.strip()}\n"
 
     return "".join(new_sections)
 

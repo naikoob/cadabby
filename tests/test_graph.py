@@ -430,5 +430,56 @@ class TestDottedEmbedsAreAttachments(unittest.TestCase):
         self.assertFalse(is_attachment_target("Node"))
 
 
+class TestParsingIsLinear(unittest.TestCase):
+    """C74: no note body, however hostile, makes the parsers backtrack (§4.3).
+
+    Every scan parses every note, the scan is one transaction, and the MCP
+    server is single-threaded: one 1 KB note that took 17 s hung the vault.
+    """
+
+    BUDGET = 1.0  # seconds for 100 KB; the fixed code needs milliseconds
+
+    ADVERSARIAL = {
+        "backtick run": "x " + "`" * 100_000 + "a",
+        "wikilink openers": "[[" * 50_000,
+        "wikilink anchors": "[[a#" * 25_000,
+        "markdown openers": "[](" * 33_000,
+        "markdown angle openers": "[](<" * 25_000,
+        "brackets": "[" * 100_000,
+        "heading spaces": "# a" + " " * 100_000 + "b",
+        "heading closing spaces": "# a" + " " * 100_000 + "#",
+    }
+
+    def test_link_and_heading_parsers_stay_linear(self):
+        import time
+
+        from cadabby.domain import extract_headings, split_markdown_sections
+        from cadabby.frontmatter import split_comment
+
+        for name, text in self.ADVERSARIAL.items():
+            with self.subTest(name):
+                start = time.perf_counter()
+                list(iter_link_spans(text))
+                extract_headings(text)
+                split_markdown_sections(text)
+                split_comment(text)
+                self.assertLess(time.perf_counter() - start, self.BUDGET)
+
+    def test_frontmatter_comment_split_stays_linear(self):
+        import time
+
+        from cadabby.frontmatter import split_comment
+
+        start = time.perf_counter()
+        split_comment("a" * 50_000 + "'" * 50_000)  # every quote re-scanned the whole prefix
+        self.assertLess(time.perf_counter() - start, self.BUDGET)
+
+    def test_links_still_parse_as_before(self):
+        spans = list(iter_link_spans(
+            "[a [b] c](x.md) [[N#h|al]] ![i](p.png) [t](<My Note.md>) `[[code]]` ``a`b`` [x]([[t]].md)"
+        ))
+        self.assertEqual([s.target for s in spans], ["N", "t", "x.md", "My Note.md", "[[t]].md"])
+
+
 if __name__ == "__main__":
     unittest.main()
