@@ -100,7 +100,7 @@ git clone https://github.com/naikoob/cadabby.git
 cd cadabby
 uv sync                    # or: pip install -e .
 
-# Fast parallel test execution across all CPU cores (~12s, 745 tests):
+# Fast parallel test execution across all CPU cores (~12s, 748 tests):
 python3 tests/run_parallel.py
 
 # Canonical sequential test suite:
@@ -370,7 +370,7 @@ Status and domain multipliers apply on top of trust tiers:
 Cadabby uses standard-library `unittest` with **zero test dependencies**:
 
 ```bash
-# Fast parallel test execution across all CPU cores (~12s, 745 tests):
+# Fast parallel test execution across all CPU cores (~12s, 748 tests):
 python3 tests/run_parallel.py
 
 # Parallel execution with verbose output or target filtering:
