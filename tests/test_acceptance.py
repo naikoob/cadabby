@@ -719,6 +719,27 @@ class TestHarnessShimsStayThin(unittest.TestCase):
             disagreeing, {}, f"version drift from __version__ {cadabby.__version__}: {disagreeing}"
         )
 
+    def test_every_stated_tool_count_matches_the_server(self):
+        """W1. A tool count written in prose is a copy with no test keeping it true.
+
+        0.5.0 added the eighth tool while AGENTS.md still ruled "Exactly 7 MCP
+        tools ... never a new tool" -- an instruction an agent would follow by
+        deleting the new tool. Every count in the docs and shipped assets must
+        equal the server's.
+        """
+        words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+        pattern = re.compile(r"\b(\d+|" + "|".join(words) + r")[ -]+(?:atomic |MCP )?tools?\b", re.IGNORECASE)
+        root = Path(__file__).resolve().parent.parent
+        texts = [root / "README.md", root / "AGENTS.md", root / "SPECIFICATION.md", *sorted(self.ASSETS.rglob("*.md"))]
+        stated: dict[str, set[int]] = {}
+        for path in texts:
+            for m in pattern.finditer(path.read_text("utf-8")):
+                n = m.group(1).lower()
+                stated.setdefault(path.relative_to(root).as_posix(), set()).add(int(n) if n.isdigit() else words[n])
+        self.assertTrue(stated, "no tool counts found at all -- the pattern rotted")
+        wrong = {p: sorted(ns) for p, ns in stated.items() if ns != {len(TOOLS)}}
+        self.assertEqual(wrong, {}, f"tool counts disagreeing with the server's {len(TOOLS)}")
+
     def test_plugin_skill_enumerates_exactly_the_tools_the_server_exposes(self):
         """The one shim that embeds the tool surface instead of pointing at it.
 

@@ -296,9 +296,9 @@ require_sources: false
 
 ---
 
-## 5. MCP Architecture (7 Tools & 2 Resources)
+## 5. MCP Architecture (8 Tools & 2 Resources)
 
-Conforming to §5.1-§5.2 of the Technical Specification, Cadabby exposes exactly **7 atomic tools** and **2 dynamic resources** to AI agents:
+Conforming to §5.1-§5.2 of the Technical Specification, Cadabby exposes exactly **8 atomic tools** and **2 dynamic resources** to AI agents:
 
 ### Atomic Tools
 

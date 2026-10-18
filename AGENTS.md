@@ -16,10 +16,10 @@ Each rule is cheap to break and hard to see once broken.
 - **No runtime dependencies.** `dependencies = []` in `pyproject.toml`, standard library only, Python ≥ 3.11 with full type annotations.
 - **Atomic writes only.** Never `open(..., "w")` a note or config; use `atomic_write()` / `atomic_replace_checked()` from `fsutil.py` (§8).
 - **`notes` is written only through `cache.upsert_note()` / `cache.delete_note()`.** They retract the old FTS terms from the right table first; raw SQL against `notes` leaves search silently stale (§4.2).
-- **Exactly 7 MCP tools.** New capability goes into an existing tool's parameters or an MCP resource, never a new tool (§5.1).
+- **The MCP tool count is fixed by §5.1.** New capability goes into an existing tool's parameters or an MCP resource; adding a tool is a spec change first, never a code-only change.
 - **Persona behavior lives only in `src/cadabby/assets/skills/<persona>/SKILL.md`** (installed as `.agents/skills/` in a vault). Agent manifests, slash commands, and plugin files are thin pointers (§7.1).
 - **Anything shipped into a vault lives under `src/cadabby/assets/`.** Outside it, the file is missing from the wheel (§9).
-- **Use cases go through ports.** `ops.py` depends on `ports.py` protocols; every port has a disk adapter and an in-memory twin for hermetic tests (§9.1).
+- **Use cases go through ports.** `ops.py` depends on `ports.py` protocols; the storage and ledger ports each have a disk adapter and an in-memory twin for hermetic tests, while the cache port deliberately has none (§9.1).
 - **No human attestation without a human.** MCP refuses `human:*` outright, and CLI writes default to `process:cli` even on a TTY (§3.5, §5.3).
 - **No engine-generated files inside cognitive domains**, including no `{domain}/index.md` (§2.2, §2.5).
 - **Templates seed the body only, and `templates/` is never reserved by default.** The reasons are in §7.5; read it before touching either.
