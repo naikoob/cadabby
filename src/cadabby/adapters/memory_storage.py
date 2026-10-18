@@ -19,6 +19,7 @@ from cadabby.constants import (
     FILE_OBSIDIAN_TEMPLATES,
 )
 from cadabby.domain import DomainDefinition, Note
+from cadabby.errors import InvalidArgumentError, NotFoundError
 from cadabby.frontmatter import split_frontmatter
 from cadabby.fsutil import VaultConflictError, check_expected_hash, compute_bytes_sha256
 from cadabby.okf import ledger_line
@@ -84,7 +85,7 @@ class InMemoryVaultLayout(VaultLayoutPort):
         """Test seam: register a cognitive domain and optional `{domain}/AGENTS.md` text (§2.2)."""
         clean = normalize_rel(name)
         if not clean or "/" in clean:
-            raise ValueError(f"Domain name must be a single top-level folder, got {name!r}")
+            raise InvalidArgumentError(f"Domain name must be a single top-level folder, got {name!r}")
         self._folders.add(clean)
         if isinstance(manifest, DomainDefinition):
             self._domains[clean] = manifest
@@ -113,7 +114,7 @@ class InMemoryVaultLayout(VaultLayoutPort):
         """Test seam: place a non-note file (e.g. an attachment in a domain folder)."""
         clean = normalize_rel(rel_path)
         if not clean or "/" not in clean:
-            raise ValueError(f"Folder file path must be inside a folder, got {rel_path!r}")
+            raise InvalidArgumentError(f"Folder file path must be inside a folder, got {rel_path!r}")
         self.put_folder(clean.rsplit("/", 1)[0])
         self._files[clean] = content
 
@@ -131,13 +132,13 @@ class InMemoryVaultLayout(VaultLayoutPort):
 
     def read_template_body(self, name: str) -> str:
         if self._template_rel is None:
-            raise FileNotFoundError(
+            raise NotFoundError(
                 "No Obsidian template folder is configured; expected a 'folder' key in "
                 f"{DIR_OBSIDIAN}/{FILE_OBSIDIAN_TEMPLATES}"
             )
         rel = template_rel_filename(name)
         if rel not in self._templates:
-            raise FileNotFoundError(f"Template not found: {self._template_rel}/{rel}")
+            raise NotFoundError(f"Template not found: {self._template_rel}/{rel}")
         _, body = split_frontmatter(self._templates[rel])
         return body
 
@@ -196,10 +197,10 @@ class InMemoryNoteStorage(NoteStoragePort):
     def save_note(self, note: Note, expected_hash: str | None = None) -> None:
         raw = str(note.rel_path or note.cid).replace("\\", "/")
         if raw.startswith("/") or ".." in raw.split("/"):
-            raise ValueError(f"Cannot save note outside vault root: {note.rel_path or note.cid}")
+            raise InvalidArgumentError(f"Cannot save note outside vault root: {note.rel_path or note.cid}")
         rel_path = cid_to_path(note.rel_path or note.cid)
         if why := self.layout.note_path_violation(rel_path):
-            raise ValueError(f"Cannot save note at '{rel_path}': {why}")
+            raise InvalidArgumentError(f"Cannot save note at '{rel_path}': {why}")
         cid = path_to_cid(rel_path)
         existing = self._notes.get(cid)
 
@@ -228,11 +229,11 @@ class InMemoryNoteStorage(NoteStoragePort):
         # `prune_empty_dirs` is accepted for port parity; memory has no folders.
         rel_path = cid_to_path(cid_or_path)
         if why := self.layout.note_path_violation(rel_path):
-            raise ValueError(f"Cannot delete '{rel_path}': {why}")
+            raise InvalidArgumentError(f"Cannot delete '{rel_path}': {why}")
         cid = path_to_cid(rel_path)
         existing = self._notes.get(cid)
         if existing is None:
-            raise FileNotFoundError(f"Note not found: {rel_path}")
+            raise NotFoundError(f"Note not found: {rel_path}")
         if expected_hash is not None:
             check_expected_hash(_content_hash(existing), expected_hash, rel_path, where="in memory")
         del self._notes[cid]
@@ -258,7 +259,7 @@ class InMemoryNoteStorage(NoteStoragePort):
     def put_source(self, rel_path: str, text: str) -> None:
         """Test seam: place a raw/ file. Memory plays the human who curates raw/."""
         if why := source_path_violation(rel_path):
-            raise ValueError(f"Not a source path: {rel_path} ({why})")
+            raise InvalidArgumentError(f"Not a source path: {rel_path} ({why})")
         self._sources[rel_path] = text
 
 

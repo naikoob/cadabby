@@ -22,6 +22,8 @@ from cadabby.errors import (
     EXIT_ENVIRONMENT,
     EXIT_FINDINGS,
     EXIT_OK,
+    InvalidArgumentError,
+    NotFoundError,
     classify,
     exit_code_for,
 )
@@ -69,7 +71,7 @@ def _default_cli_actor(args: argparse.Namespace) -> str:
     try:
         return parse_cli_actor(actor)  # programmatic callers bypass argparse's `type=`
     except argparse.ArgumentTypeError as e:
-        raise ValueError(str(e)) from None
+        raise InvalidArgumentError(str(e)) from None
 
 
 def parse_cli_actor(value: str) -> str:
@@ -250,9 +252,9 @@ def _parse_json_flag(raw: str, flag_name: str, expected_type: type, type_label: 
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid JSON for {flag_name}: {exc.msg}") from exc
+        raise InvalidArgumentError(f"Invalid JSON for {flag_name}: {exc.msg}") from exc
     if not isinstance(parsed, expected_type):
-        raise ValueError(
+        raise InvalidArgumentError(
             f"Expected JSON {type_label} for {flag_name}, got {type(parsed).__name__}"
         )
     return parsed
@@ -365,14 +367,14 @@ def cmd_verify(args: argparse.Namespace) -> int:
     # The parser makes these exclusive (argparse owns exit 2, §5.4); this
     # guard is for programmatic callers that bypass it.
     if args.human and args.agent:
-        raise ValueError("--human and --agent are mutually exclusive")
+        raise InvalidArgumentError("--human and --agent are mutually exclusive")
 
     if args.human:
         if not sys.stdin.isatty():
-            raise ValueError("--human requires an interactive TTY")
+            raise InvalidArgumentError("--human requires an interactive TTY")
         confirmed, reviewed_hash = _confirm_human_attestation(vault, args.cid)
         if not confirmed:
-            raise ValueError("Aborted: confirmation token did not match; nothing was written")
+            raise InvalidArgumentError("Aborted: confirmation token did not match; nothing was written")
         actor = f"human:{getpass.getuser()}"
         is_human = True
     elif args.agent:
@@ -631,10 +633,10 @@ def cmd_install(args: argparse.Namespace) -> int:
         try:
             vault_path = Vault.open().root
         except FileNotFoundError:
-            raise FileNotFoundError(
+            raise NotFoundError(
                 "No Cadabby vault found in current working directory. "
                 "Run inside a vault, pass --vault <path>, or pass --global for user-level installation."
-            )
+            ) from None
     elif not args.uninstall:
         try:
             vault_path = Vault.open().root

@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import sqlite3
 from collections import Counter
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
@@ -16,7 +15,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote
 
-from cadabby.cache import VaultCache, unfiled_note_rows, unprocessed_raw_paths, verification_debt_rows
+from cadabby.cache import VaultCache
 from cadabby.constants import (
     DIR_RAW,
     DIR_WIKI,
@@ -122,11 +121,10 @@ def status_report(vault: Vault, cache: VaultCache, *, lint: bool = False) -> dic
         "warning": sum(1 for f in findings if f.severity == "warning"),
         "by_code": dict(sorted(by_code.items())),
     }
-    conn = cache.get_connection()
-    debt = verification_debt_rows(conn)
+    debt = cache.verification_debt_rows()
     report["queues"] = {
-        "unprocessed_raw": _queue(unprocessed_raw_paths(conn)),
-        "unfiled": _queue([r["cid"] for r in unfiled_note_rows(conn)]),
+        "unprocessed_raw": _queue(cache.unprocessed_raw_paths()),
+        "unfiled": _queue([r["cid"] for r in cache.unfiled_note_rows()]),
         "verification_debt": {
             "agent_payable": _queue([d.cid for d in debt if not d.human_owed]),
             "human_owed": _queue([d.cid for d in debt if d.human_owed]),
@@ -205,18 +203,17 @@ def _run_vault_lint_impl(vault: Vault, cache: VaultCache) -> list[LintFinding]:
     # below reads its rows, so lint costs one incremental scan instead of a
     # second full read and parse of the vault.
     cache.scan()
-    conn = cache.get_connection()
     domains = vault.discover_domains()
-    notes = _load_note_rows(conn)
+    notes = _load_note_rows(cache)
     notes_by_cid = {note.cid: note for note in notes}
 
     findings: list[LintFinding] = list(_manifest_findings(vault, domains))  # Gate 1 (domain manifests)
     for note in notes:
         findings.extend(_note_findings(note, domains[note.layer]))  # Gates 1, 2, 4 (domain), 6
-    findings.extend(_link_findings(conn, cache, notes_by_cid))  # Gate 3
-    findings.extend(_source_findings(conn))  # Gate 4
+    findings.extend(_link_findings(cache, notes_by_cid))  # Gate 3
+    findings.extend(_source_findings(cache))  # Gate 4
     findings.extend(_raw_link_findings(vault, notes))  # Gate 4 (in-body citations)
-    findings.extend(_orphan_findings(conn))  # Gate 5
+    findings.extend(_orphan_findings(cache))  # Gate 5
     return findings
 
 
@@ -235,16 +232,9 @@ def _manifest_findings(vault: Vault, domains: dict[str, DomainDefinition]) -> It
             )
 
 
-def _load_note_rows(conn: sqlite3.Connection) -> list[_NoteRow]:
+def _load_note_rows(cache: VaultCache) -> list[_NoteRow]:
     """Every non-raw note the scan indexed, ordered by path so findings are deterministic."""
-    rows = conn.execute(
-        """
-        SELECT cid, rel_path, layer, body, frontmatter_json, parse_error, body_hash, trust_tier
-        FROM notes
-        WHERE layer != 'raw'
-        ORDER BY rel_path;
-        """
-    ).fetchall()
+    rows = cache.lint_note_rows()
     return [
         _NoteRow(
             cid=r["cid"],
@@ -482,14 +472,12 @@ def _verification_findings(
         )
 
 
-def _link_findings(
-    conn: sqlite3.Connection, cache: VaultCache, notes_by_cid: dict[str, _NoteRow]
-) -> Iterator[LintFinding]:
+def _link_findings(cache: VaultCache, notes_by_cid: dict[str, _NoteRow]) -> Iterator[LintFinding]:
     """Gate 3: wikilinks and relative Markdown note links resolve, and their anchors exist."""
     resolver = cache.get_link_resolver()
     broken = cache.unparseable_cids()
     headings_cache: dict[str, list[str]] = {}
-    for link_row in conn.execute("SELECT source_cid, target_raw, target_cid, anchor, kind FROM links;").fetchall():
+    for link_row in cache.lint_link_rows():
         source_cid = link_row["source_cid"]
         target_raw = link_row["target_raw"]
         target_cid = link_row["target_cid"]
@@ -525,9 +513,9 @@ def _link_findings(
                     )
 
 
-def _source_findings(conn: sqlite3.Connection) -> Iterator[LintFinding]:
+def _source_findings(cache: VaultCache) -> Iterator[LintFinding]:
     """Gate 4: every `sources:` entry exists under raw/."""
-    for src_row in conn.execute("SELECT source_cid, raw_path FROM sources WHERE resolved = 0;").fetchall():
+    for src_row in cache.unresolved_source_rows():
         yield _error(
             code="SOURCE_MISSING",
             rel_path=cid_to_path(src_row["source_cid"]),
@@ -535,22 +523,11 @@ def _source_findings(conn: sqlite3.Connection) -> Iterator[LintFinding]:
         )
 
 
-def _orphan_findings(conn: sqlite3.Connection) -> Iterator[LintFinding]:
+def _orphan_findings(cache: VaultCache) -> Iterator[LintFinding]:
     """Gate 5: canonical wiki notes with zero inbound and zero outbound links."""
-    rows = conn.execute(
-        """
-        SELECT n.rel_path
-        FROM notes n
-        WHERE n.layer = 'wiki'
-          AND n.parse_error IS NULL
-          AND NOT EXISTS (SELECT 1 FROM links l1 WHERE l1.source_cid = n.cid)
-          AND NOT EXISTS (SELECT 1 FROM links l2 WHERE l2.target_cid = n.cid)
-        ORDER BY n.rel_path;
-        """
-    ).fetchall()
-    for row in rows:
+    for rel_path in cache.orphan_wiki_paths():
         yield _warning(
             code="NOTE_ORPHAN",
-            rel_path=row["rel_path"],
+            rel_path=rel_path,
             message="Orphan note: 0 inbound and 0 outbound links",
         )

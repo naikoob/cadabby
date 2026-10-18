@@ -1039,8 +1039,9 @@ cadabby/
 │       ├── frontmatter.py      # Restricted-subset parser + canonicalizing writer (3.2)
 │       ├── okf.py              # Schema validation, body hashing, trust tier derivation (3.3-3.4)
 │       ├── fsutil.py           # Atomic replace, advisory lock, O_APPEND ledger writes
-│       ├── cache.py            # SQLite connection, FTS5 probe, scan/upsert/delete, search
-│       ├── graph.py            # Wikilink and Markdown note-link extraction, resolution, backlink queries
+│       ├── cache.py            # SQLite connection, FTS5 probe, scan/upsert/delete, graph/queue/lint queries
+│       ├── search.py           # FTS5 query sanitizer, SearchResult, BM25 and filter-only search (4.4)
+│       ├── graph.py            # Wikilink and Markdown note-link extraction, resolution, target index
 │       ├── indexer.py          # index.md gap report (2.5) and log.md append/rotate
 │       ├── lint.py             # The dynamic six gates across all domains (6.3)
 │       ├── audit.py            # Git blame provenance audit (3.5)

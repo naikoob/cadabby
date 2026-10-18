@@ -18,7 +18,7 @@ from cadabby.domain import (
     extract_markdown_section,
     split_markdown_sections,
 )
-from cadabby.errors import AmbiguousNoteError, classify
+from cadabby.errors import AmbiguousNoteError, InvalidArgumentError, NotFoundError, classify
 from cadabby.frontmatter import serialize_frontmatter
 from cadabby.graph import LinkTargetIndex, split_link_target_and_anchor, strip_link_wrapper
 from cadabby.resolve import (
@@ -96,7 +96,7 @@ class GroundNotesUseCase:
     def _load(self, cid: str) -> Note:
         note = self.storage.get_note(cid)
         if note is None:
-            raise FileNotFoundError(f"Note not found: {cid_to_path(cid)}")
+            raise NotFoundError(f"Note not found: {cid_to_path(cid)}")
         return note
 
     def _resolve_target_and_anchor(
@@ -201,7 +201,7 @@ class GroundNotesUseCase:
             head, _, tail = unwrapped.rpartition("#")
             if found := match(head):
                 return found, tail.strip() or None
-        raise FileNotFoundError(f"Source not found: {unwrapped}")
+        raise NotFoundError(f"Source not found: {unwrapped}")
 
     def _grounded_source(self, raw_target: str, path: str, anchor: str | None, budget_tokens: int | None) -> dict[str, Any]:
         """A raw/ file as evidence: its text and the notes citing it, never a trust tier (§5.1)."""
@@ -216,7 +216,7 @@ class GroundNotesUseCase:
         cap = RAW_GROUND_MAX_BYTES if budget_tokens is None else min(RAW_GROUND_MAX_BYTES, budget_tokens * 16)
         text = self.storage.read_source(path, max_bytes=cap + 1)
         if text is None:
-            raise FileNotFoundError(f"Source not found: {path}")
+            raise NotFoundError(f"Source not found: {path}")
         cut_at_read = len(text.encode("utf-8")) > cap
         if cut_at_read:
             text = text.encode("utf-8")[:cap].decode("utf-8", errors="ignore")
@@ -251,7 +251,7 @@ class GroundNotesUseCase:
         source, never a note: no note can live there (§2.1).
         """
         if isinstance(targets, str) or not targets:
-            raise ValueError("targets must be a non-empty list of note names or raw/ paths")
+            raise InvalidArgumentError("targets must be a non-empty list of note names or raw/ paths")
         domains = self.vault.discover_domains()
         # Names resolve against what storage lists, not the search index, so a
         # note whose frontmatter is broken is named in its error rather than the

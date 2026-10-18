@@ -121,11 +121,34 @@ class VaultEscapeError(CadabbyError, PermissionError):
     code = PERMISSION_DENIED
 
 
-class AmbiguousNoteError(ValueError):
+class InvalidArgumentError(CadabbyError, ValueError):
+    """Caller-supplied input failed validation (§5.4).
+
+    ValueError stays in the bases so existing `except ValueError` handlers and
+    tests continue to catch it, while unexpected bare `ValueError`s from the
+    standard library classify as INTERNAL rather than caller mistakes.
+    """
+
+    code = INVALID_ARGUMENT
+
+
+class NotFoundError(CadabbyError, FileNotFoundError):
+    """A requested note, raw source, template, or vault was not found (§5.4)."""
+
+    code = NOT_FOUND
+
+
+class AlreadyExistsError(CadabbyError, FileExistsError):
+    """A destination note or folder already exists (§5.4)."""
+
+    code = ALREADY_EXISTS
+
+
+class AmbiguousNoteError(InvalidArgumentError):
     """A note name matches more than one note, and a write must not guess (§5.1).
 
-    A ValueError, so it classifies as INVALID_ARGUMENT like any other input the
-    caller has to correct; `candidates` lists what the name could mean.
+    An InvalidArgumentError, so it classifies as INVALID_ARGUMENT like any other
+    input the caller has to correct; `candidates` lists what the name could mean.
     """
 
     def __init__(self, name: str, candidates: list[str]) -> None:
@@ -135,18 +158,18 @@ class AmbiguousNoteError(ValueError):
         )
 
 
-# Builtins Cadabby raises directly, in resolution order. FileNotFoundError,
-# FileExistsError and PermissionError are all OSError subclasses, so OSError
-# must come last or it swallows them.
+# Builtins the OS or standard library raises directly, in resolution order.
+# FileNotFoundError, FileExistsError and PermissionError are all OSError
+# subclasses, so OSError must come last or it swallows them. Bare ValueError is
+# deliberately omitted: every intentional caller-input validation error raises
+# InvalidArgumentError, so an unexpected ValueError classifies as INTERNAL.
 _BUILTIN_CODES: tuple[tuple[type[BaseException], str, bool], ...] = (
-    # A decode error nobody anticipated is the engine's surprise, not bad input:
-    # UnicodeError is a ValueError and used to read as INVALID_ARGUMENT.
+    # A decode error nobody anticipated is the engine's surprise, not bad input.
     (UnicodeError, INTERNAL, False),
     (FileNotFoundError, NOT_FOUND, False),
     (FileExistsError, ALREADY_EXISTS, False),
     (PermissionError, PERMISSION_DENIED, False),
     (OSError, IO_ERROR, False),
-    (ValueError, INVALID_ARGUMENT, False),
 )
 
 ALL_CODES: frozenset[str] = frozenset(

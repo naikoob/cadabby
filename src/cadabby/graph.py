@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import posixpath
 import re
-import sqlite3
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -387,157 +386,12 @@ def normalize_link_target(text: str) -> str:
     return split_link_target_and_anchor(text)[0]
 
 
-def get_note_graph(conn: sqlite3.Connection, target_cid: str, *, limit: int | None = None) -> dict[str, Any] | None:
-    """Compute 1-hop and 2-hop neighborhoods, co-citations, and bibliographic coupling (§5.1, §5.3).
+def __getattr__(name: str) -> Any:
+    """Re-export SQLite graph queries moved to `cadabby.cache` for backwards compatibility."""
+    if name in ("get_note_graph", "_attach_neighbor_metadata"):
+        from cadabby import cache as _cache
 
-    Every entry carries its neighbor's title, type, status and trust tier
-    (None when the link does not resolve), so a caller can choose what to read
-    next without grounding each candidate. With `limit`, each list is capped
-    and its untruncated length reported as `<list>_total`.
-    """
-    # 1. Check note existence
-    cur = conn.execute(
-        "SELECT cid, title, type, status, trust_tier, rel_path FROM notes WHERE cid = ? AND parse_error IS NULL;",
-        (target_cid,),
-    )
-    row = cur.fetchone()
-    if not row:
-        return None
-
-    note_info = {
-        "cid": row["cid"],
-        "title": row["title"],
-        "type": row["type"],
-        "status": row["status"],
-        "trust_tier": row["trust_tier"],
-        "rel_path": row["rel_path"],
-    }
-
-    # 2. 1-hop forward links
-    cur = conn.execute(
-        "SELECT target_raw, target_cid, anchor, kind FROM links WHERE source_cid = ? ORDER BY target_cid ASC;",
-        (target_cid,),
-    )
-    forward_links = [
-        {"target_raw": r["target_raw"], "target_cid": r["target_cid"], "anchor": r["anchor"], "kind": r["kind"]}
-        for r in cur.fetchall()
-    ]
-    forward_cids = {r["target_cid"] for r in forward_links if r["target_cid"]}
-
-    # 3. 1-hop backlinks
-    cur = conn.execute(
-        "SELECT source_cid, target_raw, anchor, kind FROM links WHERE target_cid = ? ORDER BY source_cid ASC;",
-        (target_cid,),
-    )
-    backlinks = [
-        {"source_cid": r["source_cid"], "target_raw": r["target_raw"], "anchor": r["anchor"], "kind": r["kind"]}
-        for r in cur.fetchall()
-    ]
-    backlink_cids = {r["source_cid"] for r in backlinks if r["source_cid"]}
-
-    # 4. 2-hop forward links (targets of 1-hop forward targets)
-    two_hop_forward: list[dict[str, Any]] = []
-    if forward_cids:
-        forward_list = sorted(forward_cids)
-        placeholders = ",".join("?" for _ in forward_list)
-        cur = conn.execute(
-            f"""
-            SELECT DISTINCT source_cid, target_cid
-            FROM links
-            WHERE source_cid IN ({placeholders})
-              AND target_cid IS NOT NULL
-              AND target_cid != ?
-              AND target_cid NOT IN ({placeholders})
-            ORDER BY target_cid ASC;
-            """,
-            (*forward_list, target_cid, *forward_list),
-        )
-        two_hop_forward = [{"via": r["source_cid"], "target_cid": r["target_cid"]} for r in cur.fetchall()]
-
-    # 5. 2-hop backlinks (sources linking to 1-hop backlinks)
-    two_hop_backlinks: list[dict[str, Any]] = []
-    if backlink_cids:
-        backlink_list = sorted(backlink_cids)
-        placeholders = ",".join("?" for _ in backlink_list)
-        cur = conn.execute(
-            f"""
-            SELECT DISTINCT source_cid, target_cid
-            FROM links
-            WHERE target_cid IN ({placeholders})
-              AND source_cid != ?
-              AND source_cid NOT IN ({placeholders})
-            ORDER BY source_cid ASC;
-            """,
-            (*backlink_list, target_cid, *backlink_list),
-        )
-        two_hop_backlinks = [{"source_cid": r["source_cid"], "via": r["target_cid"]} for r in cur.fetchall()]
-
-    # 6. Co-citations (notes cited alongside target_cid by common sources)
-    cur = conn.execute(
-        """
-        SELECT l2.target_cid, COUNT(DISTINCT l1.source_cid) AS co_citations
-        FROM links l1
-        JOIN links l2 ON l1.source_cid = l2.source_cid
-        WHERE l1.target_cid = ?
-          AND l2.target_cid != ?
-          AND l2.target_cid IS NOT NULL
-        GROUP BY l2.target_cid
-        ORDER BY co_citations DESC, l2.target_cid ASC;
-        """,
-        (target_cid, target_cid),
-    )
-    co_citations = [{"cid": r["target_cid"], "count": r["co_citations"]} for r in cur.fetchall()]
-
-    # 7. Bibliographic coupling (notes that cite common targets as target_cid)
-    cur = conn.execute(
-        """
-        SELECT l2.source_cid, COUNT(DISTINCT l1.target_cid) AS shared_targets
-        FROM links l1
-        JOIN links l2 ON l1.target_cid = l2.target_cid
-        WHERE l1.source_cid = ?
-          AND l2.source_cid != ?
-          AND l1.target_cid IS NOT NULL
-        GROUP BY l2.source_cid
-        ORDER BY shared_targets DESC, l2.source_cid ASC;
-        """,
-        (target_cid, target_cid),
-    )
-    bibliographic_coupling = [{"cid": r["source_cid"], "count": r["shared_targets"]} for r in cur.fetchall()]
-
-    # Which key names the neighbor in each list's entries.
-    lists: dict[str, tuple[list[dict[str, Any]], str]] = {
-        "forward_links": (forward_links, "target_cid"),
-        "backlinks": (backlinks, "source_cid"),
-        "two_hop_forward": (two_hop_forward, "target_cid"),
-        "two_hop_backlinks": (two_hop_backlinks, "source_cid"),
-        "co_citations": (co_citations, "cid"),
-        "bibliographic_coupling": (bibliographic_coupling, "cid"),
-    }
-    result: dict[str, Any] = {"note": note_info}
-    for name, (entries, key) in lists.items():
-        kept = entries if limit is None else entries[:limit]
-        result[name] = kept
-        if limit is not None:
-            result[f"{name}_total"] = len(entries)
-    _attach_neighbor_metadata(conn, [(e, key) for name, (_, key) in lists.items() for e in result[name]])
-    return result
-
-
-def _attach_neighbor_metadata(conn: sqlite3.Connection, entries: list[tuple[dict[str, Any], str]]) -> None:
-    """Add title, type, status and trust_tier of the note each entry's `key` names, in one query."""
-    cids = sorted({e[key] for e, key in entries if e.get(key)})
-    meta: dict[str, sqlite3.Row] = {}
-    for start in range(0, len(cids), 500):  # stay under SQLite's bound-parameter limit
-        chunk = cids[start : start + 500]
-        placeholders = ",".join("?" for _ in chunk)
-        for r in conn.execute(
-            f"SELECT cid, title, type, status, trust_tier FROM notes WHERE parse_error IS NULL AND cid IN ({placeholders});",
-            chunk,
-        ):
-            meta[r["cid"]] = r
-    for entry, key in entries:
-        row = meta.get(entry.get(key) or "")
-        for field in ("title", "type", "status", "trust_tier"):
-            entry[field] = row[field] if row is not None else None
+        return getattr(_cache, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

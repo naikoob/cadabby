@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from cadabby.adapters.disk_storage import DiskNoteStorage, FileLedger
-from cadabby.cache import VaultCache, moc_overview
+from cadabby.cache import VaultCache
 from cadabby.constants import DIR_RAW, DIR_WIKI, TEMPLATE_TITLE_PLACEHOLDER
 from cadabby.domain import (
     ENGINE_OWNED_FIELDS,
@@ -21,9 +21,15 @@ from cadabby.domain import (
     VerificationResult,
     validate_frontmatter_patch,
 )
-from cadabby.errors import HumanAttestationRefusedError, VaultConflictError, classify
+from cadabby.errors import (
+    HumanAttestationRefusedError,
+    InvalidArgumentError,
+    NotFoundError,
+    VaultConflictError,
+    classify,
+)
 from cadabby.fsutil import compute_bytes_sha256
-from cadabby.graph import LinkTargetIndex, get_note_graph, strip_link_wrapper
+from cadabby.graph import LinkTargetIndex, strip_link_wrapper
 from cadabby.ground import (
     RAW_GROUND_MAX_BYTES,
     GroundNotesUseCase,
@@ -161,21 +167,21 @@ class ScaffoldNoteUseCase:
         template: str | None = None,
     ) -> Note:
         if not type_ or not isinstance(type_, str) or not type_.strip():
-            raise ValueError("Note type must be a non-empty string")
+            raise InvalidArgumentError("Note type must be a non-empty string")
         for name, value in (("title", title), ("description", description)):
             if not isinstance(value, str):
-                raise ValueError(f"Note {name} must be a string")
+                raise InvalidArgumentError(f"Note {name} must be a string")
             if not value.strip():
                 # Lint would report the note FIELD_MISSING the moment it exists (§6.3).
-                raise ValueError(f"Note {name} must not be empty")
+                raise InvalidArgumentError(f"Note {name} must not be empty")
         if path is not None and not isinstance(path, str):
-            raise ValueError("Note path must be a string")
+            raise InvalidArgumentError("Note path must be a string")
         # generated.by is attribution like verified[].by, so the same grammar binds (§3.4).
         _require_actor(actor)
 
         if template:
             if body.strip():
-                raise ValueError("Pass either 'body' or 'template', not both")
+                raise InvalidArgumentError("Pass either 'body' or 'template', not both")
             body = self.vault.read_template_body(template).replace(
                 TEMPLATE_TITLE_PLACEHOLDER, title
             )
@@ -209,19 +215,19 @@ EDIT_OPS: dict[str, tuple[str, ...]] = {
 def _validate_edits(edits: list[dict[str, Any]]) -> list[dict[str, str]]:
     """Check every edit's shape before any is applied, so a bad one writes nothing."""
     if not isinstance(edits, list):
-        raise ValueError("edits must be a list of {op, ...} objects")
+        raise InvalidArgumentError("edits must be a list of {op, ...} objects")
     clean: list[dict[str, str]] = []
     for i, edit in enumerate(edits):
         if not isinstance(edit, dict):
-            raise ValueError(f"edits[{i}] must be an object")
+            raise InvalidArgumentError(f"edits[{i}] must be an object")
         op = edit.get("op")
         if op not in EDIT_OPS:
-            raise ValueError(f"edits[{i}].op must be one of {sorted(EDIT_OPS)}, got {op!r}")
+            raise InvalidArgumentError(f"edits[{i}].op must be one of {sorted(EDIT_OPS)}, got {op!r}")
         required = EDIT_OPS[op]
         # `body`/`new` may legitimately be empty strings; only absence is an error.
         missing = [k for k in required if not isinstance(edit.get(k), str)]
         if missing:
-            raise ValueError(f"edits[{i}] ({op}) requires string field(s): {', '.join(missing)}")
+            raise InvalidArgumentError(f"edits[{i}] ({op}) requires string field(s): {', '.join(missing)}")
         clean.append({"op": op, **{k: edit[k] for k in required}})
     return clean
 
@@ -270,7 +276,7 @@ class UpdateNoteUseCase:
         if (note.frontmatter, note.body) == before:
             # Writing anyway would canonicalize the file and log an "Updated"
             # that changed nothing -- a retried call would look like two edits.
-            raise ValueError(
+            raise InvalidArgumentError(
                 f"Nothing to update in {note.rel_path}: the note already has these values"
                 if validated or frontmatter_patch
                 else "Nothing to update: pass patch_frontmatter or edits"
@@ -561,7 +567,7 @@ GRAPH_VIEWS = ("neighborhood", "mocs")
 
 def graph_view(
     vault: Vault,
-    cache: VaultCache,
+    cache: IndexCachePort,
     *,
     view: str = "neighborhood",
     target: str | None = None,
@@ -575,17 +581,17 @@ def graph_view(
     cache must already be scanned; every entry point scans first (§4.3).
     """
     if view not in GRAPH_VIEWS:
-        raise ValueError(f"view must be one of {list(GRAPH_VIEWS)}")
+        raise InvalidArgumentError(f"view must be one of {list(GRAPH_VIEWS)}")
     if limit < 1:
-        raise ValueError("limit must be at least 1")
+        raise InvalidArgumentError("limit must be at least 1")
     if view == "mocs":
         if target is not None:
-            raise ValueError("view 'mocs' covers every MOC; omit 'target'")
-        return {"view": "mocs"} | moc_overview(cache.get_connection(), limit)
+            raise InvalidArgumentError("view 'mocs' covers every MOC; omit 'target'")
+        return {"view": "mocs"} | cache.get_moc_overview(limit)
     if not target or not target.strip():
-        raise ValueError("view 'neighborhood' needs a 'target' note")
+        raise InvalidArgumentError("view 'neighborhood' needs a 'target' note")
     if _strip_dot_slash(strip_link_wrapper(target)).startswith(f"{DIR_RAW}/"):
-        raise ValueError("raw/ sources are not graph nodes; vault_ground a raw/ path lists the notes citing it")
+        raise InvalidArgumentError("raw/ sources are not graph nodes; vault_ground a raw/ path lists the notes citing it")
     active_storage, _ = _resolve_adapters(vault, storage)
     listed = list(active_storage.list_note_cids())
     cid = resolve_note_cid(active_storage, target, LinkTargetIndex(listed), cids=listed)
@@ -593,9 +599,9 @@ def graph_view(
     # parse is FRONTMATTER_UNPARSEABLE, not a node with no title and "no
     # backlinks" (links into it never resolve, so that would be false).
     load_existing_note(active_storage, cid)
-    data = get_note_graph(cache.get_connection(), cid, limit=limit)
+    data = cache.get_note_graph(cid, limit=limit)
     if data is None:
-        raise FileNotFoundError(f"Note not found: {cid_to_path(cid)}")
+        raise NotFoundError(f"Note not found: {cid_to_path(cid)}")
     return {"view": "neighborhood"} | data
 
 

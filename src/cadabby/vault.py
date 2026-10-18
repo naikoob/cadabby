@@ -41,7 +41,7 @@ from cadabby.domain import DomainDefinition
 
 # Re-exported: the taxonomy lives in errors.py (§5.4), but every existing
 # `from cadabby.vault import VaultConfigError` still resolves.
-from cadabby.errors import VaultConfigError  # noqa: F401
+from cadabby.errors import InvalidArgumentError, NotFoundError, VaultConfigError  # noqa: F401
 from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter, split_frontmatter
 from cadabby.fsutil import contained
 
@@ -63,7 +63,7 @@ def env_vault_root() -> Path | None:
         return None
     root = Path(env_vault).resolve()
     if not is_vault_root(root):
-        raise FileNotFoundError(
+        raise NotFoundError(
             f"CADABBY_VAULT is set to {root}, which is not a Cadabby vault "
             f"(missing {FILE_CONFIG} or marker). Unset it or point it at a vault root."
         )
@@ -445,7 +445,7 @@ class Vault:
         """
         root = find_vault_root(start_path)
         if root is None:
-            raise FileNotFoundError(_no_vault_message(vault_search_start(start_path)))
+            raise NotFoundError(_no_vault_message(vault_search_start(start_path)))
         return cls(root=root)
 
     @classmethod
@@ -457,7 +457,7 @@ class Vault:
         """
         root = Path(path).resolve()
         if not is_vault_root(root):
-            raise FileNotFoundError(_no_vault_message(root))
+            raise NotFoundError(_no_vault_message(root))
         return cls(root=root)
 
     @property
@@ -551,7 +551,7 @@ class Vault:
         """
         tpl_dir = self.template_dir()
         if tpl_dir is None:
-            raise FileNotFoundError(
+            raise NotFoundError(
                 "No Obsidian template folder is configured; expected a 'folder' key in "
                 f"{DIR_OBSIDIAN}/{FILE_OBSIDIAN_TEMPLATES}"
             )
@@ -561,9 +561,9 @@ class Vault:
         # As in template_dir, containment is tested once, after resolve().
         path = (tpl_dir / filename).resolve()
         if tpl_dir not in path.parents:
-            raise ValueError(f"Invalid template name '{name}'")
+            raise InvalidArgumentError(f"Invalid template name '{name}'")
         if not path.is_file():
-            raise FileNotFoundError(f"Template not found: {self.rel_path(path)}")
+            raise NotFoundError(f"Template not found: {self.rel_path(path)}")
 
         _, body = split_frontmatter(path.read_text("utf-8"))
         return body
@@ -692,11 +692,11 @@ def template_rel_filename(name: str) -> str:
     # would turn '/etc/passwd' into a plausible-looking relative name.
     stem = normalize_rel(name)
     if not stem or Path(name).is_absolute():
-        raise ValueError(f"Invalid template name '{name}'")
+        raise InvalidArgumentError(f"Invalid template name '{name}'")
     filename = stem if stem.endswith(".md") else f"{stem}.md"
     norm = posixpath.normpath(filename)
     if norm.startswith("../") or norm in ("", ".", ".."):
-        raise ValueError(f"Invalid template name '{name}'")
+        raise InvalidArgumentError(f"Invalid template name '{name}'")
     return norm
 
 

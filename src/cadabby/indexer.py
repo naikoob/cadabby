@@ -7,17 +7,15 @@ from __future__ import annotations
 
 import os
 import re
-import sqlite3
 import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Any
 
-from cadabby.okf import ledger_line, utc_now_iso
-
-from cadabby.cache import VaultCache, unfiled_note_rows, unprocessed_raw_paths, verification_debt_rows
-from cadabby.constants import LEDGER_TITLE, TYPE_MOC
+from cadabby.constants import LEDGER_TITLE
 from cadabby.fsutil import advisory_lock, append_ledger, atomic_write
+from cadabby.okf import ledger_line, utc_now_iso
+from cadabby.ports import IndexCachePort
 from cadabby.vault import Vault
 
 RE_LEDGER_HEADER_YEAR = re.compile(r"^#\s+Activity Ledger\s+\((\d{4})\)", re.MULTILINE)
@@ -129,16 +127,9 @@ def _note_link(stem: str, rel_path: str) -> str:
     return f"[{label}]({urllib.parse.quote(rel_path)})"
 
 
-def _entry_points(conn: sqlite3.Connection) -> list[str]:
+def _entry_points(cache: IndexCachePort) -> list[str]:
     """Section 1: every MOC, linked. The human's starting page (§2.5)."""
-    rows = conn.execute(
-        """
-        SELECT stem, rel_path, description FROM notes
-        WHERE layer = 'wiki' AND type = ? AND parse_error IS NULL
-        ORDER BY stem ASC;
-        """,
-        (TYPE_MOC,),
-    ).fetchall()
+    rows = cache.entry_point_rows()
     if not rows:
         return []
     lines = ["## Entry Points", "", "| Map of Content | Description |", "| :--- | :--- |"]
@@ -146,7 +137,7 @@ def _entry_points(conn: sqlite3.Connection) -> list[str]:
     return lines + [""]
 
 
-def _unfiled(conn: sqlite3.Connection) -> list[str]:
+def _unfiled(cache: IndexCachePort) -> list[str]:
     """Section 2: wiki notes no MOC reaches by forward link at any depth (§2.5).
 
     The one failure mode flat layout introduces, and the one `lint` cannot
@@ -161,7 +152,7 @@ def _unfiled(conn: sqlite3.Connection) -> list[str]:
     defeat the point of shrinking it. The definition lives in
     `cache.unfiled_note_rows`, shared with the `vault_status` queue.
     """
-    rows = unfiled_note_rows(conn)
+    rows = cache.unfiled_note_rows()
     if not rows:
         return []
     lines = [
@@ -176,9 +167,9 @@ def _unfiled(conn: sqlite3.Connection) -> list[str]:
     return lines + [""]
 
 
-def _raw_queue(conn: sqlite3.Connection) -> list[str]:
+def _raw_queue(cache: IndexCachePort) -> list[str]:
     """Section 3: the ingestion queue. Vault-wide -- any domain may cite raw/."""
-    pending = unprocessed_raw_paths(conn)
+    pending = cache.unprocessed_raw_paths()
     if not pending:
         return []
     lines = [
@@ -193,7 +184,7 @@ def _raw_queue(conn: sqlite3.Connection) -> list[str]:
     return lines + [""]
 
 
-def _verification_debt(conn: sqlite3.Connection) -> list[str]:
+def _verification_debt(cache: IndexCachePort) -> list[str]:
     """Section 4: notes whose verification entries have all gone stale (§3.4).
 
     Vault-wide across active domains: retired notes (`archive/`, `deprecated`,
@@ -201,7 +192,7 @@ def _verification_debt(conn: sqlite3.Connection) -> list[str]:
     definition lives in `cache.verification_debt_rows`, shared with the
     `vault_status` queue.
     """
-    rows = verification_debt_rows(conn)
+    rows = cache.verification_debt_rows()
     if not rows:
         return []
     lines = [
@@ -216,7 +207,7 @@ def _verification_debt(conn: sqlite3.Connection) -> list[str]:
     return lines + [""]
 
 
-def _build_index_lines_from_conn(vault: Vault, conn: sqlite3.Connection) -> str:
+def _build_index_lines(vault: Vault, cache: IndexCachePort) -> str:
     """Render the vault-wide gap report (§2.5).
 
     Deliberately not a catalog. A table of every wiki note duplicates what MOCs
@@ -234,8 +225,8 @@ def _build_index_lines_from_conn(vault: Vault, conn: sqlite3.Connection) -> str:
         "",
     ]
 
-    gaps = _unfiled(conn) + _raw_queue(conn) + _verification_debt(conn)
-    lines += _entry_points(conn)
+    gaps = _unfiled(cache) + _raw_queue(cache) + _verification_debt(cache)
+    lines += _entry_points(cache)
     if not gaps:
         lines.append("Nothing outstanding: every note is filed, every source processed, every attestation current.")
     lines += gaps
@@ -243,15 +234,15 @@ def _build_index_lines_from_conn(vault: Vault, conn: sqlite3.Connection) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
-def generate_index_markdown(vault: Vault, cache: VaultCache) -> str:
+def generate_index_markdown(vault: Vault, cache: IndexCachePort) -> str:
     """Render the gap report for index.md (§2.5) from an already-scanned cache.
 
     Deterministic sort order guarantees zero Git diff churn on idempotent runs.
     """
-    return _build_index_lines_from_conn(vault, cache.get_connection())
+    return _build_index_lines(vault, cache)
 
 
-def sync_vault_index(vault: Vault, cache: VaultCache) -> bool:
+def sync_vault_index(vault: Vault, cache: IndexCachePort) -> bool:
     """Regenerate index.md under advisory lock only if bytes have changed.
 
     Returns True if file was rewritten, False if unchanged.

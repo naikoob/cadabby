@@ -10,20 +10,18 @@ import functools
 import json
 import os
 import posixpath
-import re
 import sqlite3
 import sys
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Self
 
+import cadabby.indexer as _indexer
 from cadabby.constants import (
     DIR_ARCHIVE,
     DIR_RAW,
-    FTS_COLUMN_WEIGHTS,
-    FTS_FIELD_HIT_FLOOR,
     SCHEMA_VERSION,
     TYPE_MOC,
 )
@@ -37,6 +35,13 @@ from cadabby.graph import (
     resolve_markdown_target,
 )
 from cadabby.okf import compute_body_hash, derive_trust_tier, is_actor_human, latest_stale_actor, utc_now_iso
+from cadabby.search import (
+    SearchResult,
+    _fts_table,
+    execute_search,
+    or_fallback_fts5_query,
+    sanitize_fts5_query,
+)
 from cadabby.vault import Vault, cid_to_path, note_path_violation, path_to_cid, path_to_layer, path_to_stem
 
 
@@ -47,6 +52,18 @@ def _can_be_note(target_cid: str | None, template_rel: str | None) -> bool:
     template folder are links but never to notes: neither edges nor dead.
     """
     return target_cid is not None and note_path_violation(cid_to_path(target_cid), template_rel) is None
+
+
+def entry_point_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every wiki MOC (stem, rel_path, description), sorted by stem (§2.5)."""
+    return conn.execute(
+        """
+        SELECT stem, rel_path, description FROM notes
+        WHERE layer = 'wiki' AND type = ? AND parse_error IS NULL
+        ORDER BY stem ASC;
+        """,
+        (TYPE_MOC,),
+    ).fetchall()
 
 
 def unprocessed_raw_paths(conn: sqlite3.Connection) -> list[str]:
@@ -207,6 +224,160 @@ def moc_overview(conn: sqlite3.Connection, limit: int) -> dict[str, Any]:
     }
 
 
+def get_note_graph(conn: sqlite3.Connection, target_cid: str, *, limit: int | None = None) -> dict[str, Any] | None:
+    """Compute 1-hop and 2-hop neighborhoods, co-citations, and bibliographic coupling (§5.1, §5.3).
+
+    Every entry carries its neighbor's title, type, status and trust tier
+    (None when the link does not resolve), so a caller can choose what to read
+    next without grounding each candidate. With `limit`, each list is capped
+    and its untruncated length reported as `<list>_total`.
+    """
+    # 1. Check note existence
+    cur = conn.execute(
+        "SELECT cid, title, type, status, trust_tier, rel_path FROM notes WHERE cid = ? AND parse_error IS NULL;",
+        (target_cid,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+
+    note_info = {
+        "cid": row["cid"],
+        "title": row["title"],
+        "type": row["type"],
+        "status": row["status"],
+        "trust_tier": row["trust_tier"],
+        "rel_path": row["rel_path"],
+    }
+
+    # 2. 1-hop forward links
+    cur = conn.execute(
+        "SELECT target_raw, target_cid, anchor, kind FROM links WHERE source_cid = ? ORDER BY target_cid ASC;",
+        (target_cid,),
+    )
+    forward_links = [
+        {"target_raw": r["target_raw"], "target_cid": r["target_cid"], "anchor": r["anchor"], "kind": r["kind"]}
+        for r in cur.fetchall()
+    ]
+    forward_cids = {r["target_cid"] for r in forward_links if r["target_cid"]}
+
+    # 3. 1-hop backlinks
+    cur = conn.execute(
+        "SELECT source_cid, target_raw, anchor, kind FROM links WHERE target_cid = ? ORDER BY source_cid ASC;",
+        (target_cid,),
+    )
+    backlinks = [
+        {"source_cid": r["source_cid"], "target_raw": r["target_raw"], "anchor": r["anchor"], "kind": r["kind"]}
+        for r in cur.fetchall()
+    ]
+    backlink_cids = {r["source_cid"] for r in backlinks if r["source_cid"]}
+
+    # 4. 2-hop forward links (targets of 1-hop forward targets)
+    two_hop_forward: list[dict[str, Any]] = []
+    if forward_cids:
+        forward_list = sorted(forward_cids)
+        placeholders = ",".join("?" for _ in forward_list)
+        cur = conn.execute(
+            f"""
+            SELECT DISTINCT source_cid, target_cid
+            FROM links
+            WHERE source_cid IN ({placeholders})
+              AND target_cid IS NOT NULL
+              AND target_cid != ?
+              AND target_cid NOT IN ({placeholders})
+            ORDER BY target_cid ASC;
+            """,
+            (*forward_list, target_cid, *forward_list),
+        )
+        two_hop_forward = [{"via": r["source_cid"], "target_cid": r["target_cid"]} for r in cur.fetchall()]
+
+    # 5. 2-hop backlinks (sources linking to 1-hop backlinks)
+    two_hop_backlinks: list[dict[str, Any]] = []
+    if backlink_cids:
+        backlink_list = sorted(backlink_cids)
+        placeholders = ",".join("?" for _ in backlink_list)
+        cur = conn.execute(
+            f"""
+            SELECT DISTINCT source_cid, target_cid
+            FROM links
+            WHERE target_cid IN ({placeholders})
+              AND source_cid != ?
+              AND source_cid NOT IN ({placeholders})
+            ORDER BY source_cid ASC;
+            """,
+            (*backlink_list, target_cid, *backlink_list),
+        )
+        two_hop_backlinks = [{"source_cid": r["source_cid"], "via": r["target_cid"]} for r in cur.fetchall()]
+
+    # 6. Co-citations (notes cited alongside target_cid by common sources)
+    cur = conn.execute(
+        """
+        SELECT l2.target_cid, COUNT(DISTINCT l1.source_cid) AS co_citations
+        FROM links l1
+        JOIN links l2 ON l1.source_cid = l2.source_cid
+        WHERE l1.target_cid = ?
+          AND l2.target_cid != ?
+          AND l2.target_cid IS NOT NULL
+        GROUP BY l2.target_cid
+        ORDER BY co_citations DESC, l2.target_cid ASC;
+        """,
+        (target_cid, target_cid),
+    )
+    co_citations = [{"cid": r["target_cid"], "count": r["co_citations"]} for r in cur.fetchall()]
+
+    # 7. Bibliographic coupling (notes that cite common targets as target_cid)
+    cur = conn.execute(
+        """
+        SELECT l2.source_cid, COUNT(DISTINCT l1.target_cid) AS shared_targets
+        FROM links l1
+        JOIN links l2 ON l1.target_cid = l2.target_cid
+        WHERE l1.source_cid = ?
+          AND l2.source_cid != ?
+          AND l1.target_cid IS NOT NULL
+        GROUP BY l2.source_cid
+        ORDER BY shared_targets DESC, l2.source_cid ASC;
+        """,
+        (target_cid, target_cid),
+    )
+    bibliographic_coupling = [{"cid": r["source_cid"], "count": r["shared_targets"]} for r in cur.fetchall()]
+
+    # Which key names the neighbor in each list's entries.
+    lists: dict[str, tuple[list[dict[str, Any]], str]] = {
+        "forward_links": (forward_links, "target_cid"),
+        "backlinks": (backlinks, "source_cid"),
+        "two_hop_forward": (two_hop_forward, "target_cid"),
+        "two_hop_backlinks": (two_hop_backlinks, "source_cid"),
+        "co_citations": (co_citations, "cid"),
+        "bibliographic_coupling": (bibliographic_coupling, "cid"),
+    }
+    result: dict[str, Any] = {"note": note_info}
+    for name, (entries, key) in lists.items():
+        kept = entries if limit is None else entries[:limit]
+        result[name] = kept
+        if limit is not None:
+            result[f"{name}_total"] = len(entries)
+    _attach_neighbor_metadata(conn, [(e, key) for name, (_, key) in lists.items() for e in result[name]])
+    return result
+
+
+def _attach_neighbor_metadata(conn: sqlite3.Connection, entries: list[tuple[dict[str, Any], str]]) -> None:
+    """Add title, type, status and trust_tier of the note each entry's `key` names, in one query."""
+    cids = sorted({e[key] for e, key in entries if e.get(key)})
+    meta: dict[str, sqlite3.Row] = {}
+    for start in range(0, len(cids), 500):  # stay under SQLite's bound-parameter limit
+        chunk = cids[start : start + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        for r in conn.execute(
+            f"SELECT cid, title, type, status, trust_tier FROM notes WHERE parse_error IS NULL AND cid IN ({placeholders});",
+            chunk,
+        ):
+            meta[r["cid"]] = r
+    for entry, key in entries:
+        row = meta.get(entry.get(key) or "")
+        for field in ("title", "type", "status", "trust_tier"):
+            entry[field] = row[field] if row is not None else None
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class NoteRecord:
     """One row's worth of `notes` content, as handed to `VaultCache.upsert_note()`.
@@ -274,131 +445,6 @@ def _raw_exts_fingerprint(exts: tuple[str, ...]) -> str:
 def is_raw_text_path(rel_path: str, raw_text_exts: tuple[str, ...]) -> bool:
     """Whether a raw file's body is indexed under the configured extension list (§2.4)."""
     return bool(raw_text_exts) and rel_path.lower().endswith(raw_text_exts)
-
-
-def sanitize_fts5_query(query: str) -> str:
-    """Sanitize and prepare a query string for SQLite FTS5 MATCH expression.
-
-    Handles:
-    - Preserves explicitly quoted phrases (e.g. "B-Tree Index").
-    - Quotes tokens with internal hyphens or special characters (e.g. B-tree -> "B-tree")
-      preventing SQLite FTS5 from treating '-' as column selectors or unary NOT operators.
-    - Preserves uppercase boolean operators (AND, OR, NOT) while stripping invalid leading, trailing, or consecutive operator sequences.
-    - Supports prefix matching (e.g. term* -> term* or "phrase"*).
-    - Cleans unclosed quotes and non-syntax characters gracefully; a stray
-      quote inside a word separates it (foo"bar -> foo "bar").
-    - `a AND NOT b` keeps its meaning: FTS5's NOT is binary, so the AND is dropped.
-    """
-    query = query.strip()
-    if not query:
-        return ""
-
-    if query.count('"') % 2 == 1:
-        query = query + '"'
-
-    tokens: list[str] = []
-    pattern = re.compile(r"\"([^\"]*)\"(\*?)|([^\s\"]+)")
-    for match in pattern.finditer(query):
-        quoted, star, bare = match.groups()
-        if quoted is not None:
-            clean_quoted = quoted.strip()  # the group cannot contain '"'
-            if clean_quoted and any(c.isalnum() for c in clean_quoted):
-                tokens.append(f'"{clean_quoted}"{star}')
-        elif bare is not None:
-            if bare in ("AND", "OR", "NOT"):
-                tokens.append(bare)
-            else:
-                has_prefix = bare.endswith("*") and len(bare) > 1
-                base = bare[:-1] if has_prefix else bare
-                clean_base = base  # the bare group cannot contain '"'
-                if not clean_base or not any(c.isalnum() for c in clean_base):
-                    continue
-                if re.search(r"[^\w]", clean_base):
-                    quoted_token = f'"{clean_base}"'
-                    if has_prefix:
-                        quoted_token = f"{quoted_token}*"
-                    tokens.append(quoted_token)
-                else:
-                    if has_prefix:
-                        tokens.append(f"{clean_base}*")
-                    else:
-                        tokens.append(clean_base)
-
-    clean_tokens: list[str] = []
-    for t in tokens:
-        if t in ("AND", "OR", "NOT"):
-            if t == "NOT" and clean_tokens and clean_tokens[-1] == "AND":
-                clean_tokens[-1] = "NOT"  # `a AND NOT b` is FTS5's `a NOT b`
-                continue
-            if not clean_tokens or clean_tokens[-1] in ("AND", "OR", "NOT"):
-                continue
-            clean_tokens.append(t)
-        else:
-            clean_tokens.append(t)
-    while clean_tokens and clean_tokens[-1] in ("AND", "OR", "NOT"):
-        clean_tokens.pop()
-
-    return " ".join(clean_tokens)
-
-
-_FTS_TOKEN_RE = re.compile(r'"[^"]*"\*?|\S+')
-
-
-def or_fallback_fts5_query(clean_query: str) -> str | None:
-    """Build an OR-joined FTS5 query to fill an implicit-AND multi-term search short of `limit`.
-
-    Returns None for empty/single-term queries, duplicate-only terms, or when the caller
-    wrote explicit boolean operators (AND, OR, NOT), preserving strict boolean semantics.
-    """
-    tokens = _FTS_TOKEN_RE.findall(clean_query)
-    if len(tokens) < 2 or any(t in ("AND", "OR", "NOT") for t in tokens):
-        return None
-    distinct = list(dict.fromkeys(t.casefold() for t in tokens))
-    if len(distinct) < 2:
-        return None
-    return " OR ".join(tokens)
-
-
-@dataclass
-class SearchResult:
-    """Represents a scored search result."""
-
-    cid: str
-    title: str | None
-    description: str | None
-    type: str | None
-    status: str | None
-    trust_tier: str | None
-    score: float
-    snippet: str
-    domain: str = field(init=False)
-
-    def __post_init__(self) -> None:
-        self.domain = path_to_layer(self.cid)
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert SearchResult to serializable dictionary."""
-        return {
-            "cid": self.cid,
-            "domain": self.domain,
-            "title": self.title,
-            "description": self.description,
-            "type": self.type,
-            "status": self.status,
-            "trust_tier": self.trust_tier,
-            "score": round(self.score, 4),
-            "snippet": self.snippet,
-        }
-
-
-def _fts_table(layer: str | None) -> str:
-    """Return the FTS table that indexes a given layer.
-
-    Raw sources are kept in their own index so their term statistics do not
-    enter the BM25 scoring of curated notes (see the DDL for what that costs).
-    Every read and write must agree on this mapping, so it lives in one place.
-    """
-    return "raw_fts" if layer == DIR_RAW else "notes_fts"
 
 
 @functools.cache
@@ -816,9 +862,7 @@ class VaultCache:
         # dropping a file into raw/. The byte-comparison guard in
         # sync_vault_index keeps an unchanged report from churning the diff.
         if regenerate_index and (inserted_count or updated_count or deleted_count):
-            from cadabby.indexer import sync_vault_index
-
-            sync_vault_index(self.vault, cache=self)
+            _indexer.sync_vault_index(self.vault, cache=self)
 
         return inserted_count, updated_count, deleted_count, total_count
 
@@ -1063,144 +1107,6 @@ class VaultCache:
         ]
         return links, backlinks, sources
 
-    @staticmethod
-    def _epistemic_multiplier_sql(ranking_cfg: dict[str, Any]) -> str:
-        """Build the SQL expression for `:trust_mult * :status_mult * :domain_mult` (§4.4)."""
-        # Multipliers were validated as finite numbers by load_vault_config
-        # (§2.6); keys are free-form strings, so they are still SQL-escaped.
-        def safe_case(k: str, v: float) -> str:
-            clean_k = k.replace("'", "''")
-            return f"WHEN '{clean_k}' THEN {float(v)}"
-
-        def multiplier_expr(column: str, cfg: dict[str, float]) -> str:
-            cases = " ".join(safe_case(k, v) for k, v in cfg.items())
-            # An empty CASE body is a syntax error; a neutral multiplier is not
-            return f"CASE {column} {cases} ELSE 1.0 END" if cases else "1.0"
-
-        return f"""
-            ({multiplier_expr("n.trust_tier", ranking_cfg["trust"])})
-            * ({multiplier_expr("n.status", ranking_cfg["status"])})
-            * ({multiplier_expr("n.layer", ranking_cfg.get("domain", {}))})
-        """
-
-    @staticmethod
-    def _build_search_filters(
-        *,
-        domain: str | None,
-        type_: str | None,
-        status: str | None,
-        trust: str | None,
-        tag: str | None,
-        limit: int,
-    ) -> tuple[list[str], dict[str, Any]]:
-        """Build the common `WHERE` predicates and query parameters for `search()`."""
-        where_clauses = ["n.parse_error IS NULL"]
-        params: dict[str, Any] = {"limit": limit}
-
-        if domain:
-            where_clauses.append("n.layer = :domain")
-            params["domain"] = domain
-        else:
-            where_clauses.append("n.layer != 'raw'")
-
-        if type_:
-            where_clauses.append("n.type = :type")
-            params["type"] = type_
-        if status:
-            where_clauses.append("n.status = :status")
-            params["status"] = status
-        if trust:
-            where_clauses.append("n.trust_tier = :trust")
-            params["trust"] = trust
-        if tag:
-            # Exact, whole-tag containment against the space-joined column. This is
-            # unambiguous only because tags may not contain whitespace (§3.1).
-            # Stored tags are canonically lowercase, so fold the probe to match.
-            where_clauses.append("(instr(' ' || n.tags || ' ', ' ' || :tag || ' ') > 0)")
-            params["tag"] = tag.lower()
-
-        return where_clauses, params
-
-    @staticmethod
-    def _search_filter_only(
-        conn: sqlite3.Connection,
-        epistemic_mult_expr: str,
-        where_clauses: list[str],
-        params: dict[str, Any],
-    ) -> list[sqlite3.Row]:
-        """Run a filter-only search against `notes` ordered by epistemic multipliers (§4.4)."""
-        sql = f"""
-            SELECT n.cid,
-                   n.title,
-                   n.description,
-                   n.type,
-                   n.status,
-                   n.trust_tier,
-                   {epistemic_mult_expr} AS score,
-                   COALESCE(NULLIF(n.description, ''), substr(n.body, 1, 120), '') AS snippet
-            FROM notes n
-            WHERE {" AND ".join(where_clauses)}
-            ORDER BY score DESC, n.cid ASC
-            LIMIT :limit;
-        """
-        return conn.execute(sql, params).fetchall()
-
-    @staticmethod
-    def _search_fts(
-        conn: sqlite3.Connection,
-        clean_query: str,
-        domain: str | None,
-        limit: int,
-        epistemic_mult_expr: str,
-        where_clauses: list[str],
-        params: dict[str, Any],
-    ) -> list[sqlite3.Row]:
-        """Run an FTS5 BM25 search with field-presence floor and multi-term OR fill (§4.4)."""
-        # Searching the raw layer reads a different index (see _fts_table). The
-        # table name is chosen here, never interpolated from caller input.
-        fts = _fts_table(domain)
-        field_hits = " + ".join(
-            f"(CASE WHEN instr(highlight({fts}, {idx}, char(1), char(2)), char(1)) > 0 THEN {w} ELSE 0.0 END)"
-            for idx, w in enumerate(FTS_COLUMN_WEIGHTS)
-        )
-        score_expr = f"""
-            ((-bm25({fts}, {FTS_COLUMN_WEIGHTS[0]}, {FTS_COLUMN_WEIGHTS[1]}, {FTS_COLUMN_WEIGHTS[2]}, {FTS_COLUMN_WEIGHTS[3]}))
-             + ({FTS_FIELD_HIT_FLOOR} * ({field_hits})))
-            * {epistemic_mult_expr}
-        """
-        fts_params = {**params, "query": clean_query}
-        sql = f"""
-            SELECT n.cid,
-                   n.title,
-                   n.description,
-                   n.type,
-                   n.status,
-                   n.trust_tier,
-                   {score_expr} AS score,
-                   snippet({fts}, 2, '<b>', '</b>', '...', 15) AS snippet
-            FROM {fts}
-            JOIN notes n ON n.id = {fts}.rowid
-            WHERE {" AND ".join([f"{fts} MATCH :query", *where_clauses])}
-            ORDER BY score DESC, n.cid ASC
-            LIMIT :limit;
-        """
-        try:
-            rows = conn.execute(sql, fts_params).fetchall()
-            fallback_query = or_fallback_fts5_query(clean_query)
-            if fallback_query is not None and len(rows) < limit:
-                # All-terms matches keep the top slots; partial matches only fill what is left.
-                seen = {r["cid"] for r in rows}
-                extra = conn.execute(sql, {**fts_params, "query": fallback_query}).fetchall()
-                rows += [r for r in extra if r["cid"] not in seen][: limit - len(rows)]
-            return rows
-        except sqlite3.OperationalError as e:
-            # Only a MATCH expression FTS5 cannot parse means "no results". A
-            # lock or I/O failure must propagate so classify() reports it as
-            # retryable instead of as an empty vault (§5.4).
-            if "fts5: syntax error" in str(e):
-                return []
-            raise
-
     def search(
         self,
         query: str = "",
@@ -1212,67 +1118,83 @@ class VaultCache:
         limit: int = 20,
     ) -> list[SearchResult]:
         """Perform BM25 or filter-only search across cognitive domain notes with epistemic rank boosting (§4.4)."""
-        # The OR fill compares against `limit`, so it must be a real count: a
-        # string broke the comparison and a negative one (SQLite's "no limit")
-        # silently skipped the fill.
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
-            raise ValueError(f"limit must be a positive integer, got {limit!r}")
-        if query is not None and not isinstance(query, str):
-            raise ValueError("query must be a string")
-
-        raw_query = (query or "").strip()
-        filter_only = not raw_query
-        if filter_only and not any((type_, status, trust, tag, domain)):
-            raise ValueError(
-                "Pass a non-empty search query or at least one filter (domain, type, status, trust, tag)"
-            )
-
-        clean_query = "" if filter_only else sanitize_fts5_query(raw_query)
-        if not filter_only and not clean_query:
-            # Nothing searchable survived (`---`, `"*"`): with a filter the
-            # caller still said what they want, so answer that rather than `[]`.
-            if not any((type_, status, trust, tag, domain)):
-                return []
-            filter_only = True
-
-        # A pure read like every getter here: entry points scan first (§4.3).
-        conn = self.get_connection()
-        epistemic_mult_expr = self._epistemic_multiplier_sql(self.vault.config["ranking"])
-        where_clauses, params = self._build_search_filters(
-            domain=domain,
+        return execute_search(
+            self.get_connection(),
+            self.vault.config["ranking"],
+            query=query,
             type_=type_,
             status=status,
             trust=trust,
             tag=tag,
+            domain=domain,
             limit=limit,
         )
-
-        if filter_only:
-            rows = self._search_filter_only(conn, epistemic_mult_expr, where_clauses, params)
-        else:
-            rows = self._search_fts(conn, clean_query, domain, limit, epistemic_mult_expr, where_clauses, params)
-
-        return [
-            SearchResult(
-                cid=row["cid"],
-                title=row["title"],
-                description=row["description"],
-                type=row["type"],
-                status=row["status"],
-                trust_tier=row["trust_tier"],
-                score=float(row["score"]),
-                snippet=row["snippet"],
-            )
-            for row in rows
-        ]
 
     def get_source_citers(self, raw_rel_path: str) -> list[dict[str, Any]]:
         """Notes whose `sources:` resolve to the raw/ file, with title, type and trust tier (§5.1)."""
         return raw_citers(self.get_connection(), raw_rel_path)
 
+    def get_note_graph(self, target_cid: str, *, limit: int | None = None) -> dict[str, Any] | None:
+        """Compute 1-hop and 2-hop neighborhoods, co-citations, and bibliographic coupling (§5.1, §5.3)."""
+        return get_note_graph(self.get_connection(), target_cid, limit=limit)
+
+    def get_moc_overview(self, limit: int) -> dict[str, Any]:
+        """Every wiki MOC's link counts and the largest overlaps between MOCs (§5.1 `vault_graph`)."""
+        return moc_overview(self.get_connection(), limit)
+
+    def entry_point_rows(self) -> list[sqlite3.Row]:
+        """Every wiki MOC (stem, rel_path, description), sorted by stem (§2.5)."""
+        return entry_point_rows(self.get_connection())
+
+    def unfiled_note_rows(self) -> list[sqlite3.Row]:
+        """Wiki notes no MOC reaches by forward link at any depth, sorted by stem (§2.5)."""
+        return unfiled_note_rows(self.get_connection())
+
     def unprocessed_raw_paths(self) -> list[str]:
         """Raw files no note's `sources:` resolves to, sorted (§2.5, §4.5)."""
         return unprocessed_raw_paths(self.get_connection())
+
+    def verification_debt_rows(self) -> list[DebtRow]:
+        """Active stale-verified notes, sorted by CID, each split by who owes it (§3.4, §4.5)."""
+        return verification_debt_rows(self.get_connection())
+
+    def lint_note_rows(self) -> list[sqlite3.Row]:
+        """Every non-raw note row the scan indexed, ordered by path for deterministic lint findings (§6.3)."""
+        return self.get_connection().execute(
+            """
+            SELECT cid, rel_path, layer, body, frontmatter_json, parse_error, body_hash, trust_tier
+            FROM notes
+            WHERE layer != 'raw'
+            ORDER BY rel_path;
+            """
+        ).fetchall()
+
+    def lint_link_rows(self) -> list[sqlite3.Row]:
+        """Every extracted link edge for Gate 3 link/anchor validation (§6.3)."""
+        return self.get_connection().execute(
+            "SELECT source_cid, target_raw, target_cid, anchor, kind FROM links;"
+        ).fetchall()
+
+    def unresolved_source_rows(self) -> list[sqlite3.Row]:
+        """Every `sources:` entry that did not resolve to an indexed raw/ file for Gate 4 (§6.3)."""
+        return self.get_connection().execute(
+            "SELECT source_cid, raw_path FROM sources WHERE resolved = 0;"
+        ).fetchall()
+
+    def orphan_wiki_paths(self) -> list[str]:
+        """Vault-relative paths of parseable wiki notes with zero inbound and zero outbound links (§6.3)."""
+        rows = self.get_connection().execute(
+            """
+            SELECT n.rel_path
+            FROM notes n
+            WHERE n.layer = 'wiki'
+              AND n.parse_error IS NULL
+              AND NOT EXISTS (SELECT 1 FROM links l1 WHERE l1.source_cid = n.cid)
+              AND NOT EXISTS (SELECT 1 FROM links l2 WHERE l2.target_cid = n.cid)
+            ORDER BY n.rel_path;
+            """
+        ).fetchall()
+        return [r["rel_path"] for r in rows]
 
     def get_status(self) -> dict[str, Any]:
         """Return aggregate epistemic health metrics."""

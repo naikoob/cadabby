@@ -14,7 +14,7 @@ from typing import Any
 from urllib.parse import quote
 
 from cadabby.domain import Note
-from cadabby.errors import AmbiguousNoteError
+from cadabby.errors import AlreadyExistsError, AmbiguousNoteError, InvalidArgumentError, NotFoundError
 from cadabby.frontmatter import FrontmatterParseError, split_frontmatter
 from cadabby.graph import (
     LINK_KIND_IMAGE,
@@ -160,7 +160,7 @@ def _write_steps(moved: list[_MovedNote]) -> list[tuple[str, _MovedNote]]:
             pending.remove(item)
             progressed = True
         if not progressed:
-            raise ValueError(
+            raise InvalidArgumentError(
                 "Move refused: destinations form a cycle ("
                 + ", ".join(f"{m.source.cid} -> {m.destination.cid}" for m in pending)
                 + "); move in two steps through a temporary name"
@@ -280,7 +280,7 @@ class MoveNoteUseCase:
         if isinstance(cid_or_path, str) and cid_or_path.rstrip().endswith("/"):
             folder_prefix = self._folder_prefix(cid_or_path, cids)
             if folder_prefix is None:
-                raise FileNotFoundError(f"Note not found: {cid_or_path.strip()} (names must be vault-relative)")
+                raise NotFoundError(f"Note not found: {cid_or_path.strip()} (names must be vault-relative)")
         else:
             try:
                 source = load_existing_note(self.storage, cid_or_path, before)
@@ -343,7 +343,7 @@ class MoveNoteUseCase:
         """Write the plan destination-first, so a crash leaves a duplicate, never a lost note."""
         _require_actor(actor)
         if plan.blocked:
-            raise ValueError("Move refused: " + "; ".join(plan.blocked))
+            raise InvalidArgumentError("Move refused: " + "; ".join(plan.blocked))
         steps = _write_steps(plan.moved)  # computed before any write; raises on a cycle
         undo: list[Callable[[], None]] = []
         retired: set[str] = set()
@@ -355,7 +355,7 @@ class MoveNoteUseCase:
                     continue
                 destination = item.destination
                 if self.storage.note_exists(destination.cid):
-                    raise FileExistsError(f"Note already exists at {destination.rel_path}")
+                    raise AlreadyExistsError(f"Note already exists at {destination.rel_path}")
                 self.storage.save_note(destination)
                 undo.append(self._undo_create(destination.cid))
             for rw in plan.rewrites:
@@ -426,7 +426,7 @@ class MoveNoteUseCase:
                 return real_prefixes[0], folded
             raise AmbiguousNoteError(cid_or_path.strip(), folded)
         if raw.endswith("/"):
-            raise FileNotFoundError(f"Note not found: {cid_or_path.strip()} (no notes under '{prefix}/')")
+            raise NotFoundError(f"Note not found: {cid_or_path.strip()} (no notes under '{prefix}/')")
         return None
 
     def _leftover_folder_files(self, src_prefix: str, folder_cids: Sequence[str]) -> list[str]:
@@ -448,10 +448,10 @@ class MoveNoteUseCase:
         """
         raw, raw_parts = self._parse_destination_path(to)
         if raw.lower().endswith(".md"):
-            raise ValueError(f"Cannot move folder '{src_prefix}/' to a single file '{to}'")
+            raise InvalidArgumentError(f"Cannot move folder '{src_prefix}/' to a single file '{to}'")
         dst_prefix = "/".join(raw_parts)
         if dst_prefix == src_prefix:
-            raise ValueError(f"'{src_prefix}/' is already at '{dst_prefix}/'")
+            raise InvalidArgumentError(f"'{src_prefix}/' is already at '{dst_prefix}/'")
 
         moving_set = frozenset(folder_cids)
         moved_items: list[_MovedNote] = []
@@ -463,7 +463,7 @@ class MoveNoteUseCase:
                 unreadable.append(f"{cid_to_path(old_cid)} cannot be parsed ({exc}); fix it or move it out first")
                 continue
             if src_note is None:
-                raise FileNotFoundError(f"Note not found: {cid_to_path(old_cid)}")
+                raise NotFoundError(f"Note not found: {cid_to_path(old_cid)}")
             suffix = old_cid[len(src_prefix) + 1 :]
             new_rel = cid_to_path(f"{dst_prefix}/{suffix}")
             new_cid = path_to_cid(new_rel)
@@ -496,13 +496,13 @@ class MoveNoteUseCase:
             folder = "/".join(raw_parts)
             is_folder = any(c.startswith(folder + "/") for c in cids) or self.vault.has_folder(folder)
             if is_folder and not raw.lower().endswith(".md"):
-                raise ValueError(
+                raise InvalidArgumentError(
                     f"'{to}' is an existing folder: end it with '/' to move the note into it, "
                     f"or add '.md' to name a file"
                 )
         rel = with_md_suffix("/".join(raw_parts))
         if path_to_cid(rel) == source.cid:
-            raise ValueError(f"'{source.rel_path}' is already at '{rel}'")
+            raise InvalidArgumentError(f"'{source.rel_path}' is already at '{rel}'")
         _check_new_location(self.storage, self.vault, rel, source.type, verb="move", replacing=source.cid)
         return rel
 
@@ -512,7 +512,7 @@ class MoveNoteUseCase:
         new_to_old = {v: k for k, v in moves.items()}
         for item in items:
             if not isinstance(item, str) or not item.strip():
-                raise ValueError("approve_stale entries must be non-empty note names")
+                raise InvalidArgumentError("approve_stale entries must be non-empty note names")
             named = _strip_dot_slash(normalize_link_target(item.strip()))
             dest_cid = path_to_cid(cid_to_path(named)) if named else ""
             if dest_cid in new_to_old:

@@ -15,6 +15,7 @@ from cadabby.constants import (
     BODY_HASH_PREFIX,
     RFC3339_TIMESTAMP_PATTERN,
 )
+from cadabby.errors import InvalidArgumentError
 
 # Always fullmatch: the patterns end in `$`, which also matches before a
 # trailing newline, so `.match` accepted "human:bob\n".
@@ -101,8 +102,8 @@ def canonicalize_tags(tags: Any) -> list[str]:
     """Lowercase and de-duplicate tags, preserving first-seen order (§3.2).
 
     Raises:
-        ValueError: if a tag contains whitespace. Lowercasing cannot repair that,
-            and writing it would corrupt the `--tag` facet (§4.2).
+        InvalidArgumentError: if a tag contains whitespace. Lowercasing cannot
+            repair that, and writing it would corrupt the `--tag` facet (§4.2).
     """
     if not isinstance(tags, list):
         return []
@@ -111,9 +112,9 @@ def canonicalize_tags(tags: Any) -> list[str]:
     seen: set[str] = set()
     for tag in tags:
         if not isinstance(tag, str):
-            raise ValueError(f"Invalid tag {tag!r}. Tags must be strings")
+            raise InvalidArgumentError(f"Invalid tag {tag!r}. Tags must be strings")
         if tag_has_whitespace(tag):
-            raise ValueError(
+            raise InvalidArgumentError(
                 f"Invalid tag '{tag}'. Tags must not contain whitespace; "
                 "use kebab-case (e.g. 'machine-learning')"
             )
@@ -197,7 +198,7 @@ def ledger_line(message: str, actor: str | None = None, *, at_iso: str | None = 
     it must match the §3.4 grammar; both ledgers apply this one rule.
     """
     if actor is not None and not is_valid_actor(actor):
-        raise ValueError(f"Invalid actor format {actor!r} for a ledger entry")
+        raise InvalidArgumentError(f"Invalid actor format {actor!r} for a ledger entry")
     flat = " ".join(message.splitlines())
     prefix = f"[{at_iso or utc_now_iso()}]"
     if actor:

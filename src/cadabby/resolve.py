@@ -12,7 +12,7 @@ from pathlib import Path
 from cadabby.adapters.memory_storage import InMemoryVaultLayout
 from cadabby.constants import ACTOR_PATTERN, DIR_RAW, FILE_AGENTS
 from cadabby.domain import Note
-from cadabby.errors import AmbiguousNoteError
+from cadabby.errors import AlreadyExistsError, AmbiguousNoteError, InvalidArgumentError, NotFoundError
 from cadabby.graph import LinkTargetIndex, normalize_link_target
 from cadabby.okf import is_valid_actor
 from cadabby.ports import NoteStoragePort, VaultLayoutPort
@@ -53,13 +53,13 @@ def _vault_name_parts(text: str) -> tuple[str, list[str]] | None:
 def _parse_relative_target(raw_input: str, *, absolute_error: str) -> tuple[str, list[str]]:
     """Validate and split a vault-relative target path into (normalized_raw, parts)."""
     if not isinstance(raw_input, str) or not raw_input.strip():
-        raise ValueError(absolute_error)
+        raise InvalidArgumentError(absolute_error)
     stripped = _strip_dot_slash(raw_input)
     if stripped.startswith("/") or Path(stripped).is_absolute():
-        raise ValueError(absolute_error)
+        raise InvalidArgumentError(absolute_error)
     parsed = _vault_name_parts(raw_input)
     if parsed is None:
-        raise ValueError(f"Path traversal detected in '{raw_input}': must not contain '.' or '..'")
+        raise InvalidArgumentError(f"Path traversal detected in '{raw_input}': must not contain '.' or '..'")
     return parsed
 
 
@@ -93,7 +93,7 @@ def _require_actor(actor: str) -> None:
     the ledger would leave the note written and the call failed.
     """
     if not is_valid_actor(actor):
-        raise ValueError(f"Invalid actor format {actor!r}. Must match {ACTOR_PATTERN}")
+        raise InvalidArgumentError(f"Invalid actor format {actor!r}. Must match {ACTOR_PATTERN}")
 
 
 def resolve_note_cid(
@@ -115,11 +115,11 @@ def resolve_note_cid(
     many names pass `cids` (and `resolver`) once instead of relisting per name.
     """
     if not isinstance(cid_or_path, str) or not cid_or_path.strip():
-        raise ValueError("Note CID or path must be a non-empty string")
+        raise InvalidArgumentError("Note CID or path must be a non-empty string")
     shown = cid_or_path.strip()
     parsed = _vault_name_parts(cid_or_path)
     if parsed is None:
-        raise FileNotFoundError(f"Note not found: {shown} (names must be vault-relative)")
+        raise NotFoundError(f"Note not found: {shown} (names must be vault-relative)")
     raw = parsed[0]
 
     listed = list(cids) if cids is not None else list(storage.list_note_cids())
@@ -132,7 +132,7 @@ def resolve_note_cid(
         return found[0]
     if found:
         raise AmbiguousNoteError(shown, found)
-    raise FileNotFoundError(f"Note not found: {shown}")
+    raise NotFoundError(f"Note not found: {shown}")
 
 
 def load_existing_note(
@@ -140,11 +140,11 @@ def load_existing_note(
     cid_or_path: str,
     resolver: LinkTargetIndex | None = None,
 ) -> Note:
-    """The note `cid_or_path` names, resolved by `resolve_note_cid`; FileNotFoundError if it is gone."""
+    """The note `cid_or_path` names, resolved by `resolve_note_cid`; NotFoundError if it is gone."""
     cid = resolve_note_cid(storage, cid_or_path, resolver)
     note = storage.get_note(cid)
     if note is None:
-        raise FileNotFoundError(f"Note not found: {cid_to_path(cid)}")
+        raise NotFoundError(f"Note not found: {cid_to_path(cid)}")
     return note
 
 
@@ -199,17 +199,17 @@ def _check_new_location(
     """
     why = vault.note_path_violation(rel_path, for_write=True) or _name_violation(rel_path)
     if why:
-        raise ValueError(f"Cannot {verb} at '{rel_path}': {why}")
+        raise InvalidArgumentError(f"Cannot {verb} at '{rel_path}': {why}")
 
     domain = path_to_layer(rel_path)
     domain_def = vault.discover_domains().get(domain)
     if domain_def and domain_def.manifest_error:
-        raise ValueError(
+        raise InvalidArgumentError(
             f"Cannot {verb} into domain '{domain}': its {FILE_AGENTS} is invalid "
             f"({domain_def.manifest_error}). Fix the manifest first"
         )
     if domain_def and domain_def.allowed_types is not None and type_ not in domain_def.allowed_types:
-        raise ValueError(
+        raise InvalidArgumentError(
             f"Invalid note type '{type_}'. In domain '{domain}', allowed types are {domain_def.allowed_types}"
         )
 
@@ -217,15 +217,15 @@ def _check_new_location(
     excluded = replacing_group | ({replacing} if replacing is not None else set())
     others = [c for c in storage.list_note_cids() if c not in excluded]
     if cid in others:
-        raise FileExistsError(f"Note already exists at {rel_path}")
+        raise AlreadyExistsError(f"Note already exists at {rel_path}")
     clash = next((c for c in others if c.casefold() == cid.casefold()), None)
     if clash is not None:
-        raise FileExistsError(
+        raise AlreadyExistsError(
             f"Note already exists at {cid_to_path(clash)} (differs from '{rel_path}' only by letter case)"
         )
     # The listing walks real folders only; the storage also sees files reached
     # through a symlinked folder, which a write would otherwise overwrite.
     own_spelling = any(cid.casefold() == r.casefold() for r in excluded)
     if not own_spelling and storage.note_exists(cid):
-        raise FileExistsError(f"Note already exists at {rel_path}")
+        raise AlreadyExistsError(f"Note already exists at {rel_path}")
 

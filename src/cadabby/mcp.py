@@ -16,7 +16,13 @@ from typing import Any, Self
 from cadabby import __version__
 from cadabby.cache import VaultCache
 from cadabby.constants import DIR_WIKI
-from cadabby.errors import HUMAN_ATTESTATION_REFUSED, INVALID_ARGUMENT, UNKNOWN_TOOL, classify
+from cadabby.errors import (
+    HUMAN_ATTESTATION_REFUSED,
+    INVALID_ARGUMENT,
+    UNKNOWN_TOOL,
+    InvalidArgumentError,
+    classify,
+)
 from cadabby.lint import status_report
 from cadabby.ops import graph_view, ground_notes, move_note, scaffold_note_result, update_note_result, verify_note
 from cadabby.vault import Vault
@@ -674,7 +680,7 @@ class McpServer:
             domain_name = uri[len("domain://") : -len("/directives")].strip("/")
             domain_def = domains.get(domain_name)
             if domain_def is None:
-                raise ValueError(f"Unknown domain '{domain_name}' (see vault://domains)")
+                raise InvalidArgumentError(f"Unknown domain '{domain_name}' (see vault://domains)")
             if domain_def is not None and domain_def.directives_markdown:
                 return {
                     "contents": [
@@ -695,7 +701,7 @@ class McpServer:
                 ]
             }
 
-        raise ValueError(f"Unknown resource URI: {uri}")
+        raise InvalidArgumentError(f"Unknown resource URI: {uri}")
 
     def dispatch_request(self, req: dict[str, Any]) -> dict[str, Any] | None:
         """Route a parsed JSON-RPC 2.0 request object and return its response (or None for notifications)."""

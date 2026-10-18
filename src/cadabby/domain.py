@@ -16,7 +16,7 @@ from typing import Any
 from urllib.parse import unquote
 
 from cadabby.constants import ACTOR_PATTERN
-from cadabby.errors import HumanAttestationRefusedError
+from cadabby.errors import HumanAttestationRefusedError, InvalidArgumentError
 from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter, serialize_frontmatter
 from cadabby.okf import compute_body_hash, derive_trust_tier, is_valid_actor, utc_now_iso
 
@@ -257,7 +257,7 @@ def validate_frontmatter_patch(patch: dict[str, Any] | None) -> None:
     if patch is None:
         return
     if not isinstance(patch, dict):
-        raise ValueError("patch_frontmatter must be an object of field: value pairs")
+        raise InvalidArgumentError("patch_frontmatter must be an object of field: value pairs")
     owned = [k for k in ENGINE_OWNED_FIELDS if k in patch]
     if owned:
         entries = patch.get("verified")
@@ -266,13 +266,13 @@ def validate_frontmatter_patch(patch: dict[str, Any] | None) -> None:
             raise HumanAttestationRefusedError(
                 "A human:* attestation cannot be written by patching frontmatter; the person runs cadabby verify --human."
             )
-        raise ValueError(
+        raise InvalidArgumentError(
             f"{', '.join(owned)} {'is' if len(owned) == 1 else 'are'} engine-owned: attest with vault_verify_note "
             "(or cadabby verify), and never remove attestation history"
         )
     for key in _STRING_FIELDS:
         if patch.get(key) is not None and not isinstance(patch[key], str):
-            raise ValueError(f"'{key}' must be a string")
+            raise InvalidArgumentError(f"'{key}' must be a string")
 
 
 @dataclass
@@ -369,10 +369,10 @@ class Note:
         are engine-owned. Zero or multiple matches raise rather than guess.
         """
         if not old:
-            raise ValueError("replace_text: 'old' must be a non-empty string")
+            raise InvalidArgumentError("replace_text: 'old' must be a non-empty string")
         count = self.body.count(old)
         if count != 1:
-            raise ValueError(
+            raise InvalidArgumentError(
                 f"replace_text: 'old' must match exactly once in the body of {self.rel_path} "
                 f"(matched {count} times); include more surrounding text to make it unique"
             )
@@ -390,7 +390,7 @@ class Note:
             (attestation_dict, derived_trust_tier, already_verified)
         """
         if not is_valid_actor(actor):
-            raise ValueError(f"Invalid actor format '{actor}'. Must match {ACTOR_PATTERN}")
+            raise InvalidArgumentError(f"Invalid actor format '{actor}'. Must match {ACTOR_PATTERN}")
 
         current_hash = self.body_hash
         verified_list = self.frontmatter.get("verified")

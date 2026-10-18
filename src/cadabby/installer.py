@@ -30,7 +30,7 @@ from cadabby.constants import (
     FILE_STYLE,
     LEDGER_HEADER,
 )
-from cadabby.errors import EXIT_ENVIRONMENT, EXIT_OK, INVALID_ARGUMENT, CadabbyError
+from cadabby.errors import EXIT_ENVIRONMENT, EXIT_OK, INVALID_ARGUMENT, CadabbyError, InvalidArgumentError
 from cadabby.fsutil import atomic_replace_checked, atomic_write, compute_bytes_sha256, contained
 from cadabby.vault import obsidian_template_dir
 
@@ -704,7 +704,7 @@ def run_install(
     target_claude = claude or all_targets
 
     if not target_ag and not target_claude:
-        raise ValueError("Please specify a target harness: --antigravity, --claude, or --all")
+        raise InvalidArgumentError("Please specify a target harness: --antigravity, --claude, or --all")
 
     # One --path cannot serve both harnesses: Antigravity wants a plugin
     # directory and Claude wants a JSON config file, so no single value is
@@ -712,7 +712,7 @@ def run_install(
     # the targets are applied in sequence -- Antigravity would create its
     # directory, Claude would then fail on it, and there is no rollback.
     if dest_path is not None and target_ag and target_claude:
-        raise ValueError(
+        raise InvalidArgumentError(
             "--path takes a single destination, but this installs to two targets of "
             "different kinds (an Antigravity plugin directory and a Claude JSON config "
             "file). Run the command once per harness."

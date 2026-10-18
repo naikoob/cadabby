@@ -21,8 +21,12 @@ from cadabby.errors import (
     EXIT_TRANSIENT,
     EXIT_UNEXPECTED,
     EXIT_USAGE,
+    AlreadyExistsError,
+    AmbiguousNoteError,
     CadabbyError,
+    InvalidArgumentError,
     LockTimeoutError,
+    NotFoundError,
     VaultConfigError,
     VaultConflictError,
     classify,
@@ -43,8 +47,12 @@ class TestClassification(unittest.TestCase):
             (LockTimeoutError("held"), "LOCK_TIMEOUT", True),
             (VaultConfigError("bad json"), "CONFIG_INVALID", False),
             (FrontmatterParseError("bad", 3), "FRONTMATTER_UNPARSEABLE", False),
+            (InvalidArgumentError("bad arg"), "INVALID_ARGUMENT", False),
+            (AmbiguousNoteError("x", ["a", "b"]), "INVALID_ARGUMENT", False),
+            (NotFoundError("gone"), "NOT_FOUND", False),
+            (AlreadyExistsError("there"), "ALREADY_EXISTS", False),
         ):
-            with self.subTest(code=code):
+            with self.subTest(code=code, exc=type(exc).__name__):
                 info = classify(exc)
                 self.assertEqual(info.code, code)
                 self.assertEqual(info.retryable, retryable)
@@ -53,13 +61,16 @@ class TestClassification(unittest.TestCase):
         """OSError is last in the table because the others subclass it.
 
         Reordering silently turns every missing file into IO_ERROR, which is
-        both wrong and unactionable, and nothing else would notice.
+        both wrong and unactionable, and nothing else would notice. Bare
+        ValueError is NOT in the table: intentional input errors raise
+        InvalidArgumentError, so an unexpected ValueError classifies as INTERNAL.
         """
         self.assertEqual(classify(FileNotFoundError("gone")).code, "NOT_FOUND")
         self.assertEqual(classify(FileExistsError("there")).code, "ALREADY_EXISTS")
         self.assertEqual(classify(PermissionError("nope")).code, "PERMISSION_DENIED")
         self.assertEqual(classify(OSError("disk")).code, "IO_ERROR")
-        self.assertEqual(classify(ValueError("huh")).code, "INVALID_ARGUMENT")
+        self.assertEqual(classify(ValueError("stdlib bug")).code, "INTERNAL")
+        self.assertEqual(classify(InvalidArgumentError("huh")).code, "INVALID_ARGUMENT")
 
     def test_classification_is_total(self):
         """Anything unrecognized is INTERNAL rather than an escaping exception."""
@@ -80,6 +91,9 @@ class TestClassification(unittest.TestCase):
         """vault.py and installer.py catch ValueError; the move must not reroute them."""
         self.assertIsInstance(VaultConfigError("x"), ValueError)
         self.assertIsInstance(FrontmatterParseError("x", 1), ValueError)
+        self.assertIsInstance(InvalidArgumentError("x"), ValueError)
+        self.assertIsInstance(NotFoundError("x"), FileNotFoundError)
+        self.assertIsInstance(AlreadyExistsError("x"), FileExistsError)
         self.assertIsInstance(VaultConfigError("x"), CadabbyError)
 
     def test_conflict_is_not_a_value_error(self):
@@ -95,9 +109,9 @@ def _sample_for(code: str) -> Exception | None:
         "CONFIG_INVALID": VaultConfigError("bad"),
         "FRONTMATTER_UNPARSEABLE": FrontmatterParseError("bad", 1),
         "FRONTMATTER_UNSERIALIZABLE": FrontmatterSerializeError("bad"),
-        "NOT_FOUND": FileNotFoundError("gone"),
-        "ALREADY_EXISTS": FileExistsError("there"),
-        "INVALID_ARGUMENT": ValueError("huh"),
+        "NOT_FOUND": NotFoundError("gone"),
+        "ALREADY_EXISTS": AlreadyExistsError("there"),
+        "INVALID_ARGUMENT": InvalidArgumentError("huh"),
         "PERMISSION_DENIED": PermissionError("nope"),
         "IO_ERROR": OSError("disk"),
         "INTERNAL": RuntimeError("boom"),
@@ -273,6 +287,56 @@ class TestHumanRefusalIsOneCode(unittest.TestCase):
         info = classify(ctx.exception)
         self.assertEqual(info.code, "HUMAN_ATTESTATION_REFUSED")
         self.assertNotIn("MCP", info.message)
+
+
+class TestArchitecturalErrorAndCacheBoundaries(unittest.TestCase):
+    """Pin the Track 1 invariants: typed exceptions, encapsulated SQLite, and cycle-free cache."""
+
+    def test_no_bare_builtin_raises_in_src(self):
+        import ast
+
+        src_root = Path(__file__).resolve().parent.parent / "src" / "cadabby"
+        bare: list[str] = []
+        for path in sorted(src_root.rglob("*.py")):
+            tree = ast.parse(path.read_text("utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
+                    func = node.exc.func
+                    if isinstance(func, ast.Name) and func.id in ("ValueError", "FileNotFoundError", "FileExistsError"):
+                        bare.append(f"{path.relative_to(src_root)}:{node.lineno}:{func.id}")
+        self.assertEqual(bare, [])
+
+    def test_sqlite3_and_raw_connections_stay_inside_cache_and_search(self):
+        import ast
+
+        src_root = Path(__file__).resolve().parent.parent / "src" / "cadabby"
+        sqlite_importers: set[str] = set()
+        get_conn_callers: set[str] = set()
+        for path in sorted(src_root.rglob("*.py")):
+            rel = path.relative_to(src_root).as_posix()
+            tree = ast.parse(path.read_text("utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import) and any(a.name == "sqlite3" for a in node.names):
+                    sqlite_importers.add(rel)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get_connection":
+                    get_conn_callers.add(rel)
+        self.assertEqual(sqlite_importers, {"cache.py", "errors.py", "search.py"})
+        self.assertEqual(get_conn_callers, {"cache.py"})
+
+    def test_cache_has_no_function_level_imports(self):
+        import ast
+
+        cache_path = Path(__file__).resolve().parent.parent / "src" / "cadabby" / "cache.py"
+        tree = ast.parse(cache_path.read_text("utf-8"), filename=str(cache_path))
+        nested_imports = [
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            for child in ast.walk(node)
+            if isinstance(child, (ast.Import, ast.ImportFrom))
+        ]
+        self.assertEqual(nested_imports, [])
+
 
 if __name__ == "__main__":
     unittest.main()

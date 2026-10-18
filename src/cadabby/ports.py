@@ -6,7 +6,7 @@ Defines the contracts between the domain/application core and external infrastru
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from cadabby.domain import DomainDefinition, Note
@@ -97,6 +97,30 @@ class IndexCachePort(Protocol):
 
     def get_source_citers(self, raw_rel_path: str) -> list[dict[str, Any]]:
         """Notes whose `sources:` resolve to `raw_rel_path`."""
+        ...
+
+    def get_note_graph(self, target_cid: str, *, limit: int | None = None) -> dict[str, Any] | None:
+        """Compute 1-hop and 2-hop neighborhoods, co-citations, and bibliographic coupling (§5.1)."""
+        ...
+
+    def get_moc_overview(self, limit: int) -> dict[str, Any]:
+        """Every wiki MOC's link counts and the largest overlaps between MOCs (§5.1)."""
+        ...
+
+    def entry_point_rows(self) -> Sequence[Mapping[str, Any]]:
+        """Every wiki MOC (stem, rel_path, description), sorted by stem (§2.5)."""
+        ...
+
+    def unfiled_note_rows(self) -> Sequence[Mapping[str, Any]]:
+        """Wiki notes no MOC reaches by forward link at any depth, sorted by stem (§2.5)."""
+        ...
+
+    def unprocessed_raw_paths(self) -> Sequence[str]:
+        """Raw files no note's `sources:` resolves to, sorted (§2.5, §4.5)."""
+        ...
+
+    def verification_debt_rows(self) -> Sequence[Any]:
+        """Active stale-verified notes, sorted by CID, each split by who owes it (§3.4, §4.5)."""
         ...
 
     def close(self) -> None:

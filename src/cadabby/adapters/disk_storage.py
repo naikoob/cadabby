@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from cadabby.domain import Note
+from cadabby.errors import InvalidArgumentError, NotFoundError
 from cadabby.frontmatter import FrontmatterParseError
 from cadabby.fsutil import atomic_replace_checked, check_expected_hash, compute_bytes_sha256
 from cadabby.indexer import append_vault_log
@@ -63,14 +64,16 @@ class DiskNoteStorage(NoteStoragePort):
 
     def save_note(self, note: Note, expected_hash: str | None = None) -> None:
         if why := self.vault.note_path_violation(note.rel_path):
-            raise ValueError(f"Cannot save note at '{note.rel_path}': {why}")
+            raise InvalidArgumentError(f"Cannot save note at '{note.rel_path}': {why}")
         # Judged by where the bytes would land (§8): a symlink leaving the vault
         # is refused, and one inside it (even dangling) must point at a place a
         # note may live -- `wiki/x.md -> ../raw/p.md` would write into raw/.
         target = self.vault.contained_path(note.rel_path)
         landing = self.vault.rel_path(target)
         if landing != note.rel_path and (why := self.vault.note_path_violation(landing, for_write=True)):
-            raise ValueError(f"Cannot save note at '{note.rel_path}': it is a symlink to '{landing}', and {why}")
+            raise InvalidArgumentError(
+                f"Cannot save note at '{note.rel_path}': it is a symlink to '{landing}', and {why}"
+            )
         serialized = note.serialize()
         atomic_replace_checked(target, serialized, expected_hash=expected_hash)
 
@@ -80,10 +83,10 @@ class DiskNoteStorage(NoteStoragePort):
     def delete_note(self, cid_or_path: str, expected_hash: str | None = None, *, prune_empty_dirs: bool = False) -> None:
         rel_path = cid_to_path(cid_or_path)
         if why := self.vault.note_path_violation(rel_path):
-            raise ValueError(f"Cannot delete '{rel_path}': {why}")
+            raise InvalidArgumentError(f"Cannot delete '{rel_path}': {why}")
         target = self.vault.abs_path(rel_path)
         if not target.is_relative_to(self.vault.root) or not target.is_file():
-            raise FileNotFoundError(f"Note not found: {rel_path}")
+            raise NotFoundError(f"Note not found: {rel_path}")
         if expected_hash is not None:
             check_expected_hash(compute_bytes_sha256(target.read_bytes()), expected_hash, rel_path)
         # Unlink the path as named, not `target`: abs_path() resolves symlinks,
