@@ -844,5 +844,43 @@ class TestMoveNoteInMemory(unittest.TestCase):
             InMemoryNoteStorage().save_note(Note(cid="../outside", rel_path="../outside.md"))
 
 
+class TestMoveRollbackOrder(unittest.TestCase):
+    """T4/M25: undo runs in reverse, or an overlapping folder shift loses a note."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = copy_demo_vault(Path(self.tmp.name) / "demo-vault")
+        self.vault = Vault(self.root)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_a_failed_overlapping_shift_restores_every_byte(self):
+        files = {"projects/a/x.md": _fm("Outer") + "# Outer\n", "projects/a/b/x.md": _fm("Inner") + "# Inner\n"}
+        for rel, text in files.items():
+            (self.root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / rel).write_text(text, "utf-8")
+        storage = DiskNoteStorage(self.vault)
+        uc = MoveNoteUseCase(storage, FileLedger(self.vault), vault=self.vault)
+        plan = uc.plan("projects/a/", "projects/a/b/")
+        real_delete = storage.delete_note
+        deletes = []
+
+        def failing_delete(cid, expected_hash=None, *, prune_empty_dirs=False):
+            deletes.append(cid)
+            if len(deletes) == 2:
+                raise OSError("disk vanished")
+            return real_delete(cid, expected_hash=expected_hash, prune_empty_dirs=prune_empty_dirs)
+
+        storage.delete_note = failing_delete
+        with self.assertRaises(OSError):
+            uc.apply(plan, actor="agent:test")
+        storage.delete_note = real_delete
+        for rel, text in files.items():
+            with self.subTest(rel=rel):
+                self.assertEqual((self.root / rel).read_text("utf-8"), text)
+        self.assertFalse((self.root / "projects/a/b/b").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

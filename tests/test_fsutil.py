@@ -312,6 +312,65 @@ class TestWriteHardening(unittest.TestCase):
         self.assertLess(time.monotonic() - start, 0.5)
 
 
+class TestAtomicWriteIsAtomic(unittest.TestCase):
+    """T4: M12, M15 and M39 survived because only the happy path was tested."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp_dir.name).resolve()
+        self.target = self.dir / "note.md"
+        self.target.write_text("old bytes\n", "utf-8")
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def test_a_failure_before_the_rename_leaves_the_old_bytes(self):
+        from unittest import mock
+
+        import cadabby.fsutil as fsutil
+
+        with mock.patch.object(fsutil.os, "replace", side_effect=OSError("power cut")):
+            with self.assertRaises(OSError):
+                atomic_write(self.target, "new bytes\n")
+        self.assertEqual(self.target.read_text("utf-8"), "old bytes\n")
+        self.assertEqual(list(self.dir.glob(".tmp_*")), [])
+
+    def test_the_target_is_replaced_by_a_new_inode(self):
+        before = self.target.stat().st_ino
+        atomic_write(self.target, "new bytes\n")
+        self.assertNotEqual(self.target.stat().st_ino, before, "written in place, not swapped in")
+
+    def test_data_is_fsynced_before_the_rename_and_the_directory_after(self):
+        from unittest import mock
+
+        import cadabby.fsutil as fsutil
+
+        calls = []
+        real_fsync, real_replace, real_dir = os.fsync, os.replace, fsutil.fsync_dir
+
+        with (
+            mock.patch.object(fsutil.os, "fsync", side_effect=lambda fd: (calls.append("fsync"), real_fsync(fd))[1]),
+            mock.patch.object(fsutil.os, "replace", side_effect=lambda a, b: (calls.append("replace"), real_replace(a, b))[1]),
+            mock.patch.object(fsutil, "fsync_dir", side_effect=lambda d: (calls.append("fsync_dir"), real_dir(d))[1]),
+        ):
+            atomic_write(self.target, "new bytes\n")
+        self.assertEqual([c for c in calls if c in ("fsync", "replace", "fsync_dir")][:3], ["fsync", "replace", "fsync_dir"])
+
+    def test_a_dead_holder_with_a_fresh_timestamp_is_stale(self):
+        """T4/M16: a crashed writer must not block everyone for stale_age."""
+        import subprocess
+        import sys
+
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        child.wait()
+        lock = self.dir / "vault.lock"
+        lock.write_text(f"{child.pid}:{time.time():.3f}\n", "utf-8")
+        start = time.monotonic()
+        with advisory_lock(lock, timeout=0.5, stale_age=60.0):
+            pass
+        self.assertLess(time.monotonic() - start, 0.5)
+
+
 if __name__ == "__main__":
     unittest.main()
 

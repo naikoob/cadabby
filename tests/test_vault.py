@@ -19,6 +19,7 @@ from cadabby.vault import (
     path_to_cid,
     path_to_layer,
 )
+import tests.helpers  # noqa: F401 -- T1: scrubs CADABBY_VAULT before any test runs
 
 
 class TestVault(unittest.TestCase):

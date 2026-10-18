@@ -782,5 +782,41 @@ class TestMarkdownNoteLinks(unittest.TestCase):
         self.assertIn("LINK_DEAD", [c for c, _ in self._codes_for("wiki/Blank.md")])
 
 
+class TestLintExitCodes(unittest.TestCase):
+    """C4, T3: `cadabby lint` exits 1 on error findings in both output modes, 0 when clean."""
+
+    # The seeded every-code fixture, borrowed rather than inherited so the
+    # taxonomy tests do not run twice.
+    setUp = TestLintTaxonomyIsClosed.setUp
+    tearDown = TestLintTaxonomyIsClosed.tearDown
+    _write = TestLintTaxonomyIsClosed._write
+    _fm = TestLintTaxonomyIsClosed._fm
+    _seed_one_of_everything = TestLintTaxonomyIsClosed._seed_one_of_everything
+
+    def _lint(self, vault_root, *, json_mode):
+        import contextlib
+        import io
+
+        from cadabby.cli import cmd_lint
+        from tests.helpers import DummyArgs
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            return cmd_lint(DummyArgs(vault=str(vault_root), json=json_mode))
+
+    def test_error_findings_exit_1_in_both_modes(self):
+        for json_mode in (False, True):
+            with self.subTest(json=json_mode):
+                self.assertEqual(self._lint(self.vault_root, json_mode=json_mode), 1)
+
+    def test_a_clean_vault_exits_0_in_both_modes(self):
+        clean = Path(self.tmp_dir.name) / "clean"
+        (clean / "wiki").mkdir(parents=True)
+        (clean / ".cadabby.json").write_text('{"vault_name": "clean"}', "utf-8")
+        for json_mode in (False, True):
+            with self.subTest(json=json_mode):
+                self.assertEqual(self._lint(clean, json_mode=json_mode), 0)
+
+
+
 if __name__ == "__main__":
     unittest.main()

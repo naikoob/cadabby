@@ -6,6 +6,7 @@ Pure Python standard library; zero external dependencies.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from collections.abc import Sequence
 from pathlib import Path
@@ -24,6 +25,12 @@ class DummyArgs:
         for k, v in kwargs.items():
             setattr(self, k, v)
 
+
+
+# T1: a developer's exported CADABBY_VAULT must never be the default vault of a
+# test. With it set, install tests that pass no vault wrote shims and plugin
+# files into the developer's real vault. Every test module imports this one.
+os.environ.pop("CADABBY_VAULT", None)
 
 def copy_demo_vault(target_dir: Path | str) -> Path:
     """Create an isolated temporary copy of examples/demo-vault.

@@ -91,6 +91,38 @@ class TestParallelRunner(unittest.TestCase):
         self.assertEqual(exit_code, 0)
 
 
+    def test_targets_never_see_the_developers_vault_and_keep_their_pythonpath(self):
+        """T1: an exported CADABBY_VAULT made install tests write into a real vault."""
+        import os
+        import subprocess
+        from unittest import mock
+
+        from tests.run_parallel import run_single_target
+
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            seen.update(kwargs["env"])
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="Ran 1 test in 0.001s\n\nOK\n")
+
+        with mock.patch.dict(os.environ, {"CADABBY_VAULT": "/home/me/real-vault", "PYTHONPATH": "/mutant/src"}), \
+                mock.patch("tests.run_parallel.subprocess.run", side_effect=fake_run):
+            result = run_single_target(self.repo_root, "tests.test_okf.TestOkf", 1)
+        self.assertNotIn("CADABBY_VAULT", seen)
+        self.assertIn("/mutant/src", seen["PYTHONPATH"].split(os.pathsep))
+        self.assertEqual(result.returncode, 0)
+
+    def test_fewer_tests_than_discovered_is_a_failure(self):
+        import subprocess
+        from unittest import mock
+
+        from tests.run_parallel import run_single_target
+
+        done = subprocess.CompletedProcess([], 0, stdout="", stderr="Ran 2 tests in 0.001s\n\nOK\n")
+        with mock.patch("tests.run_parallel.subprocess.run", return_value=done):
+            self.assertNotEqual(run_single_target(self.repo_root, "tests.test_okf.TestOkf", 5).returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
 

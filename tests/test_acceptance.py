@@ -1026,7 +1026,7 @@ class TestAcceptanceTraceability(unittest.TestCase):
         than deleting it is the point: an empty expectation makes the next
         uncovered criterion a failure instead of a line nobody re-reads.
         Criteria still marked **partial** are deliberately not counted here;
-        they have tests, just not enough, and C1/C2/C4 track that separately.
+        they have tests, just not enough.
         """
         declared = {cid for cid, row in self.rows.items() if self.GAP in row["verified"].lower()}
         self.assertEqual(declared, set())

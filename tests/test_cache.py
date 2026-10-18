@@ -1156,6 +1156,43 @@ class TestCacheLeakIsVisible(unittest.TestCase):
         self.assertTrue(any(issubclass(w.category, ResourceWarning) for w in caught))
 
 
+class TestScanIsOneTransaction(unittest.TestCase):
+    """T4/M27: a scan that fails half-way leaves the cache as it was, and the next scan is healthy."""
+
+    def test_a_failure_mid_scan_rolls_back(self):
+        from unittest import mock
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = copy_demo_vault(Path(tmp.name) / "demo-vault")
+        vault = Vault(root)
+        with VaultCache(vault) as cache:
+            cache.scan()
+            before = sorted(r["cid"] for r in cache.get_connection().execute("SELECT cid FROM notes;"))
+            for name in ("one", "two"):
+                (root / "wiki" / f"{name}.md").write_text(
+                    f"---\ntype: concept\ntitle: {name}\ndescription: d\nstatus: active\n---\n# {name}\n", "utf-8"
+                )
+            real = cache._index_note_file
+            calls = []
+
+            def flaky(*args, **kwargs):
+                calls.append(args[0])
+                if len(calls) == 2:
+                    raise RuntimeError("crash mid-scan")
+                return real(*args, **kwargs)
+
+            with mock.patch.object(cache, "_index_note_file", side_effect=flaky):
+                with self.assertRaises(RuntimeError):
+                    cache.scan()
+            after = sorted(r["cid"] for r in cache.get_connection().execute("SELECT cid FROM notes;"))
+            self.assertEqual(after, before, "the first new note's row was rolled back too")
+            self.assertFalse(cache.get_connection().in_transaction)
+            cache.scan()
+            healed = {r["cid"] for r in cache.get_connection().execute("SELECT cid FROM notes;")}
+        self.assertLessEqual({"wiki/one", "wiki/two"}, healed)
+
+
 if __name__ == "__main__":
     unittest.main()
 

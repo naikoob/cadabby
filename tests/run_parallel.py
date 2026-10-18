@@ -118,7 +118,13 @@ def run_single_target(repo_root: Path, target: str, expected_count: int) -> Targ
     """Run a single test target in a dedicated subprocess."""
     t0 = time.perf_counter()
     env = os.environ.copy()
-    env["PYTHONPATH"] = f"{repo_root / 'src'}:{repo_root}"
+    # Prepended, not replaced: a caller's own PYTHONPATH (a mutated copy of src,
+    # an installed wheel under test) must still be reachable.
+    env["PYTHONPATH"] = os.pathsep.join(
+        p for p in (str(repo_root / "src"), str(repo_root), env.get("PYTHONPATH", "")) if p
+    )
+    # A developer's own vault must never be the default for a test (T1).
+    env.pop("CADABBY_VAULT", None)
 
     proc = subprocess.run(
         [sys.executable, "-m", "unittest", target],
@@ -133,14 +139,21 @@ def run_single_target(repo_root: Path, target: str, expected_count: int) -> Targ
     # e.g., "Ran 12 tests in 0.234s"
     m = re.search(r"Ran (\d+) tests?", proc.stderr)
     test_count = int(m.group(1)) if m else expected_count
+    returncode = proc.returncode
+    stderr = proc.stderr
+    if returncode == 0 and test_count < expected_count:
+        # Fewer tests ran than were discovered: a method silently not collected
+        # is a test that can never fail.
+        returncode = 1
+        stderr += f"\nrun_parallel: ran {test_count} of {expected_count} discovered tests in {target}\n"
 
     return TargetResult(
         target=target,
-        returncode=proc.returncode,
+        returncode=returncode,
         duration=duration,
         test_count=test_count,
         stdout=proc.stdout,
-        stderr=proc.stderr,
+        stderr=stderr,
     )
 
 

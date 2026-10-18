@@ -493,5 +493,18 @@ class TestWriterBodyFidelity(unittest.TestCase):
         self.assertEqual(out, "---\r\ntitle: x\r\n---\r\n# T\r\nbody\r\n")
 
 
+class TestWriterValueNet(unittest.TestCase):
+    """C57, T4/M21: output that parses but to different values is refused, not written."""
+
+    def test_a_value_that_reads_back_differently_is_refused(self):
+        from unittest import mock
+
+        import cadabby.frontmatter as fm
+
+        with mock.patch.object(fm, "format_scalar", side_effect=lambda v: "'x'"):
+            with self.assertRaisesRegex(FrontmatterSerializeError, "would not read back"):
+                serialize_frontmatter({"title": "Real title", "status": "active"})
+
+
 if __name__ == "__main__":
     unittest.main()

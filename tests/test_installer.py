@@ -20,6 +20,7 @@ from cadabby.installer import (
     uninstall_antigravity,
     uninstall_claude,
 )
+import tests.helpers  # noqa: F401 -- T1: scrubs CADABBY_VAULT before any test runs
 
 
 class TestInstaller(unittest.TestCase):

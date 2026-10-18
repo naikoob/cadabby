@@ -735,9 +735,13 @@ class TestEightToolSurface(unittest.TestCase):
     def test_status_queues_are_capped_with_totals(self):
         for i in range(30):
             (self.root / "raw" / f"bulk-{i:02}.txt").write_text("x", "utf-8")
+        from cadabby.cache import unprocessed_raw_paths
+
         queue = self._ok("vault_status", {})["queues"]["unprocessed_raw"]
         self.assertEqual(len(queue["items"]), 25)
-        self.assertGreaterEqual(queue["total"], 31)
+        expected = unprocessed_raw_paths(self.server.cache.get_connection())
+        self.assertEqual(queue["total"], len(expected), "the full total, not a lower bound (C68)")
+        self.assertEqual(queue["items"], expected[:25])
 
     # -- C69: vault_graph ----------------------------------------------------
 
@@ -748,9 +752,15 @@ class TestEightToolSurface(unittest.TestCase):
         self.assertTrue(graph["backlinks"])
         self.assertIn("trust_tier", graph["backlinks"][0])
         self.assertIn("title", graph["backlinks"][0])
-        self.assertIn("backlinks_total", graph)
-        self.assertNotIn('"content"', json.dumps(graph))
-        self.assertNotIn('"body"', json.dumps(graph))
+        for listed in ("forward_links", "backlinks"):
+            self.assertIn(f"{listed}_total", graph)
+        dumped = json.dumps(graph)
+        self.assertNotIn('"content"', dumped)
+        self.assertNotIn('"body"', dumped)
+        # No note text at all, not just no text-shaped keys (C69).
+        body = (self.root / "wiki" / "sqlite.md").read_text("utf-8").split("---", 2)[2]
+        sentence = next(line for line in body.splitlines() if len(line) > 40 and not line.startswith(("#", "[")))
+        self.assertNotIn(sentence[:40], dumped)
 
     def test_graph_mocs_reports_overlap_ratio(self):
         for n in "abcde":
@@ -929,6 +939,63 @@ class TestToolRegistry(unittest.TestCase):
             again = server.handle_tools_list()
         self.assertEqual(len(again["tools"]), len(TOOLS))
         self.assertNotIn("injected", again["tools"][0]["inputSchema"]["properties"])
+
+
+class TestUncoveredPaths(unittest.TestCase):
+    """T5/T7: criteria observables and user-reachable paths that no test exercised."""
+
+    setUp = TestMcpServer.setUp
+    tearDown = TestMcpServer.tearDown
+
+    def _call(self, name, args):
+        res = self.server.handle_tools_call(name, args)
+        return res, json.loads(res["content"][0]["text"])
+
+    def test_human_refusal_by_either_spelling_leaves_the_bytes(self):
+        """C12: refused as HUMAN_ATTESTATION_REFUSED, and the note is untouched."""
+        note = self.vault_root / "wiki" / "flash-attention.md"
+        before = note.read_bytes()
+        for key in ("actor", "by"):
+            with self.subTest(key=key):
+                res, payload = self._call("vault_verify_note", {"cid": "wiki/flash-attention", key: "human:mallory"})
+                self.assertEqual(payload["error"]["code"], "HUMAN_ATTESTATION_REFUSED")
+                self.assertEqual(note.read_bytes(), before)
+
+    def test_update_never_rewrites_an_unparseable_note(self):
+        """C3: a flow-style note is refused and left byte for byte."""
+        note = self.vault_root / "wiki" / "flow.md"
+        note.write_text("---\ntype: concept\ntitle: Flow\ntags: [a, b]\n---\n# Flow\n", "utf-8")
+        before = note.read_bytes()
+        res, payload = self._call("vault_update_note", {"cid": "wiki/flow", "patch_frontmatter": {"status": "active"}})
+        self.assertEqual(payload["error"]["code"], "FRONTMATTER_UNPARSEABLE")
+        self.assertEqual(note.read_bytes(), before)
+
+    def test_search_type_and_status_filters(self):
+        self.server.cache.scan()
+        _, by_status = self._call("vault_search", {"status": "deprecated"})
+        self.assertEqual({h["cid"] for h in by_status}, {"wiki/sqlite-vs-duckdb"})
+        _, by_type = self._call("vault_search", {"type": "moc"})
+        self.assertTrue(by_type)
+        self.assertTrue(all(h["type"] == "moc" for h in by_type))
+
+    def test_malformed_edits_are_invalid_argument(self):
+        for edits in ([{"op": "explode"}], [{"op": "replace_text", "old": "x"}], ["not an object"]):
+            with self.subTest(edits=edits):
+                _, payload = self._call("vault_update_note", {"cid": "wiki/sqlite", "edits": edits})
+                self.assertEqual(payload["error"]["code"], "INVALID_ARGUMENT")
+
+    def test_graph_view_and_target_validation(self):
+        for args in ({"view": "sideways", "target": "sqlite"}, {"view": "mocs", "target": "sqlite"}, {"view": "neighborhood"}):
+            with self.subTest(args=args):
+                _, payload = self._call("vault_graph", args)
+                self.assertEqual(payload["error"]["code"], "INVALID_ARGUMENT")
+
+    def test_an_unexpected_handler_failure_is_internal_error(self):
+        from unittest import mock
+
+        with mock.patch.object(McpServer, "handle_initialize", side_effect=RuntimeError("boom")):
+            resp = self.server.dispatch_request({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+        self.assertEqual(resp["error"]["code"], -32603)
 
 
 if __name__ == "__main__":
