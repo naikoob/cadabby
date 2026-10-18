@@ -438,7 +438,7 @@ class TestMoveNote(unittest.TestCase):
         self._write("wiki/target-note.md", _fm("Target") + "# Target\n")
         self._write("wiki/linker.md", _fm("Linker") + "See [bare](target-note.md).\n")
         # Simulate an encoder bug: the space is written unencoded, so the bare link would end early.
-        with unittest.mock.patch("cadabby.ops._markdown_path_text", lambda path, angle: path):
+        with unittest.mock.patch("cadabby.move._markdown_path_text", lambda path, angle: path):
             plan = move_note(self.vault, "wiki/target-note", "customers/acme/a b")
         self.assertTrue(any("would no longer open the same file" in b for b in plan["blocked"]), plan["blocked"])
 

@@ -33,7 +33,7 @@ Each rule is cheap to break and hard to see once broken.
 | Wikilink / Markdown-link parsing, resolution, backlinks | `graph.py` | §2.5, `test_graph.py` |
 | `index.md` or `log.md` output | `indexer.py` | §2.5, `test_indexer.py` |
 | A lint gate's codes or severities | `lint.py` | §6.3, `test_lint.py` |
-| Scaffold / update / move / verify / ground | `ops.py` (+ `ports.py`, `adapters/`) | §9.1, `test_ops.py`, `test_move.py`, `test_domain_model.py` |
+| Scaffold / update / move / verify / ground | `ops.py`, `move.py`, `ground.py`, `resolve.py` (+ `ports.py`, `adapters/`) | §9.1, `test_ops.py`, `test_move.py`, `test_domain_model.py` |
 | The MCP tool surface or resources | `mcp.py` | §5, §7, `test_mcp.py` |
 | CLI flags, output, exit codes | `cli.py`, `errors.py` | §5.4, `test_cli.py`, `test_errors.py` |
 | `init` / `install` and file ownership | `installer.py` | §7.6, `test_installer.py` |
