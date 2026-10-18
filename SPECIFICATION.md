@@ -1034,6 +1034,7 @@ cadabby/
 │       ├── cli.py              # argparse surface and terminal formatting
 │       ├── constants.py        # Enums, default config, schema constants
 │       ├── domain.py           # Note entity, cognitive domain definitions, AGENTS.md parsing (2.2)
+│       ├── markdown.py         # Code fences, inline code spans, ATX headings, ## sections: pure text, no cadabby imports
 │       ├── errors.py           # Error taxonomy, classify(), exit-code map (5.4)
 │       ├── vault.py            # Root discovery, config loading, path/cid mapping
 │       ├── frontmatter.py      # Restricted-subset parser + canonicalizing writer (3.2)

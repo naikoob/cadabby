@@ -5,7 +5,8 @@ from __future__ import annotations
 import unittest
 
 from cadabby.adapters.memory_storage import InMemoryLedger, InMemoryNoteStorage
-from cadabby.domain import Note, split_markdown_sections
+from cadabby.domain import Note
+from cadabby.markdown import split_markdown_sections
 from cadabby.errors import HumanAttestationRefusedError
 from cadabby.fsutil import VaultConflictError
 from cadabby.ops import (
@@ -271,18 +272,18 @@ class TestExtractHeadings(unittest.TestCase):
     """A heading's text is on its own line; `\\s+` used to cross the newline (M17)."""
 
     def test_bare_hash_line_does_not_promote_the_next_line(self):
-        from cadabby.domain import extract_headings
+        from cadabby.markdown import extract_headings
 
         self.assertEqual(extract_headings("#\nnot a heading\n\n## \nalso not\n"), [])
 
     def test_real_headings_survive_tabs_crlf_and_closing_hashes(self):
-        from cadabby.domain import extract_headings
+        from cadabby.markdown import extract_headings
 
         body = "# One\r\n##\tTwo ##\r\ntext\n### `Three`\n"
         self.assertEqual(extract_headings(body), ["One", "Two", "Three"])
 
     def test_a_bare_hash_with_carriage_return_does_not_end_a_section(self):
-        from cadabby.domain import extract_markdown_section
+        from cadabby.markdown import extract_markdown_section
 
         found = extract_markdown_section("## A\ntext\n## \r\nmore\n", "A")
         self.assertIsNotNone(found)
@@ -293,7 +294,7 @@ class TestOneSectionModel(unittest.TestCase):
     """C74: replace_section finds every level-2 heading ground finds (§5.1)."""
 
     def test_closing_hashes_and_tabs_are_replaced_not_duplicated(self):
-        from cadabby.domain import extract_markdown_section, replace_markdown_section
+        from cadabby.markdown import extract_markdown_section, replace_markdown_section
 
         for heading_line, name in (("## Intro ##", "Intro"), ("##\tSetup", "Setup"), ("## `cfg` file", "`cfg` file")):
             with self.subTest(heading_line):
@@ -308,7 +309,7 @@ class TestOneSectionModel(unittest.TestCase):
                 self.assertIn("keep", out)
 
     def test_matching_is_exact_after_cleaning(self):
-        from cadabby.domain import replace_markdown_section
+        from cadabby.markdown import replace_markdown_section
 
         body = "## Intro\n\nold\n"
         out = replace_markdown_section(body, "intro", "new")

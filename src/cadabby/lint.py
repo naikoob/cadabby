@@ -23,11 +23,7 @@ from cadabby.constants import (
     NOTE_STATUSES,
     REQUIRED_FRONTMATTER_FIELDS,
 )
-from cadabby.domain import (
-    DomainDefinition,
-    anchor_matches as _anchor_matches,
-    extract_headings as _extract_headings,
-)
+from cadabby.domain import DomainDefinition
 from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter
 from cadabby.graph import (
     LINK_KIND_MARKDOWN,
@@ -35,6 +31,10 @@ from cadabby.graph import (
     iter_markdown_link_targets,
     relative_note_path,
     resolve_markdown_target,
+)
+from cadabby.markdown import (
+    anchor_matches as _anchor_matches,
+    extract_headings as _extract_headings,
 )
 from cadabby.okf import (
     is_actor_human,

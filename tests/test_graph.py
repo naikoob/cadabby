@@ -453,7 +453,7 @@ class TestParsingIsLinear(unittest.TestCase):
     def test_link_and_heading_parsers_stay_linear(self):
         import time
 
-        from cadabby.domain import extract_headings, split_markdown_sections
+        from cadabby.markdown import extract_headings, split_markdown_sections
         from cadabby.frontmatter import split_comment
 
         for name, text in self.ADVERSARIAL.items():

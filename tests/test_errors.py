@@ -370,6 +370,23 @@ class TestArchitecturalErrorAndCacheBoundaries(unittest.TestCase):
                             deferred.append(f"{rel}:{node.lineno}:{module}")
         self.assertEqual(deferred, [])
 
+    def test_markdown_is_a_leaf_module(self):
+        """markdown.py is pure text scanning: graph, ground, lint and Note all consume it.
+
+        graph.py used to import its fence and code-span scanners from domain.py,
+        tying link extraction to the Note aggregate. A cadabby import here would
+        put that coupling back, or worse, a cycle through any of its consumers.
+        """
+        import ast
+
+        path = Path(__file__).resolve().parent.parent / "src" / "cadabby" / "markdown.py"
+        tree = ast.parse(path.read_text("utf-8"), filename=str(path))
+        internal = sorted(
+            {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("cadabby")}
+            | {a.name for node in ast.walk(tree) if isinstance(node, ast.Import) for a in node.names if a.name.startswith("cadabby")}
+        )
+        self.assertEqual(internal, [])
+
     def test_queries_never_import_the_cache_or_vault(self):
         """queries.py is the read side: it takes a connection and knows no config.
 

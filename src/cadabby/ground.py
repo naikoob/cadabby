@@ -12,15 +12,11 @@ from typing import Any
 
 from cadabby.cache import is_raw_text_path
 from cadabby.constants import DIR_RAW
-from cadabby.domain import (
-    Note,
-    extract_headings,
-    extract_markdown_section,
-    split_markdown_sections,
-)
+from cadabby.domain import Note
 from cadabby.errors import AmbiguousNoteError, InvalidArgumentError, NotFoundError, classify
 from cadabby.frontmatter import serialize_frontmatter
 from cadabby.graph import LinkTargetIndex, split_link_target_and_anchor, strip_link_wrapper
+from cadabby.markdown import extract_headings, extract_markdown_section, split_markdown_sections
 from cadabby.resolve import (
     _default_layout,
     _match_listed_path,

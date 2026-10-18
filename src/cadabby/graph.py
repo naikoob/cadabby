@@ -13,7 +13,7 @@ from pathlib import PurePosixPath
 from urllib.parse import unquote
 
 from cadabby.constants import DIR_ARCHIVE, DIR_RAW, DIR_WIKI
-from cadabby.domain import code_spans, iter_fence_states
+from cadabby.markdown import code_spans, iter_fence_states
 from cadabby.vault import cid_to_path, normalize_rel, path_to_cid
 
 # Regex matching [[Target#Anchor|Alias]] (including table-escaped \| aliases)
