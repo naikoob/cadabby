@@ -86,7 +86,7 @@ Run all of these. Stop on any failure.
                  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
      | /tmp/rc/bin/cadabby mcp --vault /tmp/rc-vault
    ```
-   Expect `serverInfo.version` to be X.Y.Z and exactly 7 tools.
+   Expect `serverInfo.version` to be X.Y.Z and exactly 8 tools.
 4. **Upgrade path.** Do this only when the tool surface, the shipped assets, or the
    cache schema changed:
    - Create a vault with the previous release: `uvx --from cadabby==<prev> cadabby init /tmp/old-vault`.
@@ -95,7 +95,8 @@ Run all of these. Stop on any failure.
      `CLAUDE.md`, `STYLE.md`, `.cadabby.json`) keep the old text. If they mention a
      renamed or removed tool, the README needs an **Upgrading from X.Y** section, and
      a removed MCP tool needs an entry in `mcp._RETIRED_TOOLS`. That entry is only an
-     error message, not an alias, so the surface stays at 7 tools.
+     error message, not an alias, so the surface stays at 8 tools. A removed or renamed
+     argument gets an entry in `mcp._RETIRED_ARGUMENTS` on the same terms.
 5. **Docs.** Check the README test counts, and that every new CLI flag, MCP parameter
    and error code is described in the spec.
 

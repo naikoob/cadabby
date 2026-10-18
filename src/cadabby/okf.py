@@ -165,3 +165,25 @@ def derive_trust_tier(verified_list: list[Any] | None, current_body_hash: str) -
     if any(is_actor_machine(a) for a in valid_actors):
         return "machine-confirmed"
     return "stale-verified"
+
+
+def latest_stale_actor(verified_list: list[Any] | None, current_body_hash: str | None) -> str | None:
+    """The `by:` of the last well-formed attestation that no longer binds, or None (§4.5).
+
+    Decides who owes a stale note its re-review. The vault constitution forbids
+    an agent to verify over a human's stale sign-off, and it is the *latest*
+    stale entry that it names: a human sign-off later re-checked by an agent is
+    the agent's to renew. Entries too broken to name an actor are skipped, so a
+    note whose only entries are unbound returns None -- debt no human owes.
+    """
+    if not isinstance(verified_list, list):
+        return None
+    latest: str | None = None
+    for item in verified_list:
+        if not isinstance(item, dict):
+            continue
+        actor, of_hash = item.get("by"), item.get("of")
+        if isinstance(actor, str) and is_valid_actor(actor) and isinstance(of_hash, str) and of_hash.strip():
+            if of_hash != current_body_hash:
+                latest = actor
+    return latest

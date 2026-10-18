@@ -18,7 +18,7 @@ from typing import Any
 from urllib.parse import quote
 
 from cadabby.adapters.disk_storage import DiskNoteStorage, FileLedger
-from cadabby.cache import VaultCache
+from cadabby.cache import VaultCache, is_raw_text_path, moc_overview
 from cadabby.constants import ACTOR_PATTERN, DIR_RAW, DIR_WIKI, FILE_AGENTS, TEMPLATE_TITLE_PLACEHOLDER
 from cadabby.domain import (
     Note,
@@ -35,6 +35,7 @@ from cadabby.graph import (
     LINK_KIND_REFDEF,
     LINK_KIND_WIKI,
     RE_URL_SCHEME,
+    get_note_graph,
     LinkSpan,
     LinkTargetIndex,
     is_attachment_target,
@@ -418,22 +419,12 @@ class UpdateNoteUseCase:
         self,
         cid_or_path: str,
         frontmatter_patch: dict[str, Any] | None = None,
-        append_section: tuple[str, str] | None = None,
-        replace_section: tuple[str, str] | None = None,
+        *,
         expected_hash: str | None = None,
         actor: str = "agent:unknown",
         edits: list[dict[str, Any]] | None = None,
     ) -> Note:
-        # Legacy single-operation parameters keep their historical order
-        # (replace, then append) and run before any `edits`.
-        ops: list[dict[str, Any]] = []
-        if replace_section:
-            ops.append({"op": "replace_section", "heading": replace_section[0], "body": replace_section[1]})
-        if append_section:
-            ops.append({"op": "append_section", "heading": append_section[0], "body": append_section[1]})
-        if edits is not None:
-            ops.extend(edits)
-        validated = _validate_edits(ops)
+        validated = _validate_edits(list(edits) if edits is not None else [])
         _validate_frontmatter_patch(frontmatter_patch)
 
         note = load_existing_note(self.storage, cid_or_path)
@@ -1155,9 +1146,15 @@ class MoveNoteUseCase:
         return note.source_hash if note is not None else None
 
 
-def _truncate_to_budget(note: Note, budget_tokens: int | None) -> tuple[str, bool]:
-    """Return (serialized_content, was_truncated) honoring a token budget via section splitting (§5.4)."""
-    full_text = note.serialize()
+def _truncate_sections(
+    full_text: str, body: str, budget_tokens: int | None, render: Callable[[str], str]
+) -> tuple[str, bool]:
+    """Return (content, was_truncated) honoring a token budget via section splitting (§5.4).
+
+    `full_text` is what an unbudgeted call returns and `body` the part of it
+    that sections split; `render` puts a truncated body back into its frame
+    (a note's frontmatter, or nothing for a raw source).
+    """
     if budget_tokens is None or budget_tokens <= 0:
         return full_text, False
 
@@ -1165,11 +1162,11 @@ def _truncate_to_budget(note: Note, budget_tokens: int | None) -> tuple[str, boo
     if len(full_text) <= char_budget:
         return full_text, False
 
-    sections = split_markdown_sections(note.body)
+    sections = split_markdown_sections(body)
     total_sections = max(1, len(sections))
-    fm_overhead = len(full_text) - len(note.body)
+    overhead = len(full_text) - len(body)
     accumulated: list[str] = []
-    current_len = fm_overhead
+    current_len = overhead
     included_sections = 0
 
     for _, sec_text in sections:
@@ -1183,9 +1180,16 @@ def _truncate_to_budget(note: Note, budget_tokens: int | None) -> tuple[str, boo
     if accumulated:
         truncated_body = "".join(accumulated).rstrip()
     else:
-        remaining = max(0, char_budget - fm_overhead - len(marker))
-        truncated_body = note.body[:remaining].rstrip()
-    return serialize_frontmatter(note.frontmatter, truncated_body + marker), True
+        remaining = max(0, char_budget - overhead - len(marker))
+        truncated_body = body[:remaining].rstrip()
+    return render(truncated_body + marker), True
+
+
+def _truncate_to_budget(note: Note, budget_tokens: int | None) -> tuple[str, bool]:
+    """A note's serialized text within `budget_tokens` (§5.4)."""
+    return _truncate_sections(
+        note.serialize(), note.body, budget_tokens, lambda body: serialize_frontmatter(note.frontmatter, body)
+    )
 
 
 class GroundNotesUseCase:
@@ -1267,6 +1271,7 @@ class GroundNotesUseCase:
         content_to_return, truncated = _truncate_to_budget(note_for_budget, budget_tokens)
         item: dict[str, Any] = {
             "target": raw_target,
+            "kind": "note",
             "cid": note.cid,
             "domain": domain_name,
             "title": note.title or Path(note.rel_path).stem,
@@ -1285,32 +1290,89 @@ class GroundNotesUseCase:
             item["section_error"] = section_error
         return item
 
+    def _resolve_source(self, unwrapped: str, shown: str, sources: Sequence[str]) -> tuple[str, str | None]:
+        """The raw/ file `unwrapped` names and its `#anchor` (§5.1).
+
+        The whole name is tried first, so a filename containing '#' still
+        resolves; then the text before the last '#'. Each try is exact, then
+        unique ignoring letter case. Only files storage lists as evidence can
+        match, which is what keeps a crafted path from reading anything else.
+        """
+
+        def match(path: str) -> str | None:
+            if path in sources:
+                return path
+            folded = sorted(s for s in sources if s.casefold() == path.casefold())
+            if len(folded) > 1:
+                raise AmbiguousNoteError(shown, folded)
+            return folded[0] if folded else None
+
+        if found := match(unwrapped):
+            return found, None
+        if "#" in unwrapped:
+            head, _, tail = unwrapped.rpartition("#")
+            if found := match(head):
+                return found, tail.strip() or None
+        raise FileNotFoundError(f"Source not found: {unwrapped}")
+
+    def _grounded_source(self, raw_target: str, path: str, anchor: str | None, budget_tokens: int | None) -> dict[str, Any]:
+        """A raw/ file as evidence: its text and the notes citing it, never a trust tier (§5.1)."""
+        cited_by = self.cache.get_source_citers(path) if self.cache is not None else []
+        item: dict[str, Any] = {"target": raw_target, "kind": "raw", "path": path, "section": None}
+        text_exts = tuple(self.vault.config["raw_text_extensions"]) if self.vault is not None else None
+        if text_exts is not None and not is_raw_text_path(path, text_exts):
+            # The engine has no reader for this format; decoding it would hand
+            # the caller bytes dressed up as source text.
+            return item | {"content": None, "filename_only": True, "truncated": False, "cited_by": cited_by}
+        text = self.storage.read_source(path)
+        if text is None:
+            raise FileNotFoundError(f"Source not found: {path}")
+        if anchor is not None:
+            extracted = extract_markdown_section(text, anchor)
+            if extracted is None:
+                headings = extract_headings(text)
+                available = ", ".join(f"'{h}'" for h in headings) if headings else "none"
+                item["section_error"] = f"Section '#{anchor}' not found in '{path}' (available headings: {available})"
+            else:
+                item["section"], text = extracted
+        content, truncated = _truncate_sections(text, text, budget_tokens, lambda body: body)
+        return item | {"content": content, "filename_only": False, "truncated": truncated, "cited_by": cited_by}
+
     def execute(
         self,
-        cids: Sequence[str],
+        targets: Sequence[str],
         budget_tokens: int | None = None,
     ) -> list[dict[str, Any]]:
-        """One entry per target, in order: the grounded note, or `{"target", "error"}` (§5.1).
+        """One entry per target, in order: the grounded note or source, or `{"target", "error"}` (§5.1).
 
         A target that cannot be grounded is reported in its place, classified
         exactly as any other failure (§5.4), so one stale link does not cost the
         caller the rest of the batch. If nothing at all could be grounded the
         call fails with the first target's error, which makes a single-target
-        call behave like update, verify and move.
+        call behave like update, verify and move. A target under `raw/` names a
+        source, never a note: no note can live there (§2.1).
         """
-        if isinstance(cids, str) or not cids:
-            raise ValueError("cids must be a non-empty list of note names")
+        if isinstance(targets, str) or not targets:
+            raise ValueError("targets must be a non-empty list of note names or raw/ paths")
         domains = self.vault.discover_domains() if self.vault is not None else {}
         # Names resolve against what storage lists, not the search index, so a
         # note whose frontmatter is broken is named in its error rather than the
         # name silently resolving to another note with the same stem.
         listed = list(self.storage.list_note_cids())
         index = LinkTargetIndex(listed)
+        sources: list[str] | None = None
 
         results: list[dict[str, Any]] = []
         failures: list[Exception] = []
-        for raw_target in cids:
+        for raw_target in targets:
             try:
+                unwrapped = _strip_dot_slash(strip_link_wrapper(raw_target))
+                if unwrapped.casefold().startswith(f"{DIR_RAW}/"):
+                    if sources is None:
+                        sources = list(self.storage.list_source_paths())
+                    path, anchor = self._resolve_source(unwrapped, raw_target.strip(), sources)
+                    results.append(self._grounded_source(raw_target, path, anchor, budget_tokens))
+                    continue
                 note, anchor = self._resolve_target_and_anchor(raw_target, listed, index)
             except Exception as exc:  # noqa: BLE001 -- classified per target, §5.4
                 info = classify(exc)
@@ -1389,23 +1451,20 @@ def update_note(
     vault: Vault,
     cid_or_path: str,
     frontmatter_patch: dict[str, Any] | None = None,
-    append_section: tuple[str, str] | None = None,
-    replace_section: tuple[str, str] | None = None,
+    *,
+    edits: list[dict[str, Any]] | None = None,
     expected_hash: str | None = None,
     actor: str = "agent:unknown",
     storage: NoteStoragePort | None = None,
     ledger: LedgerPort | None = None,
     cache: IndexCachePort | None = None,
-    edits: list[dict[str, Any]] | None = None,
 ) -> Path:
-    """Non-destructively update note frontmatter, sections, or exact body text."""
+    """Non-destructively patch note frontmatter and apply ordered body `edits` (§5.1)."""
     active_storage, active_ledger = _resolve_adapters(vault, storage, ledger)
     uc = UpdateNoteUseCase(active_storage, active_ledger)
     note = uc.execute(
         cid_or_path=cid_or_path,
         frontmatter_patch=frontmatter_patch,
-        append_section=append_section,
-        replace_section=replace_section,
         expected_hash=expected_hash,
         actor=actor,
         edits=edits,
@@ -1445,20 +1504,61 @@ def verify_note(
 
 def ground_notes(
     vault: Vault,
-    cids: Sequence[str],
+    targets: Sequence[str],
     budget_tokens: int | None = None,
     cache: IndexCachePort | None = None,
     storage: NoteStoragePort | None = None,
 ) -> list[dict[str, Any]]:
-    """Retrieve full content and 1-hop graph neighborhood for the specified CIDs."""
+    """Retrieve notes (content and 1-hop graph) or raw/ sources (text and citing notes) (§5.1)."""
     active_storage, _ = _resolve_adapters(vault, storage)
     if cache is None:
         with VaultCache(vault) as active_cache:
             active_cache.scan()
             uc = GroundNotesUseCase(storage=active_storage, cache=active_cache, vault=vault)
-            return uc.execute(cids=cids, budget_tokens=budget_tokens)
+            return uc.execute(targets=targets, budget_tokens=budget_tokens)
     uc = GroundNotesUseCase(storage=active_storage, cache=cache, vault=vault)
-    return uc.execute(cids=cids, budget_tokens=budget_tokens)
+    return uc.execute(targets=targets, budget_tokens=budget_tokens)
+
+
+GRAPH_VIEWS = ("neighborhood", "mocs")
+
+
+def graph_view(
+    vault: Vault,
+    cache: VaultCache,
+    *,
+    view: str = "neighborhood",
+    target: str | None = None,
+    limit: int = 20,
+    storage: NoteStoragePort | None = None,
+) -> dict[str, Any]:
+    """Link structure without note text: one note's neighborhood, or the MOC overview (§5.1 `vault_graph`).
+
+    `target` names a note exactly as for ground and the write tools, so a name
+    resolves (or is refused as ambiguous) the same way on every surface. The
+    cache must already be scanned; every entry point scans first (§4.3).
+    """
+    if view not in GRAPH_VIEWS:
+        raise ValueError(f"view must be one of {list(GRAPH_VIEWS)}")
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
+    if view == "mocs":
+        if target is not None:
+            raise ValueError("view 'mocs' covers every MOC; omit 'target'")
+        return {"view": "mocs"} | moc_overview(cache.get_connection(), limit)
+    if not target or not target.strip():
+        raise ValueError("view 'neighborhood' needs a 'target' note")
+    if _strip_dot_slash(strip_link_wrapper(target)).casefold().startswith(f"{DIR_RAW}/"):
+        raise ValueError("raw/ sources are not graph nodes; vault_ground a raw/ path lists the notes citing it")
+    active_storage, _ = _resolve_adapters(vault, storage)
+    listed = list(active_storage.list_note_cids())
+    cid = resolve_note_cid(active_storage, target, LinkTargetIndex(listed), cids=listed)
+    data = get_note_graph(cache.get_connection(), cid, limit=limit)
+    if data is None:
+        # Listed but not indexed: its frontmatter does not parse (§4.4).
+        load_existing_note(active_storage, cid)
+        raise FileNotFoundError(f"Note not found: {cid_to_path(cid)}")
+    return {"view": "neighborhood"} | data
 
 
 def move_note(

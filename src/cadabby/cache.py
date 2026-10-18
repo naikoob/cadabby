@@ -17,10 +17,12 @@ from types import TracebackType
 from typing import Any, Self
 
 from cadabby.constants import (
+    DIR_ARCHIVE,
     DIR_RAW,
     FTS_COLUMN_WEIGHTS,
     FTS_FIELD_HIT_FLOOR,
     SCHEMA_VERSION,
+    TYPE_MOC,
 )
 from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter
 from cadabby.fsutil import compute_file_sha256
@@ -31,7 +33,7 @@ from cadabby.graph import (
     extract_wikilinks,
     resolve_markdown_target,
 )
-from cadabby.okf import compute_body_hash, derive_trust_tier, utc_now_iso
+from cadabby.okf import compute_body_hash, derive_trust_tier, is_actor_human, latest_stale_actor, utc_now_iso
 from cadabby.vault import Vault, cid_to_path, note_path_violation, path_to_cid, path_to_layer, path_to_stem
 
 
@@ -61,6 +63,145 @@ def unprocessed_raw_paths(conn: sqlite3.Connection) -> list[str]:
             """
         )
     ]
+
+
+def unfiled_note_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Wiki notes no MOC reaches by forward link at any depth, sorted by stem (§2.5).
+
+    The one definition of "unfiled": the index.md section and the
+    `vault_status` queue both read it. Reachability is transitive and may
+    travel through any layer; only active wiki notes are reported, because
+    MOCs are a `wiki/` construct and filing a retired note is not work.
+    """
+    return conn.execute(
+        """
+        WITH RECURSIVE filed(cid) AS (
+            SELECT cid FROM notes
+            WHERE layer = 'wiki' AND type = ? AND parse_error IS NULL
+          UNION
+            SELECT l.target_cid FROM links l
+            JOIN filed f ON l.source_cid = f.cid
+            WHERE l.target_cid IS NOT NULL
+        )
+        SELECT cid, stem, rel_path, description FROM notes
+        WHERE layer = 'wiki'
+          AND parse_error IS NULL
+          AND COALESCE(status, 'active') NOT IN ('deprecated', 'abandoned')
+          AND cid NOT IN (SELECT cid FROM filed)
+        ORDER BY stem ASC;
+        """,
+        (TYPE_MOC,),
+    ).fetchall()
+
+
+@dataclass(frozen=True, slots=True)
+class DebtRow:
+    """One note of actionable verification debt, and who owes its re-review (§4.5)."""
+
+    cid: str
+    human_owed: bool
+
+
+def verification_debt_rows(conn: sqlite3.Connection) -> list[DebtRow]:
+    """Active stale-verified notes, sorted by CID, each split by who owes it (§3.4, §4.5).
+
+    Retired notes (`archive/`, `deprecated`, `abandoned`) are excluded: the
+    list is a worklist. A note is human-owed when its latest stale attestation
+    is `human:*`, the case in which an agent must not verify (§3.5).
+    """
+    rows = conn.execute(
+        """
+        SELECT cid, frontmatter_json, body_hash FROM notes
+        WHERE trust_tier = 'stale-verified'
+          AND parse_error IS NULL
+          AND layer != ?
+          AND COALESCE(status, 'active') NOT IN ('deprecated', 'abandoned')
+        ORDER BY cid ASC;
+        """,
+        (DIR_ARCHIVE,),
+    ).fetchall()
+    debt: list[DebtRow] = []
+    for r in rows:
+        try:
+            fm = json.loads(r["frontmatter_json"] or "{}")
+        except json.JSONDecodeError:
+            fm = {}
+        actor = latest_stale_actor(fm.get("verified") if isinstance(fm, dict) else None, r["body_hash"])
+        debt.append(DebtRow(cid=r["cid"], human_owed=actor is not None and is_actor_human(actor)))
+    return debt
+
+
+def raw_citers(conn: sqlite3.Connection, raw_rel_path: str) -> list[dict[str, Any]]:
+    """Notes whose `sources:` resolve to `raw_rel_path`, sorted by CID (§4.3).
+
+    The same relation that makes a source "processed", read in reverse.
+    """
+    return [
+        {"cid": r["cid"], "title": r["title"], "type": r["type"], "trust_tier": r["trust_tier"]}
+        for r in conn.execute(
+            """
+            SELECT DISTINCT n.cid, n.title, n.type, n.trust_tier
+            FROM sources s JOIN notes n ON n.cid = s.source_cid
+            WHERE s.resolved_path = ?
+            ORDER BY n.cid ASC;
+            """,
+            (raw_rel_path,),
+        )
+    ]
+
+
+def moc_overview(conn: sqlite3.Connection, limit: int) -> dict[str, Any]:
+    """Every wiki MOC's link counts and the largest overlaps between MOCs (§5.1 `vault_graph`).
+
+    `outgoing` counts distinct resolved note targets, `incoming` distinct
+    linking notes. An overlap's `ratio` is shared targets over the smaller
+    MOC's target count, so a MOC wholly contained in another reads 1.0
+    whatever the sizes. Both lists are capped at `limit`, with totals.
+    """
+    mocs = conn.execute(
+        """
+        SELECT cid, title, trust_tier FROM notes
+        WHERE layer = 'wiki' AND type = ? AND parse_error IS NULL
+        ORDER BY cid ASC;
+        """,
+        (TYPE_MOC,),
+    ).fetchall()
+    targets: dict[str, set[str]] = {m["cid"]: set() for m in mocs}
+    incoming: dict[str, int] = {m["cid"]: 0 for m in mocs}
+    for r in conn.execute("SELECT DISTINCT source_cid, target_cid FROM links WHERE target_cid IS NOT NULL;"):
+        if r["source_cid"] in targets and r["target_cid"] != r["source_cid"]:
+            targets[r["source_cid"]].add(r["target_cid"])
+        if r["target_cid"] in incoming and r["source_cid"] != r["target_cid"]:
+            incoming[r["target_cid"]] += 1
+
+    entries = sorted(
+        (
+            {
+                "cid": m["cid"],
+                "title": m["title"],
+                "trust_tier": m["trust_tier"],
+                "outgoing": len(targets[m["cid"]]),
+                "incoming": incoming[m["cid"]],
+            }
+            for m in mocs
+        ),
+        key=lambda e: (-e["outgoing"], e["cid"]),
+    )
+    overlaps: list[dict[str, Any]] = []
+    cids = [m["cid"] for m in mocs]
+    for i, a in enumerate(cids):
+        for b in cids[i + 1 :]:
+            shared = len(targets[a] & targets[b])
+            if shared:
+                smaller = min(len(targets[a]), len(targets[b]))
+                overlaps.append({"a": a, "b": b, "shared": shared, "ratio": round(shared / smaller, 3)})
+    overlaps.sort(key=lambda o: (-o["ratio"], -o["shared"], o["a"], o["b"]))
+    return {
+        "mocs": entries[:limit],
+        "mocs_total": len(entries),
+        "overlaps": overlaps[:limit],
+        "overlaps_total": len(overlaps),
+    }
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -127,7 +268,7 @@ def _raw_exts_fingerprint(exts: tuple[str, ...]) -> str:
     return json.dumps(sorted(set(exts)))
 
 
-def _is_raw_text_path(rel_path: str, raw_text_exts: tuple[str, ...]) -> bool:
+def is_raw_text_path(rel_path: str, raw_text_exts: tuple[str, ...]) -> bool:
     """Whether a raw file's body is indexed under the configured extension list (§2.4)."""
     return bool(raw_text_exts) and rel_path.lower().endswith(raw_text_exts)
 
@@ -719,7 +860,7 @@ class VaultCache:
         raw_text_exts: tuple[str, ...],
     ) -> None:
         """Index one raw source; a non-text file gets an empty body and is found by title (§2.4)."""
-        is_text = _is_raw_text_path(rel_path, raw_text_exts)
+        is_text = is_raw_text_path(rel_path, raw_text_exts)
         self.upsert_note(
             NoteRecord(
                 rel_path=rel_path,
@@ -1086,6 +1227,10 @@ class VaultCache:
             for row in rows
         ]
 
+    def get_source_citers(self, raw_rel_path: str) -> list[dict[str, Any]]:
+        """Notes whose `sources:` resolve to the raw/ file, with title, type and trust tier (§5.1)."""
+        return raw_citers(self.get_connection(), raw_rel_path)
+
     def unprocessed_raw_paths(self) -> list[str]:
         """Raw files no note's `sources:` resolves to, sorted (§2.5, §4.5)."""
         return unprocessed_raw_paths(self.get_connection())
@@ -1102,7 +1247,7 @@ class VaultCache:
         raw_text_exts = tuple(self.vault.config["raw_text_extensions"])
         filename_only_raw: dict[str, int] = {}
         for (rel_path,) in conn.execute("SELECT rel_path FROM notes WHERE layer = 'raw' ORDER BY rel_path;"):
-            if not _is_raw_text_path(rel_path, raw_text_exts):
+            if not is_raw_text_path(rel_path, raw_text_exts):
                 ext = Path(rel_path).suffix.lower()
                 filename_only_raw[ext] = filename_only_raw.get(ext, 0) + 1
         filename_only_raw = dict(sorted(filename_only_raw.items()))

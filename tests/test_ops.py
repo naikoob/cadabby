@@ -156,7 +156,7 @@ class TestOps(unittest.TestCase):
             vault=self.vault,
             cid_or_path=cid,
             frontmatter_patch={"status": "evergreen"},
-            append_section=("Benchmarking", "Benchmarking shows 2-4x speedup."),
+            edits=[{"op": "append_section", "heading": "Benchmarking", "body": "Benchmarking shows 2-4x speedup."}],
             expected_hash=h_before,
             actor="agent:benchmarker",
         )

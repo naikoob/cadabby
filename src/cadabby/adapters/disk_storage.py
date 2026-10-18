@@ -9,12 +9,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
+from cadabby.constants import DIR_RAW
 from cadabby.domain import Note
 from cadabby.frontmatter import FrontmatterParseError
 from cadabby.fsutil import atomic_replace_checked, check_expected_hash, compute_bytes_sha256
 from cadabby.indexer import append_vault_log
 from cadabby.ports import LedgerPort, NoteStoragePort
-from cadabby.vault import Vault, cid_to_path, path_to_cid
+from cadabby.vault import Vault, cid_to_path, is_excluded_dir, path_to_cid
 
 
 class DiskNoteStorage(NoteStoragePort):
@@ -98,6 +99,25 @@ class DiskNoteStorage(NoteStoragePort):
         # rel_path() resolves symlinks, so a symlinked note and its target
         # map to one CID; a set keeps it from being listed (and planned) twice.
         return sorted({path_to_cid(self.vault.rel_path(p)) for p, _, _ in self.vault.iter_domain_notes()})
+
+    def list_source_paths(self) -> Sequence[str]:
+        # The scan's own walk (§2.4), so this lists exactly the cache's raw rows;
+        # a symlink resolving outside raw/ is not evidence and is left out.
+        return sorted(
+            rel for rel in {self.vault.rel_path(p) for p in self.vault.iter_raw_files()} if rel.startswith(f"{DIR_RAW}/")
+        )
+
+    def read_source(self, rel_path: str) -> str | None:
+        parts = rel_path.replace("\\", "/").split("/")
+        if len(parts) < 2 or parts[0] != DIR_RAW or any(p in ("", ".", "..") for p in parts):
+            return None
+        # The same pruning as iter_raw_files: no dot or ignored folder, no dotfile.
+        if any(is_excluded_dir(p) for p in parts[1:-1]) or parts[-1].startswith("."):
+            return None
+        target = (self.vault.root / Path(*parts)).resolve()
+        if not target.is_relative_to(self.vault.raw_dir.resolve()) or not target.is_file():
+            return None
+        return target.read_bytes().decode("utf-8", errors="replace")
 
 
 class FileLedger(LedgerPort):

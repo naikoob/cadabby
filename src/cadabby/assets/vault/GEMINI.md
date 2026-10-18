@@ -2,8 +2,5 @@
 
 This vault is managed by Cadabby. Read `AGENTS.md` as the sole normative constitution.
 
-* **Constitution**: Consult `AGENTS.md` for trust tiers, vault conventions, and tool protocols.
-* **Tool Preference**: Always prefer native Cadabby MCP tools over subshell commands.
-* **Style & Voice**: Follow `STYLE.md` for objective voice and OKF frontmatter standards across all cognitive domains.
-* **Verification**: Never claim or forge `human:*` verification attestations.
-* **Personas**: Runbooks are located in `.agents/skills/librarian/` and `.agents/skills/technician/`.
+* **Constitution & Personas**: Follow `AGENTS.md` for trust tiers, vault conventions, and routing to `.agents/skills/librarian/SKILL.md` and `.agents/skills/technician/SKILL.md`.
+* **Tools & Style**: Always prefer native Cadabby MCP tools over subshell commands, follow `STYLE.md`, and never claim or forge `human:*` attestations.

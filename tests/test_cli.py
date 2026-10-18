@@ -20,7 +20,6 @@ from cadabby.cli import (
     cmd_init,
     cmd_install,
     cmd_lint,
-    cmd_log,
     cmd_move,
     cmd_scaffold,
     cmd_search,
@@ -161,7 +160,7 @@ class TestCli(unittest.TestCase):
         # 4. Ground
         args_ground = DummyArgs(
             vault=str(vault_root),
-            cids=["wiki/sqlite"],
+            targets=["wiki/sqlite"],
             budget_tokens=None,
             json=True,
         )
@@ -319,7 +318,7 @@ class TestCli(unittest.TestCase):
         self.assertIn("TTY", str(ctx.exception))
 
     def test_cli_writes_default_to_process_cli_even_on_a_tty(self):
-        """C37: scaffold, update and log record `process:cli` unless `--actor` is given.
+        """C37: scaffold and update record `process:cli` unless `--actor` is given.
 
         A terminal is no evidence of a person (§5.3): agents run commands in
         pseudo-terminals. The old `human:<user>` default let any flagless
@@ -334,29 +333,35 @@ class TestCli(unittest.TestCase):
                     vault=str(vault_root),
                     cid="wiki/actor-probe",
                     patch_frontmatter=None,
-                    append_section="Notes:more",
-                    replace_section=None,
                     expected_hash=None,
-                    edits=None,
+                    edits='[{"op": "append_section", "heading": "Notes", "body": "more"}]',
                     actor=None,
                 )
             )
-            cmd_log(DummyArgs(vault=str(vault_root), message="probe", actor=None))
-            cmd_log(DummyArgs(vault=str(vault_root), message="explicit", actor="agent:me"))
+            cmd_update(
+                DummyArgs(
+                    vault=str(vault_root),
+                    cid="wiki/actor-probe",
+                    patch_frontmatter='{"status": "active"}',
+                    expected_hash=None,
+                    edits=None,
+                    actor="agent:me",
+                )
+            )
 
         note = (vault_root / "wiki" / "actor-probe.md").read_text("utf-8")
         self.assertIn('by: "process:cli"', note)
         self.assertNotIn("human:", note)
         log = (vault_root / "log.md").read_text("utf-8")
-        for entry in ("Scaffolded wiki/actor-probe.md", "Updated wiki/actor-probe.md", "probe"):
-            line = next(l for l in log.splitlines() if entry in l)
-            self.assertIn("process:cli", line)
-        self.assertIn("agent:me", next(l for l in log.splitlines() if "explicit" in l))
+        updates = [l for l in log.splitlines() if "Updated wiki/actor-probe.md" in l]
+        self.assertIn("process:cli", next(l for l in log.splitlines() if "Scaffolded wiki/actor-probe.md" in l))
+        self.assertIn("process:cli", updates[0])
+        self.assertIn("agent:me", updates[1])
 
     def test_graph_unknown_note_is_not_found(self):
         vault_root = copy_demo_vault(self.dir / "graph-vault")
         with self.assertRaises(FileNotFoundError):
-            cmd_graph(DummyArgs(vault=str(vault_root), cid="wiki/No-Such-Note", json=True))
+            cmd_graph(DummyArgs(vault=str(vault_root), target="wiki/No-Such-Note", mocs=False, limit=20, json=True))
 
     def test_install_usage_errors_and_refusals_never_exit_findings(self):
         """C38: install's usage errors are INVALID_ARGUMENT; a refused install exits 3, never 1."""
@@ -528,8 +533,6 @@ class TestCli(unittest.TestCase):
             "vault": str(vault_path),
             "cid": "SQLite",
             "patch_frontmatter": None,
-            "append_section": None,
-            "replace_section": None,
             "expected_hash": None,
             "actor": None,
             "edits": None,
@@ -1066,7 +1069,7 @@ class TestStatusAndMoveCommands(unittest.TestCase):
         # 4. cmd_ground with #section renders `[Section: ...]` in text output
         code_g, out_g = self._run(
             cmd_ground,
-            cids=["wiki/epistemic-trust-tiers#Epistemic Trust Tiers"],
+            targets=["wiki/epistemic-trust-tiers#Epistemic Trust Tiers"],
             budget_tokens=None,
             json=False,
         )
@@ -1077,16 +1080,72 @@ class TestStatusAndMoveCommands(unittest.TestCase):
         """§5.3, §10 C58: unresolvable targets print as errors on stderr; the rest still print; all-bad exits 3."""
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            code, out = self._run(cmd_ground, cids=["sqlite", "no-such-note"], budget_tokens=None, json=False)
+            code, out = self._run(cmd_ground, targets=["sqlite", "no-such-note"], budget_tokens=None, json=False)
         self.assertEqual(code, 0)
         self.assertIn("CID: wiki/sqlite", out)
         self.assertIn("Error [NOT_FOUND] no-such-note", err.getvalue())
 
         with contextlib.redirect_stderr(io.StringIO()):
             exit_code = _run_like_main(
-                cmd_ground, DummyArgs(vault=str(self.vault_root), cids=["no-such-note"], budget_tokens=None, json=False)
+                cmd_ground, DummyArgs(vault=str(self.vault_root), targets=["no-such-note"], budget_tokens=None, json=False)
             )
         self.assertEqual(exit_code, EXIT_ENVIRONMENT)
+
+
+class TestCliMirrorsMcp(unittest.TestCase):
+    """§5.3, §10 C71: the eight vault verbs mirror the eight MCP tools; the ledger has no free-text write."""
+
+    def _subcommands(self) -> list[str]:
+        import argparse
+
+        parser = build_parser()
+        action = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+        return list(action.choices)
+
+    def test_every_mcp_tool_has_a_cli_verb_listed_first(self):
+        from cadabby.mcp import TOOLS
+
+        verbs = [t["name"].removeprefix("vault_").removesuffix("_note") for t in TOOLS]
+        commands = self._subcommands()
+        self.assertEqual(len(verbs), 8)
+        self.assertEqual(set(commands[:8]), set(verbs))
+
+    def test_log_is_gone(self):
+        self.assertNotIn("log", self._subcommands())
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as ctx:
+            build_parser().parse_args(["log", "hello"])
+        self.assertEqual(ctx.exception.code, EXIT_USAGE)
+
+    def test_graph_needs_exactly_one_of_target_or_mocs(self):
+        parser = build_parser()
+        for argv in (["graph"], ["graph", "x", "--mocs"]):
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                parser.parse_args(argv)
+        self.assertTrue(parser.parse_args(["graph", "--mocs"]).mocs)
+
+    def test_status_lint_lists_findings_and_still_exits_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = copy_demo_vault(Path(tmp) / "v")
+            (root / "wiki" / "broken.md").write_text("---\ntype: concept\ntitle: B\ndescription: d\nstatus: active\n---\n[[nowhere]]\n", "utf-8")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = cmd_status(DummyArgs(vault=str(root), json=True, lint=True))
+            data = json.loads(out.getvalue())
+        self.assertEqual(code, 0)
+        self.assertIn("LINK_DEAD", {f["code"] for f in data["findings"]})
+        self.assertIn("queues", data)
+
+    def test_graph_mocs_json_and_raw_ground_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = copy_demo_vault(Path(tmp) / "v")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cmd_graph(DummyArgs(vault=str(root), target=None, mocs=True, limit=20, json=True))
+            self.assertEqual(json.loads(out.getvalue())["view"], "mocs")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cmd_ground(DummyArgs(vault=str(root), targets=["raw/karpathy-llm-wiki-gist.md"], budget_tokens=None, json=False))
+            self.assertIn("Cited by:", out.getvalue())
 
 
 class TestCliPolish(unittest.TestCase):
@@ -1096,13 +1155,6 @@ class TestCliPolish(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
-
-    def test_section_heading_may_contain_an_escaped_colon(self):
-        from cadabby.cli import _parse_section_arg
-
-        self.assertEqual(_parse_section_arg("Q\\: why:Because: yes"), ("Q: why", "Because: yes"))
-        self.assertEqual(_parse_section_arg("Heading:Body"), ("Heading", "Body"))
-        self.assertEqual(_parse_section_arg("Heading"), ("Heading", ""))
 
     def test_audit_json_has_one_shape_with_or_without_a_notice(self):
         import contextlib

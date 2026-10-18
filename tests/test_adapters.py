@@ -302,6 +302,55 @@ class TestDiskNoteStorage(unittest.TestCase):
         self.assertEqual(self.storage.get_note("wiki/Crlf").trust_tier, "machine-confirmed")
 
 
+class TestSourceReads(unittest.TestCase):
+    """§2.4, §5.1: raw/ evidence is readable through the port, and nothing else is."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.vault_dir = Path(self.tmp.name) / "vault"
+        self.vault = create_test_vault(self.vault_dir, subdirs=("wiki", "raw/deep", "raw/.git", "raw/node_modules"))
+        self.storage = DiskNoteStorage(self.vault)
+        (self.vault_dir / "raw" / "a.md").write_text("alpha", "utf-8")
+        (self.vault_dir / "raw" / "deep" / "b.txt").write_text("beta", "utf-8")
+        (self.vault_dir / "raw" / ".dot.md").write_text("dot", "utf-8")
+        (self.vault_dir / "raw" / ".git" / "c.md").write_text("git", "utf-8")
+        (self.vault_dir / "raw" / "node_modules" / "d.md").write_text("nm", "utf-8")
+        (self.vault_dir / "wiki" / "Note.md").write_text("---\ntype: concept\n---\nnote", "utf-8")
+        outside = Path(self.tmp.name) / "outside.md"
+        outside.write_text("outside", "utf-8")
+        (self.vault_dir / "raw" / "escape.md").symlink_to(outside)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_disk_lists_and_reads_only_raw_evidence(self):
+        self.assertEqual(list(self.storage.list_source_paths()), ["raw/a.md", "raw/deep/b.txt"])
+        self.assertEqual(self.storage.read_source("raw/a.md"), "alpha")
+        self.assertEqual(self.storage.read_source("raw/deep/b.txt"), "beta")
+        for refused in (
+            "wiki/Note.md", "raw/../wiki/Note.md", "raw/./a.md", "raw//a.md", "raw/.dot.md",
+            "raw/.git/c.md", "raw/node_modules/d.md", "raw/escape.md", "raw", "raw/deep", "/etc/passwd",
+        ):
+            with self.subTest(path=refused):
+                self.assertIsNone(self.storage.read_source(refused))
+
+    def test_disk_listing_matches_the_cache_raw_rows(self):
+        with VaultCache(self.vault) as cache:
+            cache.scan()
+            rows = [r[0] for r in cache.get_connection().execute("SELECT rel_path FROM notes WHERE layer = 'raw' ORDER BY rel_path")]
+        self.assertEqual(list(self.storage.list_source_paths()), [r for r in rows if r.startswith("raw/")])
+
+    def test_memory_twin_reads_what_was_placed_and_refuses_the_rest(self):
+        mem = InMemoryNoteStorage()
+        mem.put_source("raw/a.md", "alpha")
+        self.assertEqual(list(mem.list_source_paths()), ["raw/a.md"])
+        self.assertEqual(mem.read_source("raw/a.md"), "alpha")
+        self.assertIsNone(mem.read_source("raw/b.md"))
+        for bad in ("wiki/x.md", "raw/../x.md", "raw"):
+            with self.subTest(path=bad), self.assertRaises(ValueError):
+                mem.put_source(bad, "x")
+
+
 class TestFileLedger(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

@@ -171,12 +171,12 @@ class TestMCPErrorPayload(unittest.TestCase):
     def test_a_missing_required_argument_blames_the_caller(self):
         """Without the dispatch guard this is a KeyError, hence INTERNAL.
 
-        "INTERNAL: 'cids'" tells an agent the server is broken and there is
+        "INTERNAL: 'targets'" tells an agent the server is broken and there is
         nothing to do; INVALID_ARGUMENT naming the field tells it what to send.
         """
         err = self._error("vault_ground", {})
         self.assertEqual(err["code"], "INVALID_ARGUMENT")
-        self.assertIn("cids", err["message"])
+        self.assertIn("targets", err["message"])
 
     def test_the_required_guard_tracks_the_published_schema(self):
         """Both lists come from TOOLS, so a new required field cannot drift."""

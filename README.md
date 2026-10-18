@@ -45,6 +45,20 @@ cadabby --help
 Cadabby has **zero runtime dependencies** (pure CPython >= 3.11 standard
 library), so installation never pulls in a transitive dependency tree.
 
+### Upgrading from 0.4.2
+
+0.5.0 grows the MCP surface to eight tools and lines the CLI up with it. `vault_graph` is new: link structure without note text, for one note's neighborhood or across every MOC. `vault_ground` now reads `raw/` sources, and `vault_status` returns the worklists themselves (`queues`). Breaking changes:
+
+- `vault_ground`'s `cids` is now `targets`, and `cadabby ground` takes the same names.
+- `vault_update_note` no longer takes `append_section` or `replace_section`, and `cadabby update` no longer takes `--append-section` or `--replace-section`. Pass them as entries in `edits` / `--edits`: `[{"op": "append_section", "heading": "...", "body": "..."}]`.
+- `cadabby log` is removed. `log.md` records the write tools and nothing else.
+- `cadabby graph` takes a target or `--mocs`. Its JSON output gains neighbor metadata and per-list totals.
+
+An agent that sends an old argument name is told the new one. After upgrading the package, in each vault:
+
+1. Run `cadabby install --all` to refresh the engine-owned runbooks and the plugin, whose skill lists the eight tools.
+2. Only if you wrote parameter names into your own `AGENTS.md` or `CLAUDE.md` (the stock templates don't): rename `cids` to `targets` and replace section parameters with `edits`.
+
 ### Upgrading from 0.4.1
 
 0.4.2 adds folder subtree moves (`vault_move_note` / `cadabby move` with a trailing `/`) and `archive/` domain support (`0.5×` search multiplier, active-first stem resolution, and worklist exclusion). After upgrading the package, in each vault:
@@ -84,7 +98,7 @@ git clone https://github.com/naikoob/cadabby.git
 cd cadabby
 uv sync                    # or: pip install -e .
 
-# Fast parallel test execution across all CPU cores (~25s, 551 tests):
+# Fast parallel test execution across all CPU cores (~12s, 661 tests):
 python3 tests/run_parallel.py
 
 # Canonical sequential test suite:
@@ -291,10 +305,11 @@ Conforming to §5.1-§5.2 of the Technical Specification, Cadabby exposes exactl
 | Tool | Purpose |
 | :--- | :--- |
 | **`vault_search`** | Epistemic BM25 full-text search with trust tier boosts, domain filters, and status multipliers. |
-| **`vault_ground`** | Retrieves full content, localized domain directives, and 1-hop graph neighborhood (links, backlinks, sources). |
-| **`vault_status`** | Vault health check: tier counts, domain breakdown, verification debt, unprocessed `raw/` files, and `finding_counts` from the six lint gates; `lint=true` returns the findings themselves. |
+| **`vault_ground`** | Retrieves note content, localized domain directives, and 1-hop graph neighborhood (links, backlinks, sources), or a `raw/` source's text and the notes citing it. |
+| **`vault_status`** | Vault health check: tier counts, domain breakdown, verification debt, unprocessed `raw/` files, `finding_counts` from the six lint gates, and `queues` listing the work itself (sources to ingest, unfiled notes, debt split into agent-payable and human-owed); `lint=true` returns the findings themselves. |
+| **`vault_graph`** | Link structure without note text: a note's 1- and 2-hop neighborhood, co-citations and coupling with trust tiers, or every MOC's link counts and overlaps for splits and merges. |
 | **`vault_scaffold_note`** | Scaffolds a new typed note in any domain with valid OKF frontmatter and generated attribution. |
-| **`vault_update_note`** | Non-destructive frontmatter patch, section append, or section replace with optimistic lock. |
+| **`vault_update_note`** | Non-destructive frontmatter patch and an atomic list of body `edits` (replace text, replace or append a `##` section) with optimistic lock. |
 | **`vault_move_note`** | Moves or renames a note or folder subtree (`prefix/`) and repoints every link to it; dry-run by default, with each affected note's trust tier before and after and a `plan_token` that binds the apply to the plan shown. |
 | **`vault_verify_note`** | Cryptographically binds an `agent:<client_id>` attestation to the body SHA-256 (refuses `human:*`). |
 
@@ -309,23 +324,24 @@ Conforming to §5.1-§5.2 of the Technical Specification, Cadabby exposes exactl
 
 ## 6. CLI Command Reference
 
+The first eight commands mirror the eight MCP tools; the rest are operator commands.
+
 | Command | Description | Example |
 | :--- | :--- | :--- |
-| `cadabby init` | Scaffold a new vault with all config & skills, optionally with Obsidian starter templates (`--obsidian-templates`) | `cadabby init --vault my-vault --obsidian` |
-| `cadabby sync` | Scan files, update SQLite cache & rebuild `index.md` | `cadabby sync` |
-| `cadabby status` | Report note counts, trust tiers, and verification debt | `cadabby status` |
 | `cadabby search` | Epistemic BM25 search with trust boosts & domain filters | `cadabby search "attention mechanism" --domain wiki` |
-| `cadabby ground` | Retrieve note content and 1-hop neighborhood | `cadabby ground wiki/Attention` |
+| `cadabby ground` | Retrieve note content and 1-hop neighborhood, or a `raw/` source and the notes citing it | `cadabby ground wiki/Attention raw/paper.md#Results` |
+| `cadabby status` | Report note counts, trust tiers, verification debt, and the worklists; `--lint` adds every finding | `cadabby status --lint` |
+| `cadabby graph` | Link structure without note text: a note's neighborhood, or `--mocs` for every MOC's link counts and overlaps | `cadabby graph wiki/Attention` |
 | `cadabby scaffold` | Scaffold a new typed note in any domain, optionally from an Obsidian template (`--template`) | `cadabby scaffold "Transformer" --type concept --domain wiki --desc "Attention model"` |
-| `cadabby update` | Patch frontmatter or append/replace sections | `cadabby update wiki/Transformer --replace-section "Overview:New text"` |
+| `cadabby update` | Patch frontmatter and apply an atomic list of body edits | `cadabby update wiki/Transformer --edits '[{"op":"replace_section","heading":"Overview","body":"New text"}]'` |
 | `cadabby move` | Move or rename a note or folder subtree (`prefix/`) and repoint its links (dry-run by default; `--apply --plan-token <t>` writes what the dry run showed; a trailing `/` moves into a folder or moves a folder subtree) | `cadabby move wiki/Transformer customers/acme/ --apply --plan-token 3f9c…` |
 | `cadabby verify` | Stamp cryptographic attestation on note | `cadabby verify wiki/Transformer --human` |
-| `cadabby lint` | Run the six normative epistemic linting gates across all domains | `cadabby lint` |
-| `cadabby audit` | Check Git blame provenance of human attestations | `cadabby audit --require-signed` |
-| `cadabby graph` | Display 1-hop and 2-hop neighbors and co-citations for a note | `cadabby graph wiki/Attention` |
-| `cadabby log` | Append a timestamped entry to the active `log.md` ledger | `cadabby log "Reviewed distributed consensus notes"` |
-| `cadabby mcp` | Launch the JSON-RPC 2.0 stdio MCP server | `cadabby mcp` |
+| `cadabby init` | Scaffold a new vault with all config & skills, optionally with Obsidian starter templates (`--obsidian-templates`) | `cadabby init --vault my-vault --obsidian` |
 | `cadabby install` | Register MCP configs in Antigravity or Claude Code | `cadabby install --antigravity` |
+| `cadabby mcp` | Launch the JSON-RPC 2.0 stdio MCP server | `cadabby mcp` |
+| `cadabby lint` | Run the six normative epistemic linting gates across all domains | `cadabby lint` |
+| `cadabby sync` | Scan files, update SQLite cache & rebuild `index.md` | `cadabby sync` |
+| `cadabby audit` | Check Git blame provenance of human attestations | `cadabby audit --require-signed` |
 
 ---
 
@@ -352,7 +368,7 @@ Status and domain multipliers apply on top of trust tiers:
 Cadabby uses standard-library `unittest` with **zero test dependencies**:
 
 ```bash
-# Fast parallel test execution across all CPU cores (~25s, 551 tests):
+# Fast parallel test execution across all CPU cores (~12s, 661 tests):
 python3 tests/run_parallel.py
 
 # Parallel execution with verbose output or target filtering:

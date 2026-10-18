@@ -15,8 +15,8 @@ from typing import Any
 
 from cadabby.okf import utc_now_iso
 
-from cadabby.cache import VaultCache, unprocessed_raw_paths
-from cadabby.constants import DIR_ARCHIVE, LEDGER_TITLE, TYPE_MOC
+from cadabby.cache import VaultCache, unfiled_note_rows, unprocessed_raw_paths, verification_debt_rows
+from cadabby.constants import LEDGER_TITLE, TYPE_MOC
 from cadabby.fsutil import advisory_lock, append_ledger, atomic_write
 from cadabby.vault import Vault
 
@@ -156,27 +156,10 @@ def _unfiled(conn: sqlite3.Connection) -> list[str]:
     their own topology in folders (§2.5). `deprecated` notes are excluded: the
     section is a worklist, and filing a retired note is not work. Without that
     exclusion the report has a floor it can never reach zero from, which would
-    defeat the point of shrinking it.
+    defeat the point of shrinking it. The definition lives in
+    `cache.unfiled_note_rows`, shared with the `vault_status` queue.
     """
-    rows = conn.execute(
-        """
-        WITH RECURSIVE filed(cid) AS (
-            SELECT cid FROM notes
-            WHERE layer = 'wiki' AND type = ? AND parse_error IS NULL
-          UNION
-            SELECT l.target_cid FROM links l
-            JOIN filed f ON l.source_cid = f.cid
-            WHERE l.target_cid IS NOT NULL
-        )
-        SELECT stem, rel_path, description FROM notes
-        WHERE layer = 'wiki'
-          AND parse_error IS NULL
-          AND COALESCE(status, 'active') NOT IN ('deprecated', 'abandoned')
-          AND cid NOT IN (SELECT cid FROM filed)
-        ORDER BY stem ASC;
-        """,
-        (TYPE_MOC,),
-    ).fetchall()
+    rows = unfiled_note_rows(conn)
     if not rows:
         return []
     lines = [
@@ -212,19 +195,11 @@ def _verification_debt(conn: sqlite3.Connection) -> list[str]:
     """Section 4: notes whose verification entries have all gone stale (§3.4).
 
     Vault-wide across active domains: retired notes (`archive/`, `deprecated`,
-    or `abandoned`) are excluded because they are no longer maintained.
+    or `abandoned`) are excluded because they are no longer maintained. The
+    definition lives in `cache.verification_debt_rows`, shared with the
+    `vault_status` queue.
     """
-    rows = conn.execute(
-        """
-        SELECT cid FROM notes
-        WHERE trust_tier = 'stale-verified'
-          AND parse_error IS NULL
-          AND layer != ?
-          AND COALESCE(status, 'active') NOT IN ('deprecated', 'abandoned')
-        ORDER BY cid ASC;
-        """,
-        (DIR_ARCHIVE,),
-    ).fetchall()
+    rows = verification_debt_rows(conn)
     if not rows:
         return []
     lines = [
@@ -235,7 +210,7 @@ def _verification_debt(conn: sqlite3.Connection) -> list[str]:
         "| Note |",
         "| :--- |",
     ]
-    lines += [f"| `{r['cid']}` |" for r in rows]
+    lines += [f"| `{r.cid}` |" for r in rows]
     return lines + [""]
 
 

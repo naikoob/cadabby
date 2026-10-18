@@ -42,17 +42,18 @@ class TestMcpServer(unittest.TestCase):
             "vault_search",
             "vault_ground",
             "vault_status",
+            "vault_graph",
             "vault_scaffold_note",
             "vault_update_note",
             "vault_move_note",
             "vault_verify_note",
         ]
-        self.assertEqual(len(tools_res["tools"]), 7)
+        self.assertEqual(len(tools_res["tools"]), 8)
         self.assertEqual(set(tool_names), set(expected))
 
     def test_update_note_schema_exposes_edits(self):
         tools = {t["name"]: t for t in self.server.handle_tools_list()["tools"]}
-        self.assertEqual(len(tools), 7)
+        self.assertEqual(len(tools), 8)
         edits = tools["vault_update_note"]["inputSchema"]["properties"]["edits"]
         self.assertEqual(edits["type"], "array")
         self.assertEqual(
@@ -91,7 +92,7 @@ class TestMcpServer(unittest.TestCase):
         self.assertGreater(len(data_search_hyphen), 0)
 
         # Ground with bare stem and wikilink
-        res_ground = self.server.handle_tools_call("vault_ground", {"cids": ["sqlite", "[[epistemic-trust-tiers]]"]})
+        res_ground = self.server.handle_tools_call("vault_ground", {"targets": ["sqlite", "[[epistemic-trust-tiers]]"]})
         self.assertFalse(res_ground["isError"])
         data_ground = json.loads(res_ground["content"][0]["text"])
         self.assertEqual(len(data_ground), 2)
@@ -121,7 +122,7 @@ class TestMcpServer(unittest.TestCase):
         self.assertTrue(any(h["cid"] == "wiki/quantum-computing" for h in search_hits))
 
         # Immediate ground must retrieve the newly scaffolded note
-        res_immediate_ground = self.server.handle_tools_call("vault_ground", {"cids": ["wiki/quantum-computing"]})
+        res_immediate_ground = self.server.handle_tools_call("vault_ground", {"targets": ["wiki/quantum-computing"]})
         self.assertFalse(res_immediate_ground["isError"])
         ground_hits = json.loads(res_immediate_ground["content"][0]["text"])
         self.assertEqual(len(ground_hits), 1)
@@ -132,7 +133,9 @@ class TestMcpServer(unittest.TestCase):
             "vault_update_note",
             {
                 "cid": "wiki/quantum-computing",
-                "append_section": ["Algorithms", "Shor's algorithm and Grover's algorithm."],
+                "edits": [
+                    {"op": "append_section", "heading": "Algorithms", "body": "Shor's algorithm and Grover's algorithm."}
+                ],
             },
         )
         self.assertFalse(res_update["isError"])
@@ -477,16 +480,16 @@ class TestMcpServer(unittest.TestCase):
         self.assertTrue(non_dict["isError"])
         self.assertEqual(json.loads(non_dict["content"][0]["text"])["error"]["code"], "INVALID_ARGUMENT")
 
-        str_cids = self.server.handle_tools_call("vault_ground", {"cids": "wiki/SQLite"})
-        self.assertTrue(str_cids["isError"])
-        self.assertEqual(json.loads(str_cids["content"][0]["text"])["error"]["code"], "INVALID_ARGUMENT")
+        str_targets = self.server.handle_tools_call("vault_ground", {"targets": "wiki/SQLite"})
+        self.assertTrue(str_targets["isError"])
+        self.assertEqual(json.loads(str_targets["content"][0]["text"])["error"]["code"], "INVALID_ARGUMENT")
 
-        str_append = self.server.handle_tools_call(
+        str_edits = self.server.handle_tools_call(
             "vault_update_note",
-            {"cid": "wiki/SQLite", "append_section": "Heading:Body"},
+            {"cid": "wiki/SQLite", "edits": "Heading:Body"},
         )
-        self.assertTrue(str_append["isError"])
-        self.assertEqual(json.loads(str_append["content"][0]["text"])["error"]["code"], "INVALID_ARGUMENT")
+        self.assertTrue(str_edits["isError"])
+        self.assertEqual(json.loads(str_edits["content"][0]["text"])["error"]["code"], "INVALID_ARGUMENT")
 
         # Every argument is checked against its inputSchema before dispatch (§5.1, §5.4):
         # nothing is coerced, nothing mistyped reaches the engine or the disk.
@@ -503,7 +506,7 @@ class TestMcpServer(unittest.TestCase):
             ("vault_search", {"query": "x", "limit": True}, "'limit' must be an integer"),
             ("vault_search", {"query": "x", "limit": 0}, "'limit' must be at least 1"),
             ("vault_search", {"query": 5}, "'query' must be a string"),
-            ("vault_ground", {"cids": ["SQLite"], "budget_tokens": "50"}, "'budget_tokens' must be an integer"),
+            ("vault_ground", {"targets": ["SQLite"], "budget_tokens": "50"}, "'budget_tokens' must be an integer"),
             ("vault_scaffold_note", {"title": "T", "type": "concept", "description": "d", "domain": 5}, "'domain' must be a string"),
             ("vault_scaffold_note", {"title": "T", "type": "concept", "description": "d", "tags": "a,b"}, "'tags' must be an array"),
             ("vault_update_note", {"cid": "wiki/SQLite", "patch_frontmatter": "status: active"}, "'patch_frontmatter' must be an object"),
@@ -543,7 +546,7 @@ class TestMcpServer(unittest.TestCase):
         # 3. vault_ground with #section extracts section and enriches 1-hop neighbors
         res_ground = self.server.handle_tools_call(
             "vault_ground",
-            {"cids": ["wiki/epistemic-trust-tiers#Epistemic Trust Tiers"]},
+            {"targets": ["wiki/epistemic-trust-tiers#Epistemic Trust Tiers"]},
         )
         self.assertFalse(res_ground["isError"])
         grounded = json.loads(res_ground["content"][0]["text"])
@@ -554,7 +557,7 @@ class TestMcpServer(unittest.TestCase):
         # 4. vault_ground with a missing #section returns the full note with section_error naming the headings
         res_bad_sec = self.server.handle_tools_call(
             "vault_ground",
-            {"cids": ["wiki/epistemic-trust-tiers#NoSuchHeading"]},
+            {"targets": ["wiki/epistemic-trust-tiers#NoSuchHeading"]},
         )
         self.assertFalse(res_bad_sec["isError"])
         item = json.loads(res_bad_sec["content"][0]["text"])[0]
@@ -564,18 +567,18 @@ class TestMcpServer(unittest.TestCase):
 
     def test_mcp_ground_partial_results(self):
         """§5.1, §10 C58: a bad target comes back as an error entry in place; isError only when nothing grounds."""
-        res = self.server.handle_tools_call("vault_ground", {"cids": ["sqlite", "no-such-note"]})
+        res = self.server.handle_tools_call("vault_ground", {"targets": ["sqlite", "no-such-note"]})
         self.assertFalse(res["isError"])
         entries = json.loads(res["content"][0]["text"])
         self.assertEqual([e["target"] for e in entries], ["sqlite", "no-such-note"])
         self.assertEqual(entries[0]["cid"], "wiki/sqlite")
         self.assertEqual(entries[1]["error"]["code"], "NOT_FOUND")
 
-        only_bad = self.server.handle_tools_call("vault_ground", {"cids": ["no-such-note"]})
+        only_bad = self.server.handle_tools_call("vault_ground", {"targets": ["no-such-note"]})
         self.assertTrue(only_bad["isError"])
         self.assertEqual(json.loads(only_bad["content"][0]["text"])["error"]["code"], "NOT_FOUND")
 
-        empty = self.server.handle_tools_call("vault_ground", {"cids": []})
+        empty = self.server.handle_tools_call("vault_ground", {"targets": []})
         self.assertTrue(empty["isError"])
         self.assertEqual(json.loads(empty["content"][0]["text"])["error"]["code"], "INVALID_ARGUMENT")
 
@@ -633,6 +636,152 @@ class TestMcpProtocolErrors(unittest.TestCase):
         responses = self._drive_server_raw(framed)
         self.assertEqual([r.get("id") for r in responses], [1])
         self.assertEqual(responses[0]["result"], {})
+
+
+def _note(root: Path, rel: str, body: str, *, type_: str = "concept", extra: str = "") -> None:
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    title = Path(rel).stem
+    path.write_text(
+        f"---\ntype: {type_}\ntitle: {title}\ndescription: d\nstatus: active\n{extra}---\n# {title}\n\n{body}\n",
+        "utf-8",
+    )
+
+
+class TestEightToolSurface(unittest.TestCase):
+    """§5.1, §4.5 and §10 C67-C70: raw grounding, status queues, vault_graph, retired arguments."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.root = copy_demo_vault(Path(self.tmp_dir.name) / "demo-vault")
+        self.server = McpServer(Vault(self.root))
+
+    def tearDown(self):
+        self.server.close()
+        self.tmp_dir.cleanup()
+
+    def _call(self, tool: str, args: dict) -> dict:
+        res = self.server.handle_tools_call(tool, args)
+        payload = json.loads(res["content"][0]["text"])
+        return payload["error"] if res["isError"] else payload
+
+    def _ok(self, tool: str, args: dict):
+        res = self.server.handle_tools_call(tool, args)
+        self.assertFalse(res["isError"], res["content"][0]["text"])
+        return json.loads(res["content"][0]["text"])
+
+    # -- C67: raw sources over vault_ground --------------------------------
+
+    def test_ground_reads_a_raw_source_section_with_its_citers(self):
+        (self.root / "raw" / "paper.md").write_text("# Paper\n\nIntro.\n\n## Results\n\nSpeedup is 2x.\n", "utf-8")
+        _note(self.root, "wiki/cites-paper.md", "Body.", extra='sources:\n  - "raw/paper.md"\n')
+        [entry] = self._ok("vault_ground", {"targets": ["raw/paper.md#Results"]})
+        self.assertEqual(entry["kind"], "raw")
+        self.assertEqual(entry["path"], "raw/paper.md")
+        self.assertEqual(entry["section"], "Results")
+        self.assertIn("Speedup is 2x.", entry["content"])
+        self.assertNotIn("Intro.", entry["content"])
+        self.assertNotIn("trust_tier", entry)
+        self.assertEqual([c["cid"] for c in entry["cited_by"]], ["wiki/cites-paper"])
+        self.assertEqual(entry["cited_by"][0]["trust_tier"], "unverified")
+
+    def test_ground_a_pdf_source_is_filename_only(self):
+        [entry] = self._ok("vault_ground", {"targets": ["raw/2026-paper-kv.pdf"]})
+        self.assertTrue(entry["filename_only"])
+        self.assertIsNone(entry["content"])
+        self.assertIn("wiki/flash-attention", [c["cid"] for c in entry["cited_by"]])
+
+    def test_ground_refuses_anything_that_is_not_listed_raw_evidence(self):
+        (self.root / "raw" / ".hidden.md").write_text("secret", "utf-8")
+        outside = Path(self.tmp_dir.name) / "outside.md"
+        outside.write_text("outside", "utf-8")
+        (self.root / "raw" / "link.md").symlink_to(outside)
+        for target in ("raw/../.cadabby.json", "raw/.hidden.md", "raw/link.md", "raw/no-such.md", "raw/../wiki/sqlite.md"):
+            with self.subTest(target=target):
+                err = self._call("vault_ground", {"targets": [target]})
+                self.assertEqual(err["code"], "NOT_FOUND")
+
+    def test_ground_mixes_notes_and_sources_and_budgets_both(self):
+        entries = self._ok(
+            "vault_ground", {"targets": ["sqlite", "raw/karpathy-llm-wiki-gist.md"], "budget_tokens": 30}
+        )
+        self.assertEqual([e["kind"] for e in entries], ["note", "raw"])
+        self.assertTrue(entries[1]["truncated"])
+        self.assertIn("[truncated:", entries[1]["content"])
+
+    # -- C68: queues in vault_status -----------------------------------------
+
+    def test_status_queues_match_index_and_split_debt(self):
+        _note(self.root, "wiki/loose-note.md", "Links out to [[sqlite]].")
+        stale = 'verified:\n  - by: "human:alice"\n    at: "2026-01-01T00:00:00Z"\n    of: "sha256:0000"\n'
+        _note(self.root, "wiki/human-stale.md", "See [[sqlite]].", extra=stale)
+        agent_last = stale + '  - by: "agent:bot"\n    at: "2026-01-02T00:00:00Z"\n    of: "sha256:1111"\n'
+        _note(self.root, "wiki/agent-stale.md", "See [[sqlite]].", extra=agent_last)
+        status = self._ok("vault_status", {})
+        queues = status["queues"]
+        self.assertIn("raw/unprocessed-notes.txt", queues["unprocessed_raw"]["items"])
+        self.assertIn("wiki/loose-note", queues["unfiled"]["items"])
+        debt = queues["verification_debt"]
+        self.assertIn("wiki/human-stale", debt["human_owed"]["items"])
+        self.assertNotIn("wiki/human-stale", debt["agent_payable"]["items"])
+        # A human sign-off later re-checked by an agent is the agent's to renew.
+        self.assertIn("wiki/agent-stale", debt["agent_payable"]["items"])
+        # One definition: index.md lists exactly what the queues list.
+        index = (self.root / "index.md").read_text("utf-8")
+        for cid in debt["human_owed"]["items"] + debt["agent_payable"]["items"]:
+            self.assertIn(f"`{cid}`", index)
+        self.assertIn("[[loose-note]]", index)
+
+    def test_status_queues_are_capped_with_totals(self):
+        for i in range(30):
+            (self.root / "raw" / f"bulk-{i:02}.txt").write_text("x", "utf-8")
+        queue = self._ok("vault_status", {})["queues"]["unprocessed_raw"]
+        self.assertEqual(len(queue["items"]), 25)
+        self.assertGreaterEqual(queue["total"], 31)
+
+    # -- C69: vault_graph ----------------------------------------------------
+
+    def test_graph_neighborhood_carries_metadata_and_no_text(self):
+        graph = self._ok("vault_graph", {"target": "sqlite"})
+        self.assertEqual(graph["view"], "neighborhood")
+        self.assertEqual(graph["note"]["cid"], "wiki/sqlite")
+        self.assertTrue(graph["backlinks"])
+        self.assertIn("trust_tier", graph["backlinks"][0])
+        self.assertIn("title", graph["backlinks"][0])
+        self.assertIn("backlinks_total", graph)
+        self.assertNotIn('"content"', json.dumps(graph))
+        self.assertNotIn('"body"', json.dumps(graph))
+
+    def test_graph_mocs_reports_overlap_ratio(self):
+        for n in "abcde":
+            _note(self.root, f"wiki/n-{n}.md", "Leaf.")
+        _note(self.root, "wiki/one-moc.md", "[[n-a]] [[n-b]] [[n-c]] [[n-d]]", type_="moc")
+        _note(self.root, "wiki/two-moc.md", "[[n-a]] [[n-b]] [[n-c]] [[n-e]]", type_="moc")
+        graph = self._ok("vault_graph", {"view": "mocs"})
+        pair = next(o for o in graph["overlaps"] if {o["a"], o["b"]} == {"wiki/one-moc", "wiki/two-moc"})
+        self.assertEqual(pair["shared"], 3)
+        self.assertEqual(pair["ratio"], 0.75)
+        one = next(m for m in graph["mocs"] if m["cid"] == "wiki/one-moc")
+        self.assertEqual(one["outgoing"], 4)
+
+    def test_graph_refuses_bad_view_target_combinations(self):
+        for args in ({"view": "mocs", "target": "sqlite"}, {}, {"target": "raw/karpathy-llm-wiki-gist.md"}, {"view": "tree"}):
+            with self.subTest(args=args):
+                self.assertEqual(self._call("vault_graph", args)["code"], "INVALID_ARGUMENT")
+        self.assertEqual(self._call("vault_graph", {"target": "no-such-note"})["code"], "NOT_FOUND")
+
+    # -- C70: retired arguments ---------------------------------------------
+
+    def test_retired_arguments_name_their_replacement(self):
+        err = self._call("vault_ground", {"cids": ["sqlite"]})
+        self.assertEqual(err["code"], "INVALID_ARGUMENT")
+        self.assertIn("targets", err["message"])
+        err = self._call("vault_update_note", {"cid": "sqlite", "append_section": ["H", "B"]})
+        self.assertEqual(err["code"], "INVALID_ARGUMENT")
+        self.assertIn("edits", err["message"])
+        tools = {t["name"]: t for t in self.server.handle_tools_list()["tools"]}
+        self.assertNotIn("append_section", tools["vault_update_note"]["inputSchema"]["properties"])
+        self.assertNotIn("cids", tools["vault_ground"]["inputSchema"]["properties"])
 
 
 if __name__ == "__main__":

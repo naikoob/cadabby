@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
-import re
 import secrets
 import sys
 from pathlib import Path
@@ -25,11 +24,11 @@ from cadabby.errors import (
     classify,
     exit_code_for,
 )
-from cadabby.graph import get_note_graph, normalize_link_target
-from cadabby.indexer import append_vault_log, rotate_vault_log, sync_vault_index
+from cadabby.indexer import rotate_vault_log, sync_vault_index
 from cadabby.installer import InitRefusedError, init_vault
 from cadabby.lint import run_vault_lint, status_report
 from cadabby.ops import (
+    graph_view,
     ground_notes,
     move_note,
     resolve_note_cid,
@@ -150,7 +149,7 @@ def cmd_ground(args: argparse.Namespace) -> int:
     vault = resolve_cli_vault(args)
     with VaultCache(vault) as cache:
         cache.scan()
-        grounded = ground_notes(vault, args.cids, budget_tokens=args.budget_tokens, cache=cache)
+        grounded = ground_notes(vault, args.targets, budget_tokens=args.budget_tokens, cache=cache)
 
     if args.json:
         print(json.dumps(grounded, indent=2))
@@ -164,6 +163,17 @@ def cmd_ground(args: argparse.Namespace) -> int:
             print(f"Error [{err['code']}] {item['target']}: {err['message']}", file=sys.stderr)
             continue
         print("=" * 80)
+        if item["kind"] == "raw":
+            sec_suffix = f" [Section: {item['section']}]" if item.get("section") else ""
+            print(f"Source: {item['path']} (raw evidence, no trust tier){sec_suffix}")
+            if item.get("section_error"):
+                print(f"Note: {item['section_error']}; showing the whole source.")
+            cited = ", ".join(f"{c['cid']} ({c['trust_tier']})" for c in item["cited_by"]) or "(no note cites it yet)"
+            print(f"Cited by: {cited}")
+            print("-" * 80)
+            print(item["content"] if not item["filename_only"] else "(filename only: the engine cannot read this format)")
+            print()
+            continue
         sec_suffix = f" [Section: {item['section']}]" if item.get("section") else ""
         print(f"CID: {item['cid']} ({item['trust_tier']}){sec_suffix}")
         if item.get("section_error"):
@@ -215,33 +225,14 @@ def _parse_json_flag(raw: str, flag_name: str, expected_type: type, type_label: 
     return parsed
 
 
-# The heading runs to the first ':' not written as '\:'.
-_RE_SECTION_ARG = re.compile(r"((?:\\:|[^:])*):?(.*)", re.DOTALL)
-
-
-def _parse_section_arg(raw: str | None) -> tuple[str, str] | None:
-    """Split a CLI 'Heading:Body' section argument into (heading, body).
-
-    A heading that itself contains ':' escapes it: `"Q\\: why:Because."`.
-    """
-    if not raw:
-        return None
-    m = _RE_SECTION_ARG.fullmatch(raw)
-    assert m is not None  # the pattern matches any string
-    return (m.group(1).replace("\\:", ":"), m.group(2))
-
-
 def cmd_update(args: argparse.Namespace) -> int:
-    """Update note frontmatter or sections non-destructively."""
+    """Patch note frontmatter and apply ordered body edits, as `vault_update_note` (§5.3)."""
     vault = resolve_cli_vault(args)
     patch = (
         _parse_json_flag(args.patch_frontmatter, "--patch-frontmatter", dict, "object")
         if args.patch_frontmatter
         else None
     )
-
-    append_sec = _parse_section_arg(args.append_section)
-    replace_sec = _parse_section_arg(args.replace_section)
 
     raw_edits = getattr(args, "edits", None)
     edits = (
@@ -255,8 +246,6 @@ def cmd_update(args: argparse.Namespace) -> int:
             vault=vault,
             cid_or_path=args.cid,
             frontmatter_patch=patch,
-            append_section=append_sec,
-            replace_section=replace_sec,
             expected_hash=args.expected_hash,
             actor=_default_cli_actor(args),
             edits=edits,
@@ -374,7 +363,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     """Print high-level vault status, distribution, and verification debt."""
     vault = resolve_cli_vault(args)
     with VaultCache(vault) as cache:
-        status_data = status_report(vault, cache)
+        status_data = status_report(vault, cache, lint=getattr(args, "lint", False))
 
     if args.json:
         print(json.dumps(status_data, indent=2))
@@ -393,7 +382,21 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"Verification Debt (stale): {status_data['verification_debt']}")
     print(f"Broken Links: {status_data['broken_links']}")
     counts = status_data["finding_counts"]
-    print(f"Lint Findings: {counts['error']} error(s), {counts['warning']} warning(s) (details: cadabby lint)")
+    details = "below" if "findings" in status_data else "cadabby status --lint"
+    print(f"Lint Findings: {counts['error']} error(s), {counts['warning']} warning(s) (details: {details})")
+    queues = status_data["queues"]
+    debt = queues["verification_debt"]
+    for label, queue in (
+        ("Unprocessed Raw Sources", queues["unprocessed_raw"]),
+        ("Unfiled Notes", queues["unfiled"]),
+        ("Debt an Agent May Re-verify", debt["agent_payable"]),
+        ("Debt Owed by a Human (cadabby verify <cid> --human)", debt["human_owed"]),
+    ):
+        if queue["total"]:
+            more = f" (+{queue['total'] - len(queue['items'])} more)" if queue["total"] > len(queue["items"]) else ""
+            print(f"\n{label}: {queue['total']}{more}")
+            for item in queue["items"]:
+                print(f"  - {item}")
     print("\nTrust Tiers:")
     for tier in TRUST_TIERS:
         print(f"  - {tier:<20}: {status_data['trust_tiers'].get(tier, 0)}")
@@ -407,8 +410,19 @@ def cmd_status(args: argparse.Namespace) -> int:
     print("\nStatuses:")
     for s, count in status_data["statuses"].items():
         print(f"  - {s:<20}: {count}")
+    if "findings" in status_data:
+        print()
+        _print_findings(status_data["findings"])
     print()
     return EXIT_OK
+
+
+def _print_findings(findings: list[dict[str, Any]]) -> None:
+    """One line per lint finding, shared by `lint` and `status --lint`."""
+    for f in findings:
+        loc = f"{f['rel_path']}:{f['line']}" if f["line"] else f["rel_path"]
+        sev = "ERROR" if f["severity"] == "error" else "WARN "
+        print(f"[{sev}] {f['code']:<22} {loc:<45} {f['message']}")
 
 
 def cmd_lint(args: argparse.Namespace) -> int:
@@ -431,10 +445,7 @@ def cmd_lint(args: argparse.Namespace) -> int:
         return EXIT_OK
 
     print(f"\nEpistemic Lint Results: {len(errors)} error(s), {len(warnings)} warning(s)\n")
-    for f in findings:
-        loc = f"{f.rel_path}:{f.line}" if f.line else f.rel_path
-        sev_color = "ERROR" if f.severity == "error" else "WARN "
-        print(f"[{sev_color}] {f.code:<22} {loc:<45} {f.message}")
+    _print_findings([f.to_dict() for f in findings])
     print()
 
     return EXIT_FINDINGS if errors else EXIT_OK
@@ -479,73 +490,75 @@ def cmd_audit(args: argparse.Namespace) -> int:
     return EXIT_FINDINGS
 
 
-def cmd_log(args: argparse.Namespace) -> int:
-    """Append a timestamped entry to the active log.md ledger (§5.3)."""
+def cmd_graph(args: argparse.Namespace) -> int:
+    """Link structure without note text, as `vault_graph` (§5.1, §5.3).
+
+    `<target>` shows one note's neighborhood; `--mocs` shows every MOC's link
+    counts and overlaps. Exactly one of the two, checked by the parser.
+    """
     vault = resolve_cli_vault(args)
-    append_vault_log(vault, args.message, actor=_default_cli_actor(args))
-    print(f"Logged entry to {vault.rel_path(vault.log_path)}")
+    mocs = getattr(args, "mocs", False)
+    with VaultCache(vault) as cache:
+        cache.scan()
+        data = graph_view(
+            vault,
+            cache,
+            view="mocs" if mocs else "neighborhood",
+            target=None if mocs else args.target,
+            limit=getattr(args, "limit", None) or 20,
+        )
+
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return EXIT_OK
+    if mocs:
+        _print_moc_overview(data)
+    else:
+        _print_neighborhood(data)
     return EXIT_OK
 
 
-def cmd_graph(args: argparse.Namespace) -> int:
-    """Display 1-hop and 2-hop neighbors, co-citations, and links for a note (§5.3)."""
-    vault = resolve_cli_vault(args)
-    with VaultCache(vault) as cache:
-        cache.scan()
-        conn = cache.get_connection()
-        # Same normalization and resolver as vault_ground; an unresolvable
-        # target (e.g. a raw/ CID) is looked up exactly as given.
-        cid = normalize_link_target(args.cid)
-        cid = cache.get_link_resolver().resolve(cid) or cid
+def _more(data: dict[str, Any], key: str) -> str:
+    shown, total = len(data[key]), data.get(f"{key}_total", len(data[key]))
+    return f" (+{total - shown} more)" if total > shown else ""
 
-        graph_data = get_note_graph(conn, cid)
-        if not graph_data:
-            raise FileNotFoundError(f"Note not found: '{args.cid}'")
 
-        if args.json:
-            print(json.dumps(graph_data, indent=2))
-            return EXIT_OK
+def _tier(entry: dict[str, Any]) -> str:
+    return f" [{entry['trust_tier'] or 'unverified'}]" if entry.get("title") is not None else ""
 
-        note = graph_data["note"]
-        print(f"Graph for [[{note['cid']}]] ({note['type']}, {note['trust_tier']}):\n")
 
-        print("Forward Links (1-hop):")
-        if graph_data["forward_links"]:
-            for fl in graph_data["forward_links"]:
-                tgt = fl["target_cid"] or f"{fl['target_raw']} (unresolved)"
-                print(f"  -> [[{tgt}]]")
-        else:
+def _print_neighborhood(data: dict[str, Any]) -> None:
+    note = data["note"]
+    print(f"Graph for [[{note['cid']}]] ({note['type']}, {note['trust_tier']}):")
+    sections: list[tuple[str, str, Any]] = [
+        ("Forward Links (1-hop)", "forward_links",
+         lambda e: f"  -> [[{e['target_cid'] or e['target_raw'] + ' (unresolved)'}]]{_tier(e)}"),
+        ("Backlinks (1-hop)", "backlinks", lambda e: f"  <- [[{e['source_cid']}]]{_tier(e)}"),
+        ("2-Hop Forward", "two_hop_forward", lambda e: f"  -> [[{e['target_cid']}]]{_tier(e)} (via [[{e['via']}]])"),
+        ("2-Hop Backlinks", "two_hop_backlinks", lambda e: f"  <- [[{e['source_cid']}]]{_tier(e)} (via [[{e['via']}]])"),
+        ("Co-Citations", "co_citations", lambda e: f"  * [[{e['cid']}]]{_tier(e)} ({e['count']} shared citations)"),
+        ("Bibliographic Coupling", "bibliographic_coupling",
+         lambda e: f"  * [[{e['cid']}]]{_tier(e)} ({e['count']} shared targets)"),
+    ]
+    for title, key, render in sections:
+        print(f"\n{title}{_more(data, key)}:")
+        for entry in data[key]:
+            print(render(entry))
+        if not data[key]:
             print("  (none)")
 
-        print("\nBacklinks (1-hop):")
-        if graph_data["backlinks"]:
-            for bl in graph_data["backlinks"]:
-                print(f"  <- [[{bl['source_cid']}]]")
-        else:
-            print("  (none)")
 
-        print("\n2-Hop Forward:")
-        if graph_data["two_hop_forward"]:
-            for th in graph_data["two_hop_forward"]:
-                print(f"  -> [[{th['target_cid']}]] (via [[{th['via']}]])")
-        else:
-            print("  (none)")
-
-        print("\n2-Hop Backlinks:")
-        if graph_data["two_hop_backlinks"]:
-            for th in graph_data["two_hop_backlinks"]:
-                print(f"  <- [[{th['source_cid']}]] (via [[{th['via']}]])")
-        else:
-            print("  (none)")
-
-        print("\nCo-Citations:")
-        if graph_data["co_citations"]:
-            for cc in graph_data["co_citations"]:
-                print(f"  * [[{cc['cid']}]] ({cc['count']} shared citations)")
-        else:
-            print("  (none)")
-
-        return EXIT_OK
+def _print_moc_overview(data: dict[str, Any]) -> None:
+    print(f"Maps of Content: {data['mocs_total']}{_more(data, 'mocs')}")
+    for m in data["mocs"]:
+        print(f"  [[{m['cid']}]] {m['outgoing']} out, {m['incoming']} in [{m['trust_tier'] or 'unverified'}]")
+    if not data["mocs"]:
+        print("  (none)")
+    print(f"\nOverlaps: {data['overlaps_total']}{_more(data, 'overlaps')}")
+    for o in data["overlaps"]:
+        print(f"  [[{o['a']}]] ~ [[{o['b']}]]: {o['shared']} shared, ratio {o['ratio']:.2f}")
+    if not data["overlaps"]:
+        print("  (none)")
 
 
 def cmd_install(args: argparse.Namespace) -> int:
@@ -656,25 +669,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # init
-    p_init = subparsers.add_parser("init", parents=[vault_parent], help="Scaffold a new vault")
-    p_init.add_argument("target_path", nargs="?", type=Path, help="Target directory for new vault (defaults to --vault or current directory)")
-    p_init.add_argument("--name", help="Name of the vault")
-    p_init.add_argument("--force", action="store_true", help="Overwrite existing files")
-    p_init.add_argument("--obsidian", action="store_true", help="Scaffold Obsidian configuration")
-    p_init.add_argument(
-        "--obsidian-templates",
-        action="store_true",
-        help="Also write starter note templates and declare their folder (implies --obsidian)",
-    )
-    p_init.set_defaults(func=cmd_init)
-
-    # sync
-    p_sync = subparsers.add_parser("sync", parents=[vault_parent], help="Sync ephemeral cache and regenerate the index.md gap report")
-    p_sync.add_argument("--force", action="store_true", help="Force full rescan")
-    p_sync.add_argument("--rebuild", action="store_true", help="Discard cache.db before rescan (§5.3)")
-    p_sync.set_defaults(func=cmd_sync)
-
+    # The eight vault verbs, each mirroring the MCP tool of the same name (§5.3).
     # search
     p_search = subparsers.add_parser("search", parents=[vault_parent], help="Search vault notes")
     p_search.add_argument(
@@ -696,17 +691,34 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.set_defaults(func=cmd_search)
 
     # ground
-    p_ground = subparsers.add_parser("ground", parents=[vault_parent], help="Retrieve full content and 1-hop graph")
+    p_ground = subparsers.add_parser("ground", parents=[vault_parent], help="Read notes (with 1-hop graph) or raw/ sources (with citing notes)")
     p_ground.add_argument(
-        "cids",
+        "targets",
         nargs="+",
-        help="One or more note CIDs, note stems, or wikilinks (append #Heading to ground a single section)",
+        help="Note CIDs, stems, wikilinks, or raw/ paths (append #Heading to ground a single section)",
     )
     p_ground.add_argument(
         "--budget-tokens", "--budget", dest="budget_tokens", type=_positive_int, default=None, help="Token budget"
     )
     p_ground.add_argument("--json", action="store_true", help="Output as JSON")
     p_ground.set_defaults(func=cmd_ground)
+
+    # status
+    p_status = subparsers.add_parser("status", parents=[vault_parent], help="Report vault status and verification debt")
+    p_status.add_argument("--lint", action="store_true", help="Include every lint finding, as vault_status(lint=true); exits 0")
+    p_status.add_argument("--json", action="store_true", help="Output as JSON")
+    p_status.set_defaults(func=cmd_status)
+
+    # graph
+    p_graph = subparsers.add_parser(
+        "graph", parents=[vault_parent], help="Link structure without note text: a note's neighborhood, or --mocs"
+    )
+    graph_what = p_graph.add_mutually_exclusive_group(required=True)
+    graph_what.add_argument("target", nargs="?", help="Note CID, stem, path or wikilink to centre on")
+    graph_what.add_argument("--mocs", action="store_true", help="Every MOC's link counts and overlaps, for splits and merges")
+    p_graph.add_argument("--limit", type=_positive_int, default=20, help="Max entries per list, at least 1 (default: 20)")
+    p_graph.add_argument("--json", action="store_true", help="Output as JSON")
+    p_graph.set_defaults(func=cmd_graph)
 
     # scaffold
     p_scaffold = subparsers.add_parser("scaffold", parents=[vault_parent], help="Scaffold a new note")
@@ -730,8 +742,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_update = subparsers.add_parser("update", parents=[vault_parent], help="Update a note")
     p_update.add_argument("cid", help="Note CID or path")
     p_update.add_argument("--patch-frontmatter", help="JSON frontmatter patch (never `verified` or `generated`)")
-    p_update.add_argument("--append-section", help="Heading:Body to append (write ':' in the heading as '\\:')")
-    p_update.add_argument("--replace-section", help="Heading:Body to replace (write ':' in the heading as '\\:')")
     p_update.add_argument(
         "--edits",
         help='JSON list of body edits applied atomically, e.g. \'[{"op":"replace_text","old":"..","new":".."}]\'',
@@ -768,33 +778,19 @@ def build_parser() -> argparse.ArgumentParser:
     who.add_argument("--agent", help="Stamp as agent:<name>")
     p_verify.set_defaults(func=cmd_verify)
 
-    # status
-    p_status = subparsers.add_parser("status", parents=[vault_parent], help="Report vault status and verification debt")
-    p_status.add_argument("--json", action="store_true", help="Output as JSON")
-    p_status.set_defaults(func=cmd_status)
-
-    # lint
-    p_lint = subparsers.add_parser("lint", parents=[vault_parent], help="Run six-gate epistemic linting")
-    p_lint.add_argument("--json", action="store_true", help="Output as JSON")
-    p_lint.set_defaults(func=cmd_lint)
-
-    # audit
-    p_audit = subparsers.add_parser("audit", parents=[vault_parent], help="Audit human verification Git provenance")
-    p_audit.add_argument("--require-signed", action="store_true", help="Require signed commits")
-    p_audit.add_argument("--json", action="store_true", help="Output as JSON")
-    p_audit.set_defaults(func=cmd_audit)
-
-    # log
-    p_log = subparsers.add_parser("log", parents=[vault_parent], help="Append a timestamped entry to log.md")
-    p_log.add_argument("message", help="Log message text")
-    p_log.add_argument("--actor", help=f"Actor identity (default: {CLI_DEFAULT_ACTOR})")
-    p_log.set_defaults(func=cmd_log)
-
-    # graph
-    p_graph = subparsers.add_parser("graph", parents=[vault_parent], help="Display 1-hop and 2-hop neighbors and co-citations")
-    p_graph.add_argument("cid", help="Note CID, stem, or path")
-    p_graph.add_argument("--json", action="store_true", help="Output as JSON")
-    p_graph.set_defaults(func=cmd_graph)
+    # Operator commands, never exposed over MCP (§5.1).
+    # init
+    p_init = subparsers.add_parser("init", parents=[vault_parent], help="Scaffold a new vault")
+    p_init.add_argument("target_path", nargs="?", type=Path, help="Target directory for new vault (defaults to --vault or current directory)")
+    p_init.add_argument("--name", help="Name of the vault")
+    p_init.add_argument("--force", action="store_true", help="Overwrite existing files")
+    p_init.add_argument("--obsidian", action="store_true", help="Scaffold Obsidian configuration")
+    p_init.add_argument(
+        "--obsidian-templates",
+        action="store_true",
+        help="Also write starter note templates and declare their folder (implies --obsidian)",
+    )
+    p_init.set_defaults(func=cmd_init)
 
     # install
     p_install = subparsers.add_parser("install", parents=[vault_parent], help="Install harness integrations (§7.6)")
@@ -820,6 +816,23 @@ def build_parser() -> argparse.ArgumentParser:
     # mcp
     p_mcp = subparsers.add_parser("mcp", parents=[vault_parent], help="Run Model Context Protocol stdio server")
     p_mcp.set_defaults(func=cmd_mcp)
+
+    # lint
+    p_lint = subparsers.add_parser("lint", parents=[vault_parent], help="Run six-gate epistemic linting")
+    p_lint.add_argument("--json", action="store_true", help="Output as JSON")
+    p_lint.set_defaults(func=cmd_lint)
+
+    # sync
+    p_sync = subparsers.add_parser("sync", parents=[vault_parent], help="Sync ephemeral cache and regenerate the index.md gap report")
+    p_sync.add_argument("--force", action="store_true", help="Force full rescan")
+    p_sync.add_argument("--rebuild", action="store_true", help="Discard cache.db before rescan (§5.3)")
+    p_sync.set_defaults(func=cmd_sync)
+
+    # audit
+    p_audit = subparsers.add_parser("audit", parents=[vault_parent], help="Audit human verification Git provenance")
+    p_audit.add_argument("--require-signed", action="store_true", help="Require signed commits")
+    p_audit.add_argument("--json", action="store_true", help="Output as JSON")
+    p_audit.set_defaults(func=cmd_audit)
 
     return parser
 

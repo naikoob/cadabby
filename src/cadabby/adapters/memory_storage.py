@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 from collections.abc import Sequence
 
+from cadabby.constants import DIR_RAW
 from cadabby.domain import Note
 from cadabby.fsutil import VaultConflictError, check_expected_hash, compute_bytes_sha256
 from cadabby.ports import LedgerPort, NoteStoragePort
@@ -26,6 +27,7 @@ class InMemoryNoteStorage(NoteStoragePort):
         """`template_rel` plays the vault's Obsidian template folder (§7.5), as on disk."""
         self._notes: dict[str, Note] = {}
         self._template_rel = template_rel
+        self._sources: dict[str, str] = {}
 
         if initial_notes:
             for n in initial_notes:
@@ -95,6 +97,21 @@ class InMemoryNoteStorage(NoteStoragePort):
 
     def list_note_cids(self) -> Sequence[str]:
         return sorted(self._notes.keys())
+
+    def list_source_paths(self) -> Sequence[str]:
+        return sorted(self._sources)
+
+    def read_source(self, rel_path: str) -> str | None:
+        # Keys are only ever raw/ paths (see put_source), so an exact lookup
+        # is the whole confinement rule here.
+        return self._sources.get(rel_path)
+
+    def put_source(self, rel_path: str, text: str) -> None:
+        """Test seam: place a raw/ file. Memory plays the human who curates raw/."""
+        parts = rel_path.split("/")
+        if len(parts) < 2 or parts[0] != DIR_RAW or any(p in ("", ".", "..") for p in parts):
+            raise ValueError(f"Not a raw/ path: {rel_path}")
+        self._sources[rel_path] = text
 
 
 class InMemoryLedger(LedgerPort):

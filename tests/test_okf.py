@@ -17,6 +17,7 @@ from cadabby.okf import (
     is_canonical_tag,
     is_valid_actor,
     is_valid_timestamp,
+    latest_stale_actor,
     tag_has_whitespace,
 )
 
@@ -293,6 +294,31 @@ class TestTrustTierDerivation(unittest.TestCase):
             derive_trust_tier(records, compute_body_hash("# Note\n\nRewritten prose.\n")),
             "stale-verified",
         )
+
+
+
+class TestLatestStaleActor(unittest.TestCase):
+    """§4.5: the latest stale attestation decides who owes a note's re-review."""
+
+    def _entry(self, by, of):
+        return {"by": by, "at": "2026-01-01T00:00:00Z", "of": of}
+
+    def test_human_last_is_human_owed(self):
+        entries = [self._entry("agent:bot", OTHER_HASH), self._entry("human:alice", OTHER_HASH)]
+        self.assertEqual(latest_stale_actor(entries, HASH), "human:alice")
+
+    def test_agent_after_human_is_the_agents(self):
+        entries = [self._entry("human:alice", OTHER_HASH), self._entry("agent:bot", OTHER_HASH)]
+        self.assertEqual(latest_stale_actor(entries, HASH), "agent:bot")
+
+    def test_unbound_and_malformed_entries_name_nobody(self):
+        entries = ["human:alice", {"by": "human:alice"}, self._entry("owner", OTHER_HASH), self._entry("human:bob", " ")]
+        self.assertIsNone(latest_stale_actor(entries, HASH))
+        self.assertIsNone(latest_stale_actor(None, HASH))
+
+    def test_an_entry_that_still_binds_is_not_stale(self):
+        entries = [self._entry("human:alice", OTHER_HASH), self._entry("agent:bot", HASH)]
+        self.assertEqual(latest_stale_actor(entries, HASH), "human:alice")
 
 
 if __name__ == "__main__":

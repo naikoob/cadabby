@@ -911,7 +911,7 @@ Architectural decisions must link to canonical concepts.
         # 8. MCP Protocol Verification
         with McpServer(self.vault) as server:
             tools_resp = server.handle_tools_list()
-            self.assertEqual(len(tools_resp["tools"]), 7)  # Strict 7-tool invariant
+            self.assertEqual(len(tools_resp["tools"]), 8)  # Strict 8-tool invariant
 
             res_resp = server.handle_resources_list()
             uris = [r["uri"] for r in res_resp["resources"]]

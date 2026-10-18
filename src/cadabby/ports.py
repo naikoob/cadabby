@@ -45,6 +45,18 @@ class NoteStoragePort(Protocol):
         """List all note CIDs tracked in the storage layer."""
         ...
 
+    def list_source_paths(self) -> Sequence[str]:
+        """Vault-relative paths of every file under raw/ that is evidence (§2.4), sorted."""
+        ...
+
+    def read_source(self, rel_path: str) -> str | None:
+        """Text of the raw/ file at exactly `rel_path`, or None (§2.4, §5.1 `vault_ground`).
+
+        Never a note and never a file outside raw/, whatever `..` or symlink
+        the path carries: the confinement is the adapter's, not the caller's.
+        """
+        ...
+
 
 @runtime_checkable
 class IndexCachePort(Protocol):
@@ -79,6 +91,10 @@ class IndexCachePort(Protocol):
         self, cid: str
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         """Return (forward_links, backlinks, sources) for `cid`."""
+        ...
+
+    def get_source_citers(self, raw_rel_path: str) -> list[dict[str, Any]]:
+        """Notes whose `sources:` resolve to `raw_rel_path`."""
         ...
 
     def close(self) -> None:

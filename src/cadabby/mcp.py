@@ -17,7 +17,7 @@ from cadabby.cache import VaultCache
 from cadabby.constants import DIR_WIKI
 from cadabby.errors import HUMAN_ATTESTATION_REFUSED, INVALID_ARGUMENT, UNKNOWN_TOOL, classify
 from cadabby.lint import status_report
-from cadabby.ops import ground_notes, move_note, scaffold_note, update_note, verify_note
+from cadabby.ops import graph_view, ground_notes, move_note, scaffold_note, update_note, verify_note
 from cadabby.vault import Vault, path_to_cid
 
 
@@ -51,12 +51,11 @@ TOOLS = [
     {
         "name": "vault_search",
         "description": (
-            "Keyword search (SQLite FTS5 BM25) or metadata filter query over vault notes, ranked up by trust tier, "
-            "note status, and domain. Matching is lexical, not semantic: query with words the note would contain, "
-            "and try synonyms before concluding a topic is absent. Omit 'query' (or pass '') with at least one "
-            "filter (domain, type, status, trust, tag) to list matching notes by epistemic rank without a keyword. "
-            "Results exclude raw/ unless domain='raw'; search raw/ too before telling the user the vault has nothing. "
-            "Every call rescans the vault first, so files edited outside this session are already visible."
+            "Keyword (FTS5 BM25) or filter query over vault notes, ranked by trust tier, status, and domain. "
+            "Matching is lexical, not semantic: use words the note would contain and try synonyms before "
+            "concluding a topic is absent. Omit 'query' with at least one filter to list matching notes by "
+            "epistemic rank. Unfiltered searches exclude raw/; pass domain='raw' to search unprocessed sources "
+            "too. Every call rescans the vault first."
         ),
         "inputSchema": {
             "type": "object",
@@ -64,68 +63,62 @@ TOOLS = [
                 "query": {
                     "type": "string",
                     "default": "",
-                    "description": "Search query terms; omit or pass '' when filtering by domain, type, status, trust, or tag",
+                    "description": "Search terms; omit or pass '' when filtering",
                 },
                 "domain": {
                     "type": "string",
-                    "description": (
-                        "Filter by cognitive domain (e.g. 'wiki', 'customers', 'projects'). "
-                        "Use 'raw' to search the full text of unprocessed sources in raw/, "
-                        "which are excluded from unfiltered results."
-                    ),
+                    "description": "Cognitive domain ('wiki', 'customers', …) or 'raw' for primary sources",
                 },
                 "type": {"type": "string", "description": "Filter by note type"},
                 "status": {"type": "string", "description": "Filter by note status"},
-                "trust": {"type": "string", "description": "Filter by trust tier (human-reviewed, machine-confirmed, etc.)"},
+                "trust": {"type": "string", "description": "Filter by trust tier (human-reviewed, machine-confirmed, …)"},
                 "tag": {"type": "string", "description": "Filter by note tag"},
-                "limit": {"type": "integer", "minimum": 1, "default": 20, "description": "Max results to return"},
+                "limit": {"type": "integer", "minimum": 1, "default": 20, "description": "Max results"},
             },
         },
     },
     {
         "name": "vault_ground",
         "description": (
-            "Retrieve note markdown content (full note or a specific '#heading' section), domain directives, "
-            "and 1-hop link/backlink/source graph with neighbor metadata (title, type, status, trust_tier, "
-            "description) for specified CIDs, note stems, or wikilinks. Returns one entry per target, in order; "
-            "a target that cannot be grounded (not found, ambiguous, unparseable) comes back as "
-            "{target, error: {code, message, retryable}} in its place, and the call fails only if none can be. "
-            "A '#heading' that no longer exists returns the whole note with 'section_error' listing its headings."
+            "Retrieve note markdown (full note or a '#heading' section), domain directives, and 1-hop "
+            "links/backlinks/sources with neighbor metadata (title, type, status, trust_tier, description). "
+            "A raw/<path> target returns that source's text (or filename_only: true for binaries like PDF) "
+            "and its cited_by notes, with no trust tier: read sources this way, not with file tools. "
+            "Returns one entry per target (kind 'note' or 'raw', or {target, error: {code, message, retryable}}); "
+            "fails only if none resolve. A missing '#heading' returns the full text with 'section_error'."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "cids": {
+                "targets": {
                     "type": "array",
                     "items": {"type": "string", "minLength": 1},
                     "minItems": 1,
                     "description": (
-                        "List of note CIDs, bare stems (e.g. 'raft-consensus'), relative paths, or wikilinks "
-                        "to retrieve; append '#heading' (or '[[Note#Heading]]') to ground only that section "
-                        "and its subsections"
+                        "Notes (CIDs, stems, relative paths, or wikilinks) and raw sources ('raw/paper.md'); "
+                        "append '#heading' to ground only that section"
                     ),
                 },
                 "budget_tokens": {
                     "type": "integer",
                     "minimum": 1,
                     "description": (
-                        "Optional cap on how much note text is returned, to protect your context. It is "
-                        "unrelated to how long your answer should be: never derive it from a requested "
-                        "output length. Truncates cleanly at section boundaries."
+                        "Optional cap on returned text to protect context; never derive it from a requested "
+                        "output length. Truncates at section boundaries."
                     ),
                 },
             },
-            "required": ["cids"],
+            "required": ["targets"],
         },
     },
     {
         "name": "vault_status",
         "description": (
-            "Vault health check: note counts by tier and type, verification debt, unprocessed and "
-            "filename-only raw files, broken-link count, and finding_counts from the six lint gates. "
-            "Pass lint=true for the full findings list to repair. Findings describe the vault, not a "
-            "failed call: read finding_counts.error, never the call's error flag. No need to call this "
-            "to refresh before other tools; each one rescans the vault itself."
+            "Vault health check: note counts by tier, type, and domain, verification debt, raw file counts, "
+            "broken links, finding_counts from the six lint gates, and 'queues' (first 25 with totals: "
+            "unprocessed_raw, unfiled wiki notes, and verification_debt split into agent_payable and "
+            "human_owed — never agent-verify human_owed; give the user `cadabby verify <cid> --human`). "
+            "Pass lint=true for the full findings list. Findings never set isError; check finding_counts.error."
         ),
         "inputSchema": {
             "type": "object",
@@ -133,43 +126,60 @@ TOOLS = [
                 "lint": {
                     "type": "boolean",
                     "default": False,
-                    "description": "Include every finding (code, severity, path, message), not just the counts",
+                    "description": "Include every lint finding (code, severity, rel_path, line, message)",
                 },
             },
         },
     },
     {
-        "name": "vault_scaffold_note",
-        "description": "Create a note in the vault with valid OKF frontmatter and generated attribution. Refuses to overwrite.",
+        "name": "vault_graph",
+        "description": (
+            "Link structure without note text. view='neighborhood' (default) returns a note's 1- and 2-hop "
+            "links and backlinks, co-citations, and bibliographic coupling with neighbor metadata (title, "
+            "type, status, trust_tier) for cross-linking and MOC filing. view='mocs' returns every wiki MOC's "
+            "outgoing/incoming link counts and largest link overlaps (ratio = shared / smaller MOC) for splits "
+            "and merges."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "title": {"type": "string", "minLength": 1, "description": "Title of the note"},
-                "type": {
+                "view": {
+                    "type": "string",
+                    "enum": ["neighborhood", "mocs"],
+                    "default": "neighborhood",
+                    "description": "'neighborhood' around one note, or 'mocs' across the vault",
+                },
+                "target": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Note type (e.g. 'concept', 'entity', or domain-specific type)",
+                    "description": "Note (CID, path, stem, or wikilink); required for 'neighborhood', refused for 'mocs'",
                 },
-                "description": {"type": "string", "minLength": 1, "description": "One-line descriptive summary"},
+                "limit": {"type": "integer", "minimum": 1, "default": 20, "description": "Max entries per list"},
+            },
+        },
+    },
+    {
+        "name": "vault_scaffold_note",
+        "description": "Create a note with valid OKF frontmatter and generated attribution. Refuses to overwrite.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "minLength": 1, "description": "Note title"},
+                "type": {"type": "string", "minLength": 1, "description": "Note type ('concept', 'moc', or domain type)"},
+                "description": {"type": "string", "minLength": 1, "description": "One-line summary"},
                 "domain": {"type": "string", "default": "wiki", "description": "Cognitive domain (default: 'wiki')"},
                 "path": {
                     "type": "string",
-                    "description": (
-                        "Optional relative path within the domain or vault. wiki/ is flat, so no subfolders "
-                        "there; nested folders belong in a cognitive domain. Paths under raw/ or a dot folder "
-                        "are refused."
-                    ),
+                    "description": "Relative path within domain or vault (wiki/ is flat; raw/ and dot folders refused)",
                 },
-                "tags": {"type": "array", "items": {"type": "string"}, "description": "List of tags"},
-                "sources": {"type": "array", "items": {"type": "string"}, "description": "Paths to raw sources"},
-                "body": {"type": "string", "description": "Initial markdown body text"},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "Kebab-case tags"},
+                "sources": {"type": "array", "items": {"type": "string"}, "description": "Cited raw/ paths"},
+                "body": {"type": "string", "description": "Initial markdown body"},
                 "template": {
                     "type": "string",
                     "description": (
-                        "Name of an Obsidian template whose body seeds the note, so an agent "
-                        "and a human writing in Obsidian produce the same shape. '{{title}}' is "
-                        "substituted; the template's own frontmatter is discarded because OKF "
-                        "frontmatter is engine-owned. Mutually exclusive with 'body'."
+                        "Obsidian template name to seed body ('{{title}}' substituted; template frontmatter "
+                        "discarded; mutually exclusive with 'body')"
                     ),
                 },
             },
@@ -179,33 +189,21 @@ TOOLS = [
     {
         "name": "vault_update_note",
         "description": (
-            "Non-destructive frontmatter patches and body edits. Section operations address '##' "
-            "headings only; use edits with replace_text for anything else (a single line, the H1, "
-            "text above the first '##'). Batch related changes into one call: edits apply atomically "
-            "in one write with one log entry. Any body edit makes a verified note stale-verified, so "
-            "check trust_tier first. Never truncates a file it could not fully parse."
+            "Atomic frontmatter patches and body edits. In 'edits', replace_section and append_section "
+            "address '##' headings; replace_text matches exact unique text anywhere in the body (never "
+            "frontmatter). Batch related edits into one call. Any body edit turns a verified note "
+            "stale-verified, so check trust_tier first. Refuses unparseable files."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "cid": {"type": "string", "description": "Note CID or relative path"},
+                "cid": {"type": "string", "description": "Note CID, stem, or relative path"},
                 "patch_frontmatter": {
                     "type": "object",
                     "description": (
-                        "Dictionary of frontmatter fields to patch. Values may nest at most "
-                        "one level (a mapping of scalars, or a list of scalars/flat mappings); "
-                        "deeper structures are rejected."
+                        "Frontmatter fields to patch (max 1 nesting level; engine-owned 'generated' and "
+                        "'verified' are refused)"
                     ),
-                },
-                "append_section": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "[heading, section_body] to append to note as a '##' section",
-                },
-                "replace_section": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "[heading, new_section_body] to replace the '##' section with that heading",
                 },
                 "edits": {
                     "type": "array",
@@ -213,18 +211,14 @@ TOOLS = [
                         "type": "object",
                         "properties": {
                             "op": {"type": "string", "enum": ["replace_text", "replace_section", "append_section"]},
-                            "old": {"type": "string", "description": "replace_text: exact text, must match once"},
+                            "old": {"type": "string", "description": "replace_text: exact unique match"},
                             "new": {"type": "string", "description": "replace_text: replacement text"},
                             "heading": {"type": "string", "description": "section ops: '##' heading text"},
                             "body": {"type": "string", "description": "section ops: section body"},
                         },
                         "required": ["op"],
                     },
-                    "description": (
-                        "Ordered body edits applied atomically: if any fails (e.g. replace_text "
-                        "'old' matches zero or several times), nothing is written. replace_text "
-                        "reaches the whole body but never the frontmatter."
-                    ),
+                    "description": "Ordered body edits applied atomically; if any fails, nothing is written",
                 },
                 "expected_hash": {"type": "string", "description": "Expected file hash for concurrency safety"},
             },
@@ -235,17 +229,16 @@ TOOLS = [
         "name": "vault_verify_note",
         "description": (
             "Appends a verification entry stamped by: agent:<client_id>, at: now, and of: the current body "
-            "hash. Writing human:* over MCP is refused unconditionally; a human signs with "
-            "`cadabby verify <cid> --human` in their own terminal."
+            "hash. Writing human:* over MCP is refused; a human signs with `cadabby verify <cid> --human`."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "cid": {"type": "string", "description": "Note CID or relative path"},
+                "cid": {"type": "string", "description": "Note CID, stem, or relative path"},
                 "method": {
                     "type": "string",
                     "default": "automated-check",
-                    "description": "Short label for how you checked the claims (e.g. 'source-crosscheck')",
+                    "description": "Verification method label (e.g. 'source-crosscheck')",
                 },
             },
             "required": ["cid"],
@@ -255,12 +248,10 @@ TOOLS = [
         "name": "vault_move_note",
         "description": (
             "Move or rename a note or folder subtree and repoint every link to it. Dry-run unless apply=true: "
-            "the result lists each note whose links change, its trust tier before and after, and a plan_token. "
-            "Show the user that plan and apply only once they agree, passing the plan_token with apply=true so "
-            "nothing is written if the vault changed since. Only links that would break or open a different "
-            "note are rewritten. Refused when the move would retarget someone else's link, or would stale a "
-            "human-reviewed note not named in approve_stale; report any warnings too. Never move note files "
-            "with shell commands: nothing else repoints links or logs the move."
+            "returns each referrer whose links change, its trust tier before/after, and a plan_token. "
+            "Show the user that plan and apply only once they agree, passing plan_token with apply=true. "
+            "Refused if the move retargets another link or stales a human-reviewed note not in approve_stale. "
+            "Never move note files with shell commands: nothing else repoints links or logs the move."
         ),
         "inputSchema": {
             "type": "object",
@@ -268,28 +259,22 @@ TOOLS = [
                 "cid": {
                     "type": "string",
                     "minLength": 1,
-                    "description": (
-                        "Note or folder prefix to move: CID, relative path, stem, wikilink, or folder path "
-                        "(e.g. 'customers/northwind/' or 'cs244b/')"
-                    ),
+                    "description": "Note or folder prefix to move (CID, path, stem, wikilink, or 'customers/northwind/')",
                 },
                 "to": {
                     "type": "string",
                     "minLength": 1,
-                    "description": (
-                        "Destination vault-relative path (e.g. 'customers/acme/sizing' or 'archive/cs244b/'). "
-                        "A bare name renames a note in place; a trailing '/' moves a note into that folder"
-                    ),
+                    "description": "Destination path (bare name renames in place; trailing '/' moves into folder)",
                 },
-                "apply": {"type": "boolean", "default": False, "description": "Write the move; omit for a dry-run"},
+                "apply": {"type": "boolean", "default": False, "description": "Write the move; omit for dry-run"},
                 "approve_stale": {
                     "type": "array",
                     "items": {"type": "string", "minLength": 1},
-                    "description": "Human-reviewed notes the user agreed may go stale-verified when their links are rewritten",
+                    "description": "Human-reviewed notes the user approved going stale-verified on link rewrite",
                 },
                 "plan_token": {
                     "type": "string",
-                    "description": "The dry-run's plan_token; with apply=true, refuses (VAULT_CONFLICT) if the plan changed",
+                    "description": "Dry-run plan_token; with apply=true, refuses (VAULT_CONFLICT) if plan changed",
                 },
             },
             "required": ["cid", "to"],
@@ -310,9 +295,19 @@ _PROPERTIES: dict[str, dict[str, Any]] = {
 }
 # Tools removed from the surface, mapped to what replaces them. Only ever read
 # to word an UNKNOWN_TOOL error: an agent still following a 0.3.x vault's
-# AGENTS.md can correct itself, and the surface stays at seven tools (§5.1).
+# AGENTS.md can correct itself, and the surface stays at eight tools (§5.1).
 _RETIRED_TOOLS: dict[str, str] = {
     "vault_lint": "vault_status with lint: true",
+}
+# Arguments removed from a tool, worded the same way: never aliases, only the
+# INVALID_ARGUMENT message, checked before the required-argument check so a
+# caller passing the old name learns the new one rather than "missing targets".
+_RETIRED_ARGUMENTS: dict[str, dict[str, str]] = {
+    "vault_ground": {"cids": "renamed to 'targets' in 0.5.0"},
+    "vault_update_note": {
+        "append_section": 'retired in 0.5.0; pass edits: [{"op": "append_section", "heading": ..., "body": ...}]',
+        "replace_section": 'retired in 0.5.0; pass edits: [{"op": "replace_section", "heading": ..., "body": ...}]',
+    },
 }
 _JSON_TYPES: dict[str, type | tuple[type, ...]] = {
     "string": str,
@@ -361,16 +356,6 @@ def _schema_violation(name: str, value: Any, schema: dict[str, Any]) -> str | No
             if value.get(key) is not None and (why := _schema_violation(f"{name}.{key}", value[key], sub)):
                 return why
     return None
-
-
-def _section_arg(args: dict[str, Any], key: str) -> tuple[str, str] | None:
-    """Parse an optional [heading, body] array parameter for vault_update_note."""
-    s = args.get(key)
-    if s is None:
-        return None
-    if not (1 <= len(s) <= 2):
-        raise ValueError(f"'{key}' must be a [heading, body] array of strings")
-    return (s[0], s[1]) if len(s) > 1 else (s[0], "")
 
 
 def _bool_arg(args: dict[str, Any], key: str, *, default: bool = False) -> bool:
@@ -451,7 +436,7 @@ class McpServer:
         self.cache.scan()
         grounded = ground_notes(
             self.vault,
-            args["cids"],
+            args["targets"],
             budget_tokens=args.get("budget_tokens"),
             cache=self.cache,
         )
@@ -480,8 +465,6 @@ class McpServer:
             vault=self.vault,
             cid_or_path=args["cid"],
             frontmatter_patch=args.get("patch_frontmatter"),
-            append_section=_section_arg(args, "append_section"),
-            replace_section=_section_arg(args, "replace_section"),
             expected_hash=args.get("expected_hash"),
             actor=self.client_id,
             edits=args.get("edits"),
@@ -508,6 +491,18 @@ class McpServer:
     def _tool_status(self, args: dict[str, Any]) -> dict[str, Any]:
         return _tool_ok(status_report(self.vault, self.cache, lint=_bool_arg(args, "lint", default=False)))
 
+    def _tool_graph(self, args: dict[str, Any]) -> dict[str, Any]:
+        self.cache.scan()
+        return _tool_ok(
+            graph_view(
+                self.vault,
+                self.cache,
+                view=args.get("view") or "neighborhood",
+                target=args.get("target"),
+                limit=20 if args.get("limit") is None else args["limit"],
+            )
+        )
+
     def _tool_move_note(self, args: dict[str, Any]) -> dict[str, Any]:
         return _tool_ok(
             move_note(
@@ -530,6 +525,7 @@ class McpServer:
         "vault_move_note": _tool_move_note,
         "vault_verify_note": _tool_verify_note,
         "vault_status": _tool_status,
+        "vault_graph": _tool_graph,
     }
 
     def handle_tools_call(self, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -538,12 +534,21 @@ class McpServer:
             return _tool_error(name, INVALID_ARGUMENT, "'arguments' must be a JSON object", retryable=False)
         args = args or {}
 
-        # Checked here rather than left to the `args["cids"]` lookups below,
+        # Checked here rather than left to the `args["targets"]` lookups below,
         # which raise KeyError and classify as INTERNAL -- telling a caller
         # who omitted a required field that the server has a bug. The
         # requirement is already declared in each tool's inputSchema, so
         # reading it back is the only way the two cannot drift. A JSON null
         # means "not given" (§5.1), for required arguments too.
+        retired = _RETIRED_ARGUMENTS.get(name, {})
+        if stale := sorted(k for k in args if k in retired):
+            return _tool_error(
+                name,
+                INVALID_ARGUMENT,
+                "; ".join(f"'{k}' was {retired[k]}" for k in stale),
+                retryable=False,
+            )
+
         missing = [k for k in _required_args(name) if args.get(k) is None]
         if missing:
             return _tool_error(

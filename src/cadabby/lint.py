@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote
 
-from cadabby.cache import VaultCache
+from cadabby.cache import VaultCache, unfiled_note_rows, unprocessed_raw_paths, verification_debt_rows
 from cadabby.constants import (
     DIR_RAW,
     DIR_WIKI,
@@ -112,7 +112,9 @@ def status_report(vault: Vault, cache: VaultCache, *, lint: bool = False) -> dic
     `finding_counts` always rides along, so every check shows red or green
     without a second call; the `findings` list itself only on request, since
     a messy vault produces hundreds. Findings describe the vault, not the
-    call, so nothing here signals failure.
+    call, so nothing here signals failure. `queues` carries the index.md
+    worklists themselves, from the same queries, so an agent never has to read
+    that file off disk to know what is owed.
     """
     findings = run_vault_lint(vault, cache=cache)  # scans first
     report = cache.get_status()
@@ -122,9 +124,30 @@ def status_report(vault: Vault, cache: VaultCache, *, lint: bool = False) -> dic
         "warning": sum(1 for f in findings if f.severity == "warning"),
         "by_code": dict(sorted(by_code.items())),
     }
+    conn = cache.get_connection()
+    debt = verification_debt_rows(conn)
+    report["queues"] = {
+        "unprocessed_raw": _queue(unprocessed_raw_paths(conn)),
+        "unfiled": _queue([r["cid"] for r in unfiled_note_rows(conn)]),
+        "verification_debt": {
+            "agent_payable": _queue([d.cid for d in debt if not d.human_owed]),
+            "human_owed": _queue([d.cid for d in debt if d.human_owed]),
+        },
+    }
     if lint:
         report["findings"] = [f.to_dict() for f in findings]
     return report
+
+
+# Queue entries returned per call. `vault_status` runs at the start of nearly
+# every task, so a neglected vault's hundreds of sources would cost every turn
+# that reads it; the totals still say how much is left (§4.5).
+QUEUE_ITEM_CAP = 25
+
+
+def _queue(items: list[str]) -> dict[str, Any]:
+    """`{"total", "items"}`: the first QUEUE_ITEM_CAP entries, in index.md order."""
+    return {"total": len(items), "items": items[:QUEUE_ITEM_CAP]}
 
 
 def _markdown_path_hint(source_cid: str, target_raw: str, resolver: LinkTargetIndex) -> str:

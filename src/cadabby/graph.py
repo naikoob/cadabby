@@ -375,8 +375,14 @@ def normalize_link_target(text: str) -> str:
     return split_link_target_and_anchor(text)[0]
 
 
-def get_note_graph(conn: sqlite3.Connection, target_cid: str) -> dict[str, Any] | None:
-    """Compute 1-hop and 2-hop neighborhoods, co-citations, and bibliographic coupling (§5.3)."""
+def get_note_graph(conn: sqlite3.Connection, target_cid: str, *, limit: int | None = None) -> dict[str, Any] | None:
+    """Compute 1-hop and 2-hop neighborhoods, co-citations, and bibliographic coupling (§5.1, §5.3).
+
+    Every entry carries its neighbor's title, type, status and trust tier
+    (None when the link does not resolve), so a caller can choose what to read
+    next without grounding each candidate. With `limit`, each list is capped
+    and its untruncated length reported as `<list>_total`.
+    """
     # 1. Check note existence
     cur = conn.execute(
         "SELECT cid, title, type, status, trust_tier, rel_path FROM notes WHERE cid = ?;",
@@ -486,14 +492,40 @@ def get_note_graph(conn: sqlite3.Connection, target_cid: str) -> dict[str, Any] 
     )
     bibliographic_coupling = [{"cid": r["source_cid"], "count": r["shared_targets"]} for r in cur.fetchall()]
 
-    return {
-        "note": note_info,
-        "forward_links": forward_links,
-        "backlinks": backlinks,
-        "two_hop_forward": two_hop_forward,
-        "two_hop_backlinks": two_hop_backlinks,
-        "co_citations": co_citations,
-        "bibliographic_coupling": bibliographic_coupling,
+    # Which key names the neighbor in each list's entries.
+    lists: dict[str, tuple[list[dict[str, Any]], str]] = {
+        "forward_links": (forward_links, "target_cid"),
+        "backlinks": (backlinks, "source_cid"),
+        "two_hop_forward": (two_hop_forward, "target_cid"),
+        "two_hop_backlinks": (two_hop_backlinks, "source_cid"),
+        "co_citations": (co_citations, "cid"),
+        "bibliographic_coupling": (bibliographic_coupling, "cid"),
     }
+    result: dict[str, Any] = {"note": note_info}
+    for name, (entries, key) in lists.items():
+        kept = entries if limit is None else entries[:limit]
+        result[name] = kept
+        if limit is not None:
+            result[f"{name}_total"] = len(entries)
+    _attach_neighbor_metadata(conn, [(e, key) for name, (_, key) in lists.items() for e in result[name]])
+    return result
+
+
+def _attach_neighbor_metadata(conn: sqlite3.Connection, entries: list[tuple[dict[str, Any], str]]) -> None:
+    """Add title, type, status and trust_tier of the note each entry's `key` names, in one query."""
+    cids = sorted({e[key] for e, key in entries if e.get(key)})
+    meta: dict[str, sqlite3.Row] = {}
+    for start in range(0, len(cids), 500):  # stay under SQLite's bound-parameter limit
+        chunk = cids[start : start + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        for r in conn.execute(
+            f"SELECT cid, title, type, status, trust_tier FROM notes WHERE parse_error IS NULL AND cid IN ({placeholders});",
+            chunk,
+        ):
+            meta[r["cid"]] = r
+    for entry, key in entries:
+        row = meta.get(entry.get(key) or "")
+        for field in ("title", "type", "status", "trust_tier"):
+            entry[field] = row[field] if row is not None else None
 
 

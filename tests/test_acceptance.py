@@ -278,7 +278,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         self.assertEqual(note_file.read_text("utf-8"), original_content)
 
     def test_ac10_mcp_capabilities_and_human_refusal(self):
-        """§10 C10 and C12. Exactly 7 tools over JSON-RPC, and `by: human:*` is refused."""
+        """§10 C10 and C12. Exactly 8 tools over JSON-RPC, and `by: human:*` is refused."""
         vault_dir = copy_demo_vault(self.root / "demo-vault")
         vault = Vault(vault_dir)
 
@@ -288,7 +288,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         self.assertEqual(init_res["serverInfo"]["version"], cadabby.__version__)
 
         tools_res = server.handle_tools_list()
-        self.assertEqual(len(tools_res["tools"]), 7)
+        self.assertEqual(len(tools_res["tools"]), 8)
 
         # 1. Verification over MCP stamps agent:<clientInfo>
         res = server.handle_tools_call(
@@ -364,7 +364,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         self.assertFalse(search_out["isError"])
 
         # 2. Ground top hit
-        ground_out = server.handle_tools_call("vault_ground", {"cids": ["wiki/sqlite"]})
+        ground_out = server.handle_tools_call("vault_ground", {"targets": ["wiki/sqlite"]})
         self.assertFalse(ground_out["isError"])
 
         # 3. Scaffold new related synthesis
@@ -722,13 +722,19 @@ class TestHarnessShimsStayThin(unittest.TestCase):
     def test_plugin_skill_enumerates_exactly_the_tools_the_server_exposes(self):
         """The one shim that embeds the tool surface instead of pointing at it.
 
-        Tolerable only while §5.1 pins the surface at seven tools; if that
+        Tolerable only while §5.1 pins the surface at eight tools; if that
         invariant is ever relaxed, this fails rather than letting every
         already-initialized vault advertise a tool list that no longer exists.
+        User-owned harness pointers (CLAUDE.md, GEMINI.md) are never refreshed
+        by `install`, so they must never hardcode `vault_*` tool lists.
         """
         skill = (self.PLUGIN / "skills" / "cadabby-wiki" / "SKILL.md").read_text("utf-8")
         advertised = set(re.findall(r"\bvault_\w+\b", skill))
         self.assertEqual(advertised, {t["name"] for t in TOOLS})
+        for shim_name in ("CLAUDE.md", "GEMINI.md"):
+            with self.subTest(shim=shim_name):
+                text = (self.ASSETS / "vault" / shim_name).read_text("utf-8")
+                self.assertEqual(re.findall(r"\bvault_\w+\b", text), [])
 
     def test_vault_agents_md_names_tools_without_call_syntax(self):
         """C51, §7.4. The vault constitution is user-owned and frozen at init.
@@ -851,6 +857,11 @@ class TestHarnessShimsStayThin(unittest.TestCase):
         self.assertIn("**`archive/`**: the conventional retirement domain", agents_md)
         self.assertIn("Retiring work to `archive/`", librarian)
         self.assertIn("Retiring Notes & Domains to `archive/`", technician)
+        # 10. Technician playbook covers every lint code emitted by lint.py.
+        lint_py = (self.ASSETS.parent / "lint.py").read_text("utf-8")
+        emitted_codes = set(re.findall(r'code="([A-Z_]+)"', lint_py))
+        documented_codes = set(re.findall(r"`([A-Z]+_[A-Z_]+)`", technician))
+        self.assertEqual(emitted_codes - documented_codes, set(), "Technician runbook omits lint codes")
 
 
 class TestSpecReadingMap(unittest.TestCase):
