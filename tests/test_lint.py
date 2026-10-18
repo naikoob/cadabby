@@ -690,7 +690,7 @@ class TestMarkdownNoteLinks(unittest.TestCase):
 
     def test_markdown_link_is_a_graph_edge_with_backlink(self):
         from cadabby.cache import VaultCache
-        from cadabby.graph import get_note_graph
+        from cadabby.queries import get_note_graph
 
         self._note("customers/acme/Deal.md", "Deal", "Built on [Arch](../../wiki/Architecture.md).")
         with VaultCache(self.vault) as cache:

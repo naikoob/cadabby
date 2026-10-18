@@ -15,7 +15,6 @@ from cadabby.graph import (
     LinkTargetIndex,
     extract_markdown_note_links,
     extract_wikilinks,
-    get_note_graph,
     iter_link_spans,
     iter_relative_path_spans,
     normalize_link_target,
@@ -23,6 +22,7 @@ from cadabby.graph import (
     resolve_markdown_target,
     strip_code_spans,
 )
+from cadabby.queries import get_note_graph
 from cadabby.vault import Vault, note_path_violation
 
 

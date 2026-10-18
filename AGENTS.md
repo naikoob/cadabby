@@ -30,6 +30,7 @@ Each rule is cheap to break and hard to see once broken.
 | :--- | :--- | :--- |
 | Note schema, trust tiers, body hashing | `okf.py`, `frontmatter.py` | §3, `test_okf.py`, `test_frontmatter.py` |
 | Search, ranking, the FTS5 tables, scanning | `cache.py`, `search.py` | §4, `test_cache.py` |
+| Queues, graph views, status counts, lint row queries | `queries.py` | §2.5, §4.5, `test_cache.py`, `test_indexer.py` |
 | Wikilink / Markdown-link parsing, resolution, backlinks | `graph.py` | §2.5, `test_graph.py` |
 | `index.md` or `log.md` output | `indexer.py` | §2.5, `test_indexer.py` |
 | A lint gate's codes or severities | `lint.py` | §6.3, `test_lint.py` |

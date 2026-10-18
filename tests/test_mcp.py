@@ -735,7 +735,7 @@ class TestEightToolSurface(unittest.TestCase):
     def test_status_queues_are_capped_with_totals(self):
         for i in range(30):
             (self.root / "raw" / f"bulk-{i:02}.txt").write_text("x", "utf-8")
-        from cadabby.cache import unprocessed_raw_paths
+        from cadabby.queries import unprocessed_raw_paths
 
         queue = self._ok("vault_status", {})["queues"]["unprocessed_raw"]
         self.assertEqual(len(queue["items"]), 25)

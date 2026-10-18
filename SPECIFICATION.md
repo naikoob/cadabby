@@ -658,7 +658,7 @@ The same builder adds **`queues`**, the `index.md` worklists themselves (§2.5),
 }
 ```
 
-* **One definition per queue.** `index.md` and `queues` read the same functions in `cache.py` (`unprocessed_raw_paths`, `unfiled_note_rows`, `verification_debt_rows`), in the same order, so the two cannot disagree.
+* **One definition per queue.** `index.md` and `queues` read the same functions in `queries.py` (`unprocessed_raw_paths`, `unfiled_note_rows`, `verification_debt_rows`), in the same order, so the two cannot disagree.
 * **Capped at 25 items each**, with `total` uncapped. `vault_status` runs at the start of nearly every task, and a neglected vault's hundreds of sources would cost every turn that reads them. The cap is a constant, not a parameter.
 * **The debt queue is the actionable subset of `verification_debt`.** The count is every `stale-verified` note; the queue, like `index.md`, leaves out retired notes (`archive/`, `deprecated`, `abandoned`), which nobody maintains. The difference is deliberate, not drift.
 * **Who owes the debt** is decided by the note's latest well-formed stale attestation — the last one in `verified:` list order, which is append-only (§3.4), not the one with the greatest `at:`: `human_owed` when it is `human:*`, `agent_payable` otherwise, including when no entry binds at all. This is the vault constitution's rule that an agent never verifies over a human's stale sign-off, made machine-readable. Gate 6's `VERIFICATION_STALE` message names the latest *human* entry instead, since it reports whose endorsement drifted; the queue answers who must act now, so a human sign-off later re-checked by an agent is the agent's to renew.
@@ -1039,7 +1039,8 @@ cadabby/
 │       ├── frontmatter.py      # Restricted-subset parser + canonicalizing writer (3.2)
 │       ├── okf.py              # Schema validation, body hashing, trust tier derivation (3.3-3.4)
 │       ├── fsutil.py           # Atomic replace, advisory lock, O_APPEND ledger writes
-│       ├── cache.py            # SQLite connection, FTS5 probe, scan/upsert/delete, graph/queue/lint queries
+│       ├── cache.py            # SQLite connection, schema, FTS5 probe, scan/upsert/delete (the only writer)
+│       ├── queries.py          # Read-only SQL over a cache connection: queues, graph, lint rows, status (2.5, 4.5)
 │       ├── search.py           # FTS5 query sanitizer, SearchResult, BM25 and filter-only search (4.4)
 │       ├── graph.py            # Wikilink and Markdown note-link extraction, resolution, target index
 │       ├── indexer.py          # index.md gap report (2.5) and log.md append/rotate

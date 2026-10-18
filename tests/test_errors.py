@@ -320,22 +320,74 @@ class TestArchitecturalErrorAndCacheBoundaries(unittest.TestCase):
                     sqlite_importers.add(rel)
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get_connection":
                     get_conn_callers.add(rel)
-        self.assertEqual(sqlite_importers, {"cache.py", "errors.py", "search.py"})
+        self.assertEqual(sqlite_importers, {"cache.py", "errors.py", "queries.py", "search.py"})
         self.assertEqual(get_conn_callers, {"cache.py"})
 
-    def test_cache_has_no_function_level_imports(self):
+    def test_cache_and_queries_have_no_function_level_imports(self):
         import ast
 
-        cache_path = Path(__file__).resolve().parent.parent / "src" / "cadabby" / "cache.py"
-        tree = ast.parse(cache_path.read_text("utf-8"), filename=str(cache_path))
-        nested_imports = [
-            node.lineno
-            for node in ast.walk(tree)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            for child in ast.walk(node)
-            if isinstance(child, (ast.Import, ast.ImportFrom))
-        ]
-        self.assertEqual(nested_imports, [])
+        src_root = Path(__file__).resolve().parent.parent / "src" / "cadabby"
+        for name in ("cache.py", "queries.py"):
+            tree = ast.parse((src_root / name).read_text("utf-8"), filename=name)
+            nested_imports = [
+                node.lineno
+                for node in ast.walk(tree)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                for child in ast.walk(node)
+                if isinstance(child, (ast.Import, ast.ImportFrom))
+            ]
+            with self.subTest(module=name):
+                self.assertEqual(nested_imports, [])
+
+    def test_no_deferred_internal_imports_hide_a_cycle(self):
+        """A function-level `from cadabby...` import is how a cycle hides from import time.
+
+        graph.py once re-exported cache queries through a module `__getattr__`
+        that imported cadabby.cache lazily: graph -> cache -> graph, invisible
+        until called. Only the CLI may defer, and only for leaf commands whose
+        import cost every other subcommand should not pay.
+        """
+        import ast
+
+        allowed = {("cli.py", "cadabby.installer"), ("cli.py", "cadabby.mcp")}
+        src_root = Path(__file__).resolve().parent.parent / "src" / "cadabby"
+        deferred: list[str] = []
+        for path in sorted(src_root.rglob("*.py")):
+            rel = path.relative_to(src_root).as_posix()
+            tree = ast.parse(path.read_text("utf-8"), filename=str(path))
+            for fn in ast.walk(tree):
+                if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for node in ast.walk(fn):
+                    if isinstance(node, ast.ImportFrom):
+                        modules = [node.module or ""]
+                    elif isinstance(node, ast.Import):
+                        modules = [a.name for a in node.names]
+                    else:
+                        continue
+                    for module in modules:
+                        if module.startswith("cadabby") and (rel, module) not in allowed:
+                            deferred.append(f"{rel}:{node.lineno}:{module}")
+        self.assertEqual(deferred, [])
+
+    def test_queries_never_import_the_cache_or_vault(self):
+        """queries.py is the read side: it takes a connection and knows no config.
+
+        Importing VaultCache would let it open its own connection (and make the
+        two modules circular); importing Vault would let config-dependent logic
+        drift in, which belongs in the VaultCache facade (§4.5, §9).
+        """
+        import ast
+
+        path = Path(__file__).resolve().parent.parent / "src" / "cadabby" / "queries.py"
+        tree = ast.parse(path.read_text("utf-8"), filename=str(path))
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module)
+            elif isinstance(node, ast.Import):
+                imported.update(a.name for a in node.names)
+        self.assertFalse(imported & {"cadabby.cache", "cadabby.vault"}, sorted(imported))
 
 
 if __name__ == "__main__":

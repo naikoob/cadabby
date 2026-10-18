@@ -10,7 +10,6 @@ import re
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Any
 from urllib.parse import unquote
 
 from cadabby.constants import DIR_ARCHIVE, DIR_RAW, DIR_WIKI
@@ -384,14 +383,3 @@ def normalize_link_target(text: str) -> str:
     spellings and resolve them through the same `LinkTargetIndex`.
     """
     return split_link_target_and_anchor(text)[0]
-
-
-def __getattr__(name: str) -> Any:
-    """Re-export SQLite graph queries moved to `cadabby.cache` for backwards compatibility."""
-    if name in ("get_note_graph", "_attach_neighbor_metadata"):
-        from cadabby import cache as _cache
-
-        return getattr(_cache, name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
