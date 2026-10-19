@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -18,11 +17,11 @@ from cadabby.lint import run_vault_lint
 from cadabby.mcp import McpServer
 from cadabby.ops import MoveNoteUseCase, move_note, verify_note
 from cadabby.vault import Vault
-from tests.helpers import copy_demo_vault
+from tests.helpers import demo_vault, note_text, write_note
 
 
 def _fm(title: str, type_: str = "concept") -> str:
-    return f"---\ntype: {type_}\ntitle: {title}\ndescription: d\nstatus: active\n---\n"
+    return note_text(title, type_=type_)
 
 
 LINKER_BODY = """# Linker
@@ -66,18 +65,11 @@ Code `[[target-note]]` is not a link.
 
 class TestMoveNote(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self.root = copy_demo_vault(Path(self.tmp.name) / "demo-vault")
-        self.vault = Vault(self.root)
-
-    def tearDown(self) -> None:
-        self.tmp.cleanup()
+        self.vault = demo_vault(self, "demo-vault")
+        self.root = self.vault.root
 
     def _write(self, rel: str, text: str) -> Path:
-        path = self.root / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, "utf-8")
-        return path
+        return write_note(self.root, rel, text)
 
     def _snapshot(self) -> dict[str, str]:
         return {
@@ -913,12 +905,8 @@ class TestMoveRollbackOrder(unittest.TestCase):
     """T4/M25: undo runs in reverse, or an overlapping folder shift loses a note."""
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.root = copy_demo_vault(Path(self.tmp.name) / "demo-vault")
-        self.vault = Vault(self.root)
-
-    def tearDown(self):
-        self.tmp.cleanup()
+        self.vault = demo_vault(self, "demo-vault")
+        self.root = self.vault.root
 
     def test_a_failed_overlapping_shift_restores_every_byte(self):
         files = {"projects/a/x.md": _fm("Outer") + "# Outer\n", "projects/a/b/x.md": _fm("Inner") + "# Inner\n"}

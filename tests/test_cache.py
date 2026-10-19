@@ -14,20 +14,18 @@ from pathlib import Path
 from cadabby.cache import VaultCache, or_fallback_fts5_query, reset_cache_files, sanitize_fts5_query
 from cadabby.indexer import generate_index_markdown
 from cadabby.vault import Vault, VaultConfigError
-from tests.helpers import copy_demo_vault
+from tests.helpers import copy_demo_vault, demo_vault, temp_dir
 
 
 class TestVaultCache(unittest.TestCase):
     def setUp(self):
         # Create a temporary working copy of examples/demo-vault
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.vault_root = copy_demo_vault(Path(self.tmp_dir.name) / "demo-vault")
-        self.vault = Vault(self.vault_root)
+        self.vault = demo_vault(self, "demo-vault")
+        self.vault_root = self.vault.root
         self.cache = VaultCache(self.vault)
 
     def tearDown(self):
         self.cache.close()
-        self.tmp_dir.cleanup()
 
     def test_initial_scan_and_trust_tiers(self):
         inserted, _, deleted, total = self.cache.scan()
@@ -480,8 +478,8 @@ class TestOnlyMarkdownIsANote(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp_dir.name) / "v"
+        self.tmp_dir = temp_dir(self)
+        self.root = self.tmp_dir / "v"
         (self.root / "wiki").mkdir(parents=True)
         (self.root / "raw").mkdir(parents=True)
         (self.root / ".cadabby.json").write_text('{"vault_name": "v"}\n', encoding="utf-8")
@@ -494,7 +492,6 @@ class TestOnlyMarkdownIsANote(unittest.TestCase):
 
     def tearDown(self):
         self.cache.close()
-        self.tmp_dir.cleanup()
 
     def _indexed(self):
         self.cache.scan()
@@ -536,15 +533,12 @@ class TestCitationResolution(unittest.TestCase):
     """§4.3, §10 C33. A citation resolves against the indexed raw set, on every changed scan."""
 
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp_dir.name) / "v"
+        self.tmp_dir = temp_dir(self)
+        self.root = self.tmp_dir / "v"
         (self.root / "wiki").mkdir(parents=True)
         (self.root / "raw").mkdir(parents=True)
         (self.root / ".cadabby.json").write_text('{"vault_name": "v"}\n', encoding="utf-8")
         self.vault = Vault(self.root)
-
-    def tearDown(self):
-        self.tmp_dir.cleanup()
 
     def _cite(self, src):
         (self.root / "wiki" / "Citer.md").write_text(
@@ -615,8 +609,8 @@ class TestRawSourceSearch(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp_dir.name) / "v"
+        self.tmp_dir = temp_dir(self)
+        self.root = self.tmp_dir / "v"
         (self.root / "raw").mkdir(parents=True)
         (self.root / "wiki").mkdir(parents=True)
         (self.root / ".cadabby.json").write_text('{"vault_name": "v"}\n', encoding="utf-8")
@@ -625,7 +619,6 @@ class TestRawSourceSearch(unittest.TestCase):
 
     def tearDown(self):
         self.cache.close()
-        self.tmp_dir.cleanup()
 
     def _wiki(self, name: str, body: str):
         (self.root / "wiki" / f"{name}.md").write_text(
@@ -785,13 +778,10 @@ class TestRawSourceSearch(unittest.TestCase):
 
 class TestVaultCacheRanking(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.vault_dir = Path(self.tmp.name) / "vault"
+        self.tmp = temp_dir(self)
+        self.vault_dir = self.tmp / "vault"
         self.vault_dir.mkdir(parents=True, exist_ok=True)
         self.vault = Vault(self.vault_dir)
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def test_cache_scan_zero_change_skips_link_resolution(self):
         note_a = self.vault.wiki_dir / "concepts" / "Note-A.md"
@@ -996,12 +986,8 @@ class TestCacheSelfHealing(unittest.TestCase):
     """The cache is disposable (§4.2): damage to it, or races with the vault, never fail a command."""
 
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.vault_root = copy_demo_vault(Path(self.tmp_dir.name) / "demo-vault")
-        self.vault = Vault(self.vault_root)
-
-    def tearDown(self):
-        self.tmp_dir.cleanup()
+        self.vault = demo_vault(self, "demo-vault")
+        self.vault_root = self.vault.root
 
     def test_a_corrupt_cache_file_is_rebuilt(self):
         db = self.vault.cache_db_path
@@ -1049,9 +1035,8 @@ class TestSearchOperators(unittest.TestCase):
         self.assertEqual(sanitize_fts5_query('foo"bar'), 'foo "bar"')
 
     def test_and_not_excludes_matching_notes(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        vault = Vault(copy_demo_vault(Path(tmp.name) / "demo-vault"))
+        tmp = temp_dir(self)
+        vault = Vault(copy_demo_vault(tmp / "demo-vault"))
         with VaultCache(vault) as cache:
             cache.scan()
             both = {r.cid for r in cache.search("sqlite")}
@@ -1060,9 +1045,8 @@ class TestSearchOperators(unittest.TestCase):
         self.assertNotIn("wiki/sqlite-vs-duckdb", negated)
 
     def test_an_unsearchable_query_with_a_filter_falls_back_to_the_filter(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        vault = Vault(copy_demo_vault(Path(tmp.name) / "demo-vault"))
+        tmp = temp_dir(self)
+        vault = Vault(copy_demo_vault(tmp / "demo-vault"))
         with VaultCache(vault) as cache:
             cache.scan()
             filtered = {r.cid for r in cache.search(None, trust="human-reviewed")}
@@ -1076,9 +1060,8 @@ class TestCarriageReturnForgery(unittest.TestCase):
     """C73: the cache refuses the same `\\r`-joined frontmatter the parser refuses."""
 
     def test_a_lone_cr_attestation_gets_no_trust_tier(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        root = copy_demo_vault(Path(tmp.name) / "demo-vault")
+        tmp = temp_dir(self)
+        root = copy_demo_vault(tmp / "demo-vault")
         forged = (
             "---\ntype: concept\ntitle: Forged\ndescription: d\nstatus: active\rverified:\r"
             "  - by: human:alice\r    at: '2026-10-01T00:00:00Z'\r    of: 'sha256:" + "0" * 64 + "'\n---\n# F\n"
@@ -1097,13 +1080,10 @@ class TestCacheContention(unittest.TestCase):
     """C75: another process holding the cache never fails a read, and a blocked write is retryable."""
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.vault = Vault(copy_demo_vault(Path(self.tmp.name) / "demo-vault"))
+        self.tmp = temp_dir(self)
+        self.vault = Vault(copy_demo_vault(self.tmp / "demo-vault"))
         with VaultCache(self.vault) as cache:
             cache.scan()
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def test_reads_work_while_another_process_holds_the_write_lock(self):
         import sqlite3
@@ -1145,9 +1125,8 @@ class TestCacheLeakIsVisible(unittest.TestCase):
         import gc
         import warnings
 
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        cache = VaultCache(Vault(copy_demo_vault(Path(tmp.name) / "v")))
+        tmp = temp_dir(self)
+        cache = VaultCache(Vault(copy_demo_vault(tmp / "v")))
         cache.get_connection()
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
@@ -1162,9 +1141,8 @@ class TestScanIsOneTransaction(unittest.TestCase):
     def test_a_failure_mid_scan_rolls_back(self):
         from unittest import mock
 
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        root = copy_demo_vault(Path(tmp.name) / "demo-vault")
+        tmp = temp_dir(self)
+        root = copy_demo_vault(tmp / "demo-vault")
         vault = Vault(root)
         with VaultCache(vault) as cache:
             cache.scan()

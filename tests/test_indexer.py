@@ -8,7 +8,6 @@ note added. These pin the replacement -- and pin that the catalog stays gone.
 
 from __future__ import annotations
 
-import tempfile
 import time
 import unittest
 import unittest.mock
@@ -18,35 +17,30 @@ from cadabby.cache import VaultCache
 from cadabby.indexer import generate_index_markdown, rotate_vault_log, sync_vault_index
 from cadabby.lint import run_vault_lint
 from cadabby.vault import Vault
+from tests.helpers import note_text, temp_dir, write_note
 
 
 class IndexerFixture(unittest.TestCase):
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.vault_root = Path(self.tmp_dir.name) / "test-vault"
+        self.tmp_dir = temp_dir(self)
+        self.vault_root = self.tmp_dir / "test-vault"
         for sub in ("wiki", "raw"):
             (self.vault_root / sub).mkdir(parents=True, exist_ok=True)
         (self.vault_root / ".cadabby.json").write_text('{"vault_name": "Test Vault"}\n', "utf-8")
         self.vault = Vault(self.vault_root)
 
-    def tearDown(self):
-        self.tmp_dir.cleanup()
-
     def _note(self, stem, type_="concept", body="", status="active", domain="wiki", **extra):
-        path = self.vault_root / domain / f"{stem}.md"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fm = [
-            "---",
-            f"type: {type_}",
-            f'title: "{stem}"',
-            f'description: "about {stem}"',
-            f"status: {status}",
-        ]
-        for key, value in extra.items():
-            fm.append(f"{key}: {value}")
-        fm.append("---")
-        path.write_text("\n".join(fm) + f"\n# {stem}\n\n{body}\n", "utf-8")
-        return path
+        text = note_text(
+            stem,
+            type_=type_,
+            quote_title=True,
+            description=f"about {stem}",
+            quote_description=True,
+            status=status,
+            extra=[f"{key}: {value}" for key, value in extra.items()],
+            body=f"# {stem}\n\n{body}\n",
+        )
+        return write_note(self.vault_root, f"{domain}/{stem}.md", text)
 
     def _index(self):
         with VaultCache(self.vault) as cache:

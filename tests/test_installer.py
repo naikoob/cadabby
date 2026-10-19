@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -20,16 +19,13 @@ from cadabby.installer import (
     uninstall_antigravity,
     uninstall_claude,
 )
-import tests.helpers  # noqa: F401 -- T1: scrubs CADABBY_VAULT before any test runs
+from tests.helpers import temp_dir  # importing helpers also scrubs CADABBY_VAULT (T1)
 
 
 class TestInstaller(unittest.TestCase):
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp_dir.name)
-
-    def tearDown(self):
-        self.tmp_dir.cleanup()
+        self.tmp_dir = temp_dir(self)
+        self.root = self.tmp_dir
 
     def test_claude_install_and_idempotency_ac18(self):
         claude_cfg = self.root / ".claude.json"

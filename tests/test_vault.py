@@ -19,16 +19,13 @@ from cadabby.vault import (
     path_to_cid,
     path_to_layer,
 )
-import tests.helpers  # noqa: F401 -- T1: scrubs CADABBY_VAULT before any test runs
+from tests.helpers import temp_dir  # importing helpers also scrubs CADABBY_VAULT (T1)
 
 
 class TestVault(unittest.TestCase):
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.dir = Path(self.tmp_dir.name)
-
-    def tearDown(self):
-        self.tmp_dir.cleanup()
+        self.tmp_dir = temp_dir(self)
+        self.dir = self.tmp_dir
 
     def test_find_vault_root_walkup(self):
         # Create vault structure
@@ -225,11 +222,8 @@ class TestVault(unittest.TestCase):
 
 class TestConfigEncoding(unittest.TestCase):
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.dir = Path(self.tmp_dir.name)
-
-    def tearDown(self):
-        self.tmp_dir.cleanup()
+        self.tmp_dir = temp_dir(self)
+        self.dir = self.tmp_dir
 
     def test_a_byte_order_mark_is_tolerated(self):
         from cadabby.vault import load_vault_config

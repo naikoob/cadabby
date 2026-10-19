@@ -7,9 +7,7 @@ Tests Phase 1: Foundations, path/CID generalization, and domain discovery.
 from __future__ import annotations
 
 import json
-import tempfile
 import unittest
-from pathlib import Path
 
 from cadabby.cache import VaultCache
 from cadabby.domain import DomainDefinition
@@ -17,7 +15,7 @@ from cadabby.lint import run_vault_lint
 from cadabby.mcp import McpServer
 from cadabby.ops import ground_notes, scaffold_note, verify_note
 from cadabby.vault import cid_to_path, path_to_cid, path_to_layer
-from tests.helpers import create_test_vault
+from tests.helpers import create_test_vault, temp_dir
 
 
 class TestDomainFoundations(unittest.TestCase):
@@ -63,12 +61,9 @@ class TestDomainFoundations(unittest.TestCase):
 
 class TestDomainDiscovery(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.vault_dir = Path(self.tmp.name) / "vault"
+        self.tmp = temp_dir(self)
+        self.vault_dir = self.tmp / "vault"
         self.vault = create_test_vault(self.vault_dir, subdirs=("wiki", "raw", "log"))
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def test_default_wiki_domain_fallback(self):
         domains = self.vault.discover_domains()
@@ -200,15 +195,12 @@ Explore ideas freely.
 
 class TestMultiDomainCacheAndGraph(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.vault_dir = Path(self.tmp.name) / "vault"
+        self.tmp = temp_dir(self)
+        self.vault_dir = self.tmp / "vault"
         self.vault = create_test_vault(
             self.vault_dir,
             subdirs=("wiki/concepts", "customers/acme", "projects/apollo", "raw", "log"),
         )
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def test_multi_domain_cache_scan_and_fts_search(self):
         # 1. Setup wiki note
@@ -379,15 +371,12 @@ See standard [[Architecture]] and project [[apollo/Architecture]].
 
 class TestMultiDomainLinter(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.vault_dir = Path(self.tmp.name) / "vault"
+        self.tmp = temp_dir(self)
+        self.vault_dir = self.tmp / "vault"
         self.vault = create_test_vault(
             self.vault_dir,
             subdirs=("wiki/concepts", "customers/acme", "projects/apollo", "raw", "log"),
         )
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def test_lint_custom_types_and_allowed_types(self):
         # Configure customers domain with allowed_types
@@ -580,8 +569,8 @@ Uses [[Database]].
 
 class TestMultiDomainOpsAndMcp(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.vault_dir = Path(self.tmp.name) / "vault"
+        self.tmp = temp_dir(self)
+        self.vault_dir = self.tmp / "vault"
         self.vault = create_test_vault(
             self.vault_dir,
             subdirs=("wiki/concepts", "wiki/entities", "customers/acme", "raw", "log"),
@@ -603,9 +592,6 @@ require_sources: false
 """,
             encoding="utf-8",
         )
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def test_scaffold_note_in_custom_domain(self):
         path = scaffold_note(
@@ -729,12 +715,9 @@ class TestDomainManifestValidity(unittest.TestCase):
     """§2.2, §6.3, C35. A manifest that cannot be honored is reported, never read as 'open'."""
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.vault_dir = Path(self.tmp.name) / "vault"
+        self.tmp = temp_dir(self)
+        self.vault_dir = self.tmp / "vault"
         self.vault = create_test_vault(self.vault_dir, subdirs=("wiki", "customers", "raw", "log"))
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def _manifest(self, text):
         (self.vault_dir / "customers" / "AGENTS.md").write_text(text, encoding="utf-8")
@@ -773,8 +756,8 @@ class TestDomainManifestValidity(unittest.TestCase):
 
 class TestMultiDomainEndToEnd(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.vault_dir = Path(self.tmp.name) / "vault"
+        self.tmp = temp_dir(self)
+        self.vault_dir = self.tmp / "vault"
         self.vault = create_test_vault(
             self.vault_dir,
             subdirs=("wiki/concepts", "wiki/entities", "customers/acme", "projects/apollo", "raw", "log"),
@@ -816,9 +799,6 @@ Architectural decisions must link to canonical concepts.
             "Acme Master Services Agreement signed 2026.",
             encoding="utf-8",
         )
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def test_full_cognitive_domain_lifecycle(self):
         # 1. Scaffold canonical wiki concept

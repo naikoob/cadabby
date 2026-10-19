@@ -3,24 +3,19 @@
 from __future__ import annotations
 
 import re
-import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
 
 from cadabby.lint import run_vault_lint
 from cadabby.vault import Vault
-from tests.helpers import copy_demo_vault
+from tests.helpers import demo_vault, note_text, temp_dir, write_note
 
 
 class TestLint(unittest.TestCase):
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.vault_root = copy_demo_vault(Path(self.tmp_dir.name) / "demo-vault")
-        self.vault = Vault(self.vault_root)
-
-    def tearDown(self):
-        self.tmp_dir.cleanup()
+        self.vault = demo_vault(self, "demo-vault")
+        self.vault_root = self.vault.root
 
     def test_clean_demo_vault_has_zero_errors(self):
         findings = run_vault_lint(self.vault)
@@ -423,12 +418,7 @@ There are no links here.
         self.assertEqual(len(missing), 3)
 
     def _write_domain_note(self, rel: str, body: str) -> None:
-        path = self.vault_root / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            "---\ntype: concept\ntitle: Raw Linker\ndescription: S\nstatus: active\n---\n# Raw Linker\n\n" + body + "\n",
-            "utf-8",
-        )
+        write_note(self.vault_root, rel, note_text("Raw Linker", description="S", body=f"# Raw Linker\n\n{body}\n"))
 
     def test_raw_link_wrong_depth_is_reported_with_suggestion(self):
         (self.vault_root / "raw").mkdir(exist_ok=True)
@@ -470,33 +460,17 @@ class TestLintTaxonomyIsClosed(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.vault_root = copy_demo_vault(Path(self.tmp_dir.name) / "demo-vault")
-        self.vault = Vault(self.vault_root)
+        self.vault = demo_vault(self, "demo-vault")
+        self.vault_root = self.vault.root
         self._seed_one_of_everything()
 
-    def tearDown(self):
-        self.tmp_dir.cleanup()
-
     def _write(self, rel, text):
-        path = self.vault_root / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, "utf-8")
+        write_note(self.vault_root, rel, text)
 
     def _fm(self, title, *extra, type_="concept", status="active", body="Body."):
-        lines = [
-            "---",
-            f"type: {type_}",
-            f"title: {title}",
-            "description: Fixture note",
-            f"status: {status}",
-            *extra,
-            "---",
-            f"# {title}",
-            "",
-            body,
-        ]
-        return "\n".join(lines) + "\n"
+        return note_text(
+            title, type_=type_, description="Fixture note", status=status, extra=extra, body=f"# {title}\n\n{body}\n"
+        )
 
     def _seed_one_of_everything(self):
         # Gate 1 -- schema integrity.
@@ -632,24 +606,16 @@ class TestMarkdownNoteLinks(unittest.TestCase):
     """§4.4, §6.3, §10 C29. Relative Markdown links to notes are graph edges like wikilinks."""
 
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.vault_root = Path(self.tmp_dir.name) / "vault"
+        self.tmp_dir = temp_dir(self)
+        self.vault_root = self.tmp_dir / "vault"
         for sub in ("wiki", "raw"):
             (self.vault_root / sub).mkdir(parents=True)
         (self.vault_root / "STYLE.md").write_text("# Style\n", "utf-8")
         self.vault = Vault(self.vault_root)
         self._note("wiki/Architecture.md", "Architecture", "## B-Tree Indexes (v2)\n\nDetail.")
 
-    def tearDown(self):
-        self.tmp_dir.cleanup()
-
     def _note(self, rel, title, body):
-        path = self.vault_root / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            f"---\ntype: concept\ntitle: {title}\ndescription: Fixture\nstatus: active\n---\n# {title}\n\n{body}\n",
-            "utf-8",
-        )
+        write_note(self.vault_root, rel, note_text(title, description="Fixture", body=f"# {title}\n\n{body}\n"))
 
     def _codes_for(self, rel):
         return [(f.code, f.message) for f in run_vault_lint(self.vault) if f.rel_path == rel]
@@ -809,7 +775,7 @@ class TestLintExitCodes(unittest.TestCase):
                 self.assertEqual(self._lint(self.vault_root, json_mode=json_mode), 1)
 
     def test_a_clean_vault_exits_0_in_both_modes(self):
-        clean = Path(self.tmp_dir.name) / "clean"
+        clean = temp_dir(self) / "clean"
         (clean / "wiki").mkdir(parents=True)
         (clean / ".cadabby.json").write_text('{"vault_name": "clean"}', "utf-8")
         for json_mode in (False, True):

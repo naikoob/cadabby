@@ -5,25 +5,22 @@ from __future__ import annotations
 import io
 import json
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
 from cadabby.mcp import TOOLS, McpServer, run_mcp_server
 from cadabby.vault import Vault
-from tests.helpers import copy_demo_vault
+from tests.helpers import copy_demo_vault, demo_vault, note_text, temp_dir, write_note
 
 
 class TestMcpServer(unittest.TestCase):
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.vault_root = copy_demo_vault(Path(self.tmp_dir.name) / "demo-vault")
-        self.vault = Vault(self.vault_root)
+        self.vault = demo_vault(self, "demo-vault")
+        self.vault_root = self.vault.root
         self.server = McpServer(self.vault)
 
     def tearDown(self):
         self.server.close()
-        self.tmp_dir.cleanup()
 
     def test_initialize_and_tools_list(self):
         init_res = self.server.handle_initialize(
@@ -639,26 +636,20 @@ class TestMcpProtocolErrors(unittest.TestCase):
 
 
 def _note(root: Path, rel: str, body: str, *, type_: str = "concept", extra: str = "") -> None:
-    path = root / rel
-    path.parent.mkdir(parents=True, exist_ok=True)
     title = Path(rel).stem
-    path.write_text(
-        f"---\ntype: {type_}\ntitle: {title}\ndescription: d\nstatus: active\n{extra}---\n# {title}\n\n{body}\n",
-        "utf-8",
-    )
+    write_note(root, rel, note_text(title, type_=type_, extra=extra.splitlines(), body=f"# {title}\n\n{body}\n"))
 
 
 class TestEightToolSurface(unittest.TestCase):
     """§5.1, §4.5 and §10 C67-C70: raw grounding, status queues, vault_graph, retired arguments."""
 
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.root = copy_demo_vault(Path(self.tmp_dir.name) / "demo-vault")
+        self.tmp_dir = temp_dir(self)
+        self.root = copy_demo_vault(self.tmp_dir / "demo-vault")
         self.server = McpServer(Vault(self.root))
 
     def tearDown(self):
         self.server.close()
-        self.tmp_dir.cleanup()
 
     def _call(self, tool: str, args: dict) -> dict:
         res = self.server.handle_tools_call(tool, args)
@@ -693,7 +684,7 @@ class TestEightToolSurface(unittest.TestCase):
 
     def test_ground_refuses_anything_that_is_not_listed_raw_evidence(self):
         (self.root / "raw" / ".hidden.md").write_text("secret", "utf-8")
-        outside = Path(self.tmp_dir.name) / "outside.md"
+        outside = self.tmp_dir / "outside.md"
         outside.write_text("outside", "utf-8")
         (self.root / "raw" / "link.md").symlink_to(outside)
         for target in ("raw/../.cadabby.json", "raw/.hidden.md", "raw/link.md", "raw/no-such.md", "raw/../wiki/sqlite.md"):
@@ -930,9 +921,8 @@ class TestToolRegistry(unittest.TestCase):
         self.assertTrue(all(t["inputSchema"]["additionalProperties"] is False for t in TOOLS))
 
     def test_a_tools_list_reply_is_a_copy(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        with McpServer(Vault(copy_demo_vault(Path(tmp.name) / "v"))) as server:
+        tmp = temp_dir(self)
+        with McpServer(Vault(copy_demo_vault(tmp / "v"))) as server:
             reply = server.handle_tools_list()
             reply["tools"][0]["inputSchema"]["properties"]["injected"] = {"type": "string"}
             reply["tools"].append({"name": "vault_ninth"})

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import re
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -35,7 +34,7 @@ from cadabby.errors import (
 from cadabby.frontmatter import FrontmatterParseError, FrontmatterSerializeError
 from cadabby.mcp import TOOLS, McpServer
 from cadabby.vault import Vault
-from tests.helpers import copy_demo_vault
+from tests.helpers import demo_vault
 
 
 class TestClassification(unittest.TestCase):
@@ -163,13 +162,11 @@ class TestMCPErrorPayload(unittest.TestCase):
     """What an agent actually receives when a tool fails."""
 
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.vault_root = copy_demo_vault(Path(self.tmp_dir.name) / "demo-vault")
+        self.vault_root = demo_vault(self, "demo-vault").root
         self.server = McpServer(Vault(self.vault_root))
 
     def tearDown(self):
         self.server.close()
-        self.tmp_dir.cleanup()
 
     def _error(self, tool, args):
         res = self.server.handle_tools_call(tool, args)

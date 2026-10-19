@@ -35,17 +35,13 @@ from cadabby.ops import (
     verify_note,
 )
 from cadabby.vault import Vault
-from tests.helpers import copy_demo_vault
+from tests.helpers import copy_demo_vault, demo_vault, temp_dir
 
 
 class TestOps(unittest.TestCase):
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.vault_root = copy_demo_vault(Path(self.tmp_dir.name) / "demo-vault")
-        self.vault = Vault(self.vault_root)
-
-    def tearDown(self):
-        self.tmp_dir.cleanup()
+        self.vault = demo_vault(self, "demo-vault")
+        self.vault_root = self.vault.root
 
     def test_scaffold_path_outside_note_locations_is_refused(self):
         """§2.1, §2.2, C6: scaffold refuses any path the scan would never index."""
@@ -680,26 +676,38 @@ class TestOps(unittest.TestCase):
         self.assertIsNotNone(base_storage.get_note("wiki/flash-attention"))
 
     def test_ground_notes_closes_temporary_cache(self):
+        # Track the cache ground_notes opens, not every close() in the window:
+        # VaultCache.__del__ closes too, so an earlier test's cache collected
+        # by the garbage collector mid-test used to make the count 2.
+        created: list[VaultCache] = []
         closed_instances: list[VaultCache] = []
+        orig_init = VaultCache.__init__
         orig_close = VaultCache.close
+
+        def tracking_init(cache_self: VaultCache, *args: object, **kwargs: object) -> None:
+            created.append(cache_self)
+            orig_init(cache_self, *args, **kwargs)
 
         def tracking_close(cache_self: VaultCache) -> None:
             closed_instances.append(cache_self)
             orig_close(cache_self)
 
-        with patch.object(VaultCache, "close", autospec=True, side_effect=tracking_close):
+        with (
+            patch.object(VaultCache, "__init__", autospec=True, side_effect=tracking_init),
+            patch.object(VaultCache, "close", autospec=True, side_effect=tracking_close),
+        ):
             grounded = ground_notes(self.vault, ["wiki/sqlite"], cache=None)
             self.assertEqual(len(grounded), 1)
-            self.assertEqual(len(closed_instances), 1)
+            self.assertEqual(len(created), 1)  # it opened exactly one cache...
+            self.assertTrue(any(c is created[0] for c in closed_instances))  # ...and closed that one
 
 
 class TestUpdateNoteEdits(unittest.TestCase):
     """§5.1 `edits`: exact-text replacement and one atomic write per call (C28)."""
 
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.vault_root = copy_demo_vault(Path(self.tmp_dir.name) / "demo-vault")
-        self.vault = Vault(self.vault_root)
+        self.vault = demo_vault(self, "demo-vault")
+        self.vault_root = self.vault.root
         self.note = self.vault.wiki_dir / "Edits-Fixture.md"
         self.note.write_text(
             "---\ntype: concept\ntitle: Edits Fixture\ndescription: Preamble marker lives here too\n"
@@ -708,9 +716,6 @@ class TestUpdateNoteEdits(unittest.TestCase):
             "utf-8",
         )
         self.log = self.vault_root / "log.md"
-
-    def tearDown(self):
-        self.tmp_dir.cleanup()
 
     def _update(self, edits):
         return update_note(vault=self.vault, cid_or_path="wiki/Edits-Fixture", edits=edits, actor="agent:t")
@@ -812,12 +817,8 @@ class TestUpdateNoteEdits(unittest.TestCase):
 
 class TestOpsErgonomics(unittest.TestCase):
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.vault_root = copy_demo_vault(Path(self.tmp_dir.name) / "demo-vault")
-        self.vault = Vault(self.vault_root)
-
-    def tearDown(self):
-        self.tmp_dir.cleanup()
+        self.vault = demo_vault(self, "demo-vault")
+        self.vault_root = self.vault.root
 
     def test_empty_domain_means_wiki(self):
         uc = ScaffoldNoteUseCase(InMemoryNoteStorage(), InMemoryLedger())
@@ -927,8 +928,8 @@ class TestUseCaseFacades(unittest.TestCase):
     )
 
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.vault = Vault(copy_demo_vault(Path(self.tmp_dir.name) / "vault"))
+        self.tmp_dir = temp_dir(self)
+        self.vault = Vault(copy_demo_vault(self.tmp_dir / "vault"))
         self.cache = VaultCache(self.vault)
         self.cache.scan()
         self.notes_before = self.cache.get_status()["total_notes"]
@@ -936,7 +937,6 @@ class TestUseCaseFacades(unittest.TestCase):
 
     def tearDown(self):
         self.cache.close()
-        self.tmp_dir.cleanup()
 
     def test_search_notes_scans_first(self):
         results = search_notes(self.vault, self.cache, query="quokkafacade")

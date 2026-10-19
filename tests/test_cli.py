@@ -31,7 +31,7 @@ from cadabby.cli import (
 from cadabby.installer import mcp_launch_argv
 from cadabby.mcp import McpServer
 from cadabby.vault import Vault
-from tests.helpers import DummyArgs, copy_demo_vault
+from tests.helpers import DummyArgs, copy_demo_vault, demo_vault, temp_dir
 
 
 def _run_like_main(cmd, args) -> int:
@@ -46,11 +46,8 @@ def _run_like_main(cmd, args) -> int:
 
 class TestCli(unittest.TestCase):
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.dir = Path(self.tmp_dir.name)
-
-    def tearDown(self):
-        self.tmp_dir.cleanup()
+        self.tmp_dir = temp_dir(self)
+        self.dir = self.tmp_dir
 
     def test_abbreviated_flags_are_rejected(self):
         """`--for` must not silently mean `--force`, on the root or any subcommand."""
@@ -584,13 +581,10 @@ class TestInstallIsTheRefreshVerb(unittest.TestCase):
     USER_OWNED = ("AGENTS.md", "CLAUDE.md", "GEMINI.md", "STYLE.md", "index.md")
 
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.dir = Path(self.tmp_dir.name)
+        self.tmp_dir = temp_dir(self)
+        self.dir = self.tmp_dir
         self.vault = self.dir / "vault"
         cmd_init(DummyArgs(vault=str(self.vault), name="vault", obsidian=False))
-
-    def tearDown(self):
-        self.tmp_dir.cleanup()
 
     def _install(self, **overrides):
         args = {
@@ -730,13 +724,10 @@ class TestInstallPathIsSingleTarget(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.dir = Path(self.tmp_dir.name)
+        self.tmp_dir = temp_dir(self)
+        self.dir = self.tmp_dir
         self.vault = self.dir / "vault"
         cmd_init(DummyArgs(vault=str(self.vault), name="vault", obsidian=False))
-
-    def tearDown(self):
-        self.tmp_dir.cleanup()
 
     def _install(self, **overrides):
         """Capture both streams: the multi-target refusal is a stderr diagnostic."""
@@ -839,8 +830,8 @@ class TestGlobalInstallBindsOnlyWhenAsked(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.dir = Path(self.tmp_dir.name)
+        self.tmp_dir = temp_dir(self)
+        self.dir = self.tmp_dir
         self.home = self.dir / "home"
         self.home.mkdir()
         self.vault_a = self.dir / "vaultA"
@@ -852,9 +843,6 @@ class TestGlobalInstallBindsOnlyWhenAsked(unittest.TestCase):
         self.addCleanup(self._home_patch.stop)
         self._cwd = os.getcwd()
         self.addCleanup(os.chdir, self._cwd)
-
-    def tearDown(self):
-        self.tmp_dir.cleanup()
 
     def _install(self, cwd, **overrides):
         args = {
@@ -953,11 +941,7 @@ class TestStatusAndMoveCommands(unittest.TestCase):
     """`cadabby status` shares MCP's report builder; `cadabby move` mirrors `vault_move_note`."""
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.vault_root = copy_demo_vault(Path(self.tmp.name) / "demo-vault")
-
-    def tearDown(self):
-        self.tmp.cleanup()
+        self.vault_root = demo_vault(self, "demo-vault").root
 
     def _run(self, fn, **kwargs):
         out = io.StringIO()
@@ -1175,11 +1159,8 @@ class TestCliMirrorsMcp(unittest.TestCase):
 
 class TestCliPolish(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.dir = Path(self.tmp.name)
-
-    def tearDown(self):
-        self.tmp.cleanup()
+        self.tmp = temp_dir(self)
+        self.dir = self.tmp
 
     def test_audit_json_has_one_shape_with_or_without_a_notice(self):
         import contextlib
@@ -1256,11 +1237,7 @@ class TestCliEntryPoint(unittest.TestCase):
     """C75: main(argv) is testable in-process; usage and pipe edge cases exit as specified."""
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.vault_root = copy_demo_vault(Path(self.tmp.name) / "demo-vault")
-
-    def tearDown(self):
-        self.tmp.cleanup()
+        self.vault_root = demo_vault(self, "demo-vault").root
 
     def _main(self, *argv):
         from cadabby.cli import main
@@ -1292,11 +1269,7 @@ class TestCliWriteJson(unittest.TestCase):
     """C76: scaffold, update and verify print the MCP payload with --json (§5.3)."""
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.vault_root = copy_demo_vault(Path(self.tmp.name) / "demo-vault")
-
-    def tearDown(self):
-        self.tmp.cleanup()
+        self.vault_root = demo_vault(self, "demo-vault").root
 
     def _json(self, *argv):
         from cadabby.cli import main
@@ -1323,9 +1296,8 @@ class TestSimulationRemediations(unittest.TestCase):
     """C78: init never plants a vault inside another, and search points at raw/ when that is where the term is."""
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.dir = Path(self.tmp.name)
+        self.tmp = temp_dir(self)
+        self.dir = self.tmp
 
     def _init(self, path: Path, **opts) -> tuple[int, str]:
         err = io.StringIO()

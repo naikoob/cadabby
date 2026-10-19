@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -12,16 +11,13 @@ from cadabby.cache import VaultCache
 from cadabby.domain import Note
 from cadabby.fsutil import VaultConflictError
 from cadabby.ports import IndexCachePort, LedgerPort, NoteStoragePort, VaultLayoutPort
-from tests.helpers import create_test_vault
+from tests.helpers import create_test_vault, temp_dir
 
 
 class TestAdaptersProtocolConformance(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.vault = create_test_vault(Path(self.tmp.name) / "vault")
-
-    def tearDown(self):
-        self.tmp.cleanup()
+        self.tmp = temp_dir(self)
+        self.vault = create_test_vault(self.tmp / "vault")
 
     def test_adapters_conform_to_runtime_protocols(self):
         disk_storage = DiskNoteStorage(self.vault)
@@ -77,16 +73,13 @@ class TestAdaptersProtocolConformance(unittest.TestCase):
 
 class TestDiskNoteStorage(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.vault_dir = Path(self.tmp.name) / "vault"
+        self.tmp = temp_dir(self)
+        self.vault_dir = self.tmp / "vault"
         self.vault = create_test_vault(
             self.vault_dir,
             subdirs=("wiki/concepts", "customers/acme", "projects/apollo", "raw", "log"),
         )
         self.storage = DiskNoteStorage(self.vault)
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def test_get_note_success(self):
         note_path = self.vault_dir / "wiki" / "concepts" / "Entropy.md"
@@ -351,8 +344,8 @@ class TestSourceReads(unittest.TestCase):
     """§2.4, §5.1: raw/ evidence is readable through the port, and nothing else is."""
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.vault_dir = Path(self.tmp.name) / "vault"
+        self.tmp = temp_dir(self)
+        self.vault_dir = self.tmp / "vault"
         self.vault = create_test_vault(self.vault_dir, subdirs=("wiki", "raw/deep", "raw/.git", "raw/node_modules"))
         self.storage = DiskNoteStorage(self.vault)
         (self.vault_dir / "raw" / "a.md").write_text("alpha", "utf-8")
@@ -361,12 +354,9 @@ class TestSourceReads(unittest.TestCase):
         (self.vault_dir / "raw" / ".git" / "c.md").write_text("git", "utf-8")
         (self.vault_dir / "raw" / "node_modules" / "d.md").write_text("nm", "utf-8")
         (self.vault_dir / "wiki" / "Note.md").write_text("---\ntype: concept\n---\nnote", "utf-8")
-        outside = Path(self.tmp.name) / "outside.md"
+        outside = self.tmp / "outside.md"
         outside.write_text("outside", "utf-8")
         (self.vault_dir / "raw" / "escape.md").symlink_to(outside)
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def test_disk_lists_and_reads_only_raw_evidence(self):
         self.assertEqual(list(self.storage.list_source_paths()), ["raw/a.md", "raw/deep/b.txt"])
@@ -398,13 +388,10 @@ class TestSourceReads(unittest.TestCase):
 
 class TestFileLedger(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.vault_dir = Path(self.tmp.name) / "vault"
+        self.tmp = temp_dir(self)
+        self.vault_dir = self.tmp / "vault"
         self.vault = create_test_vault(self.vault_dir, subdirs=("log",))
         self.ledger = FileLedger(self.vault)
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def test_append_creates_ledger_and_records_entry(self):
         self.ledger.append("Action 1")
@@ -469,8 +456,8 @@ class TestWriteContainment(unittest.TestCase):
     NOTE = "---\ntype: concept\ntitle: T\ndescription: d\nstatus: active\n---\n# T\n"
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        base = Path(self.tmp.name).resolve()
+        self.tmp = temp_dir(self)
+        base = self.tmp.resolve()
         self.outside = base / "outside"
         self.outside.mkdir()
         self.victim = self.outside / "victim.txt"
@@ -478,9 +465,6 @@ class TestWriteContainment(unittest.TestCase):
         self.root = base / "vault"
         self.vault = create_test_vault(self.root, subdirs=("wiki", "customers", "raw"))
         (self.root / "wiki" / "sqlite.md").write_text(self.NOTE, "utf-8")
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def assertVictimUntouched(self):
         self.assertEqual(self.victim.read_text("utf-8"), "precious\n")
@@ -584,9 +568,8 @@ class TestLedgerLines(unittest.TestCase):
         self.assertEqual(len(line.splitlines()), 1)
 
     def test_both_ledgers_refuse_an_invalid_actor(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        vault = create_test_vault(Path(tmp.name) / "v", subdirs=("wiki",))
+        tmp = temp_dir(self)
+        vault = create_test_vault(tmp / "v", subdirs=("wiki",))
         for ledger in (InMemoryLedger(), FileLedger(vault)):
             with self.subTest(ledger=type(ledger).__name__), self.assertRaises(ValueError):
                 ledger.append("Updated x", actor="agent:a\nhuman:eve")
@@ -643,9 +626,8 @@ class StorageContract:
 
 class TestDiskStorageContract(StorageContract, unittest.TestCase):
     def make_storage(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.vault = create_test_vault(Path(self.tmp.name) / "v", subdirs=("wiki", "raw", "log"))
+        self.tmp = temp_dir(self)
+        self.vault = create_test_vault(self.tmp / "v", subdirs=("wiki", "raw", "log"))
         return DiskNoteStorage(self.vault)
 
     def place_source(self, storage, rel_path, text):
@@ -768,9 +750,8 @@ class TestDiskLayoutContract(LayoutContract, unittest.TestCase):
         import json
 
         self._json = json
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.vault = create_test_vault(Path(self.tmp.name) / "v", subdirs=("wiki", "raw", "log"))
+        self.tmp = temp_dir(self)
+        self.vault = create_test_vault(self.tmp / "v", subdirs=("wiki", "raw", "log"))
         return DiskNoteStorage(self.vault), FileLedger(self.vault), self.vault
 
     def place_domain(self, name: str, manifest: str) -> None:

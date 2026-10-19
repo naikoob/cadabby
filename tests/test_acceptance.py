@@ -12,7 +12,6 @@ import io
 import json
 import re
 import shutil
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -33,16 +32,13 @@ from cadabby.ops import scaffold_note, update_note, verify_note
 from cadabby.vault import Vault
 
 
-from tests.helpers import DummyArgs, copy_demo_vault
+from tests.helpers import DummyArgs, copy_demo_vault, temp_dir
 
 
 class TestAcceptanceCriteria(unittest.TestCase):
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp_dir.name)
-
-    def tearDown(self):
-        self.tmp_dir.cleanup()
+        self.tmp_dir = temp_dir(self)
+        self.root = self.tmp_dir
 
     def test_ac1_init_produces_zero_lint_errors(self):
         """No current §10 criterion. Pins §5.3: what `init` scaffolds is itself lint-clean."""
@@ -533,8 +529,8 @@ class TestSpecVaultTree(unittest.TestCase):
         spec = (self.repo_root / "SPECIFICATION.md").read_text("utf-8")
         self.tree = spec.split("## 2. Vault Architecture")[1].split("```text")[1].split("```")[0]
         self.names = self._tree_names(self.tree)
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.vault = Path(self.tmp_dir.name) / "tree-vault"
+        self.tmp_dir = temp_dir(self)
+        self.vault = self.tmp_dir / "tree-vault"
         # Every optional flag on, because the tree documents the union of what
         # `init` can write and annotates which flag writes what. Scaffolding
         # the default subset would let the tree promise files no run produces.
@@ -544,8 +540,6 @@ class TestSpecVaultTree(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             cmd_init(args)
 
-    def tearDown(self):
-        self.tmp_dir.cleanup()
 
     @staticmethod
     def _tree_names(tree: str) -> set[str]:

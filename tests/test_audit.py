@@ -12,12 +12,13 @@ from unittest.mock import MagicMock, patch
 
 from cadabby.audit import is_git_repository, run_vault_audit
 from cadabby.vault import Vault
+from tests.helpers import note_text, temp_dir, write_note
 
 
 class TestAudit(unittest.TestCase):
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.vault_root = Path(self.tmp_dir.name) / "vault"
+        self.tmp_dir = temp_dir(self)
+        self.vault_root = self.tmp_dir / "vault"
         self.vault_root.mkdir(parents=True, exist_ok=True)
         (self.vault_root / "wiki").mkdir(parents=True, exist_ok=True)
         (self.vault_root / ".cadabby.json").write_text(
@@ -26,24 +27,16 @@ class TestAudit(unittest.TestCase):
         )
         self.vault = Vault(self.vault_root)
 
-    def tearDown(self):
-        self.tmp_dir.cleanup()
-
     def _write_note(self, stem: str, frontmatter_extra: str = "", body: str = "# Note\n"):
-        p = self.vault_root / "wiki" / f"{stem}.md"
-        p.parent.mkdir(parents=True, exist_ok=True)
-        fm = [
-            "---",
-            "type: concept",
-            f'title: "{stem}"',
-            'description: "test note"',
-            "status: active",
-        ]
-        if frontmatter_extra:
-            fm.append(frontmatter_extra)
-        fm.append("---")
-        p.write_text("\n".join(fm) + "\n" + body, "utf-8")
-        return p
+        text = note_text(
+            stem,
+            quote_title=True,
+            description="test note",
+            quote_description=True,
+            extra=[frontmatter_extra] if frontmatter_extra else [],
+            body=body,
+        )
+        return write_note(self.vault_root, f"wiki/{stem}.md", text)
 
     def test_is_git_repository(self):
         with patch("subprocess.run") as mock_run:
@@ -419,9 +412,8 @@ class TestAudit(unittest.TestCase):
     def test_a_hung_blame_fails_the_audit(self):
         from cadabby.audit import GitTimeoutError
 
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        root = Path(tmp.name)
+        tmp = temp_dir(self)
+        root = tmp
         (root / ".cadabby.json").write_text('{"vault_name": "v"}', "utf-8")
         (root / "wiki").mkdir()
         (root / "wiki" / "n.md").write_text(
@@ -518,8 +510,8 @@ class TestAudit(unittest.TestCase):
     def test_repository_config_cannot_run_code_during_an_audit(self):
         """S11: a shipped .git/config naming a core.fsmonitor program is not executed."""
         self._alice_endorsed_repo()
-        sentinel = Path(self.tmp_dir.name) / "PWNED"
-        hook = Path(self.tmp_dir.name) / "fsmonitor.sh"
+        sentinel = self.tmp_dir / "PWNED"
+        hook = self.tmp_dir / "fsmonitor.sh"
         hook.write_text(f"#!/bin/sh\ntouch '{sentinel}'\n", "utf-8")
         hook.chmod(0o755)
         subprocess.run(["git", "config", "core.fsmonitor", str(hook)], cwd=self.vault_root, check=True,

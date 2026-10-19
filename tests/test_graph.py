@@ -24,12 +24,13 @@ from cadabby.graph import (
 )
 from cadabby.queries import get_note_graph
 from cadabby.vault import Vault, note_path_violation
+from tests.helpers import temp_dir
 
 
 class TestGraphAnalytics(unittest.TestCase):
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp_dir.name)
+        self.tmp_dir = temp_dir(self)
+        self.root = self.tmp_dir
 
         # Build a small test vault with known link structure
         # A links to B, C
@@ -67,7 +68,6 @@ class TestGraphAnalytics(unittest.TestCase):
 
     def tearDown(self):
         self.cache.close()
-        self.tmp_dir.cleanup()
 
     def test_graph_neighborhood_and_co_citations(self):
         conn = self.cache.get_connection()

@@ -13,7 +13,6 @@ from __future__ import annotations
 import contextlib
 import io
 import json
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -26,7 +25,7 @@ from cadabby.ops import ScaffoldNoteUseCase, scaffold_note
 from cadabby.vault import Vault, obsidian_template_dir
 
 
-from tests.helpers import DummyArgs
+from tests.helpers import DummyArgs, temp_dir
 
 # Exactly what Obsidian's core Templates plugin produces: the title placeholder
 # parses as a flow mapping, the empty tag list as a flow sequence.
@@ -49,14 +48,11 @@ class TemplateVaultCase(unittest.TestCase):
     """A vault with wiki/, raw/ and log/, and helpers to configure Obsidian."""
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.vault_dir = Path(self.tmp.name) / "vault"
+        self.tmp = temp_dir(self)
+        self.vault_dir = self.tmp / "vault"
         for sub in ("wiki", "raw", "log"):
             (self.vault_dir / sub).mkdir(parents=True)
         self.vault = Vault(self.vault_dir)
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def configure_templates(self, folder):
         """Write the core plugin's settings file naming `folder`."""
@@ -167,7 +163,7 @@ class TestTemplateSettingIsReadDefensively(TemplateVaultCase):
     def test_a_folder_symlinked_out_of_the_vault_is_refused(self):
         # The case the string checks cannot see: the setting names a plain
         # relative folder, and only resolve() reveals it leaves the vault.
-        outside = Path(self.tmp.name) / "outside"
+        outside = self.tmp / "outside"
         outside.mkdir()
         (self.vault_dir / "templates").symlink_to(outside, target_is_directory=True)
         self.configure_templates("templates")
@@ -180,7 +176,7 @@ class TestTemplateSettingIsReadDefensively(TemplateVaultCase):
         # a symlinked vault silently loses its exclusion.
         self.configure_templates("templates")
         (self.vault_dir / "templates").mkdir()
-        link = Path(self.tmp.name) / "link"
+        link = self.tmp / "link"
         link.symlink_to(self.vault_dir, target_is_directory=True)
         self.assertEqual(
             obsidian_template_dir(link), (self.vault_dir / "templates").resolve()
@@ -274,7 +270,7 @@ class TestScaffoldFromTemplate(TemplateVaultCase):
         # the read, but it would mean the name merely missed rather than that
         # the engine refused to leave the template folder, and the guard could
         # then be deleted without a test noticing.
-        secret = Path(self.tmp.name) / "secret.md"
+        secret = self.tmp / "secret.md"
         secret.write_text("# secret\n", "utf-8")
         for name in ("../../secret", "../secret", "/etc/passwd"):
             with self.subTest(name=name):
@@ -313,11 +309,8 @@ class TestStarterTemplatesAreOptIn(unittest.TestCase):
     """§7.5, §7.6. `init --obsidian-templates` writes the folder it declares."""
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.vault_dir = Path(self.tmp.name) / "vault"
-
-    def tearDown(self):
-        self.tmp.cleanup()
+        self.tmp = temp_dir(self)
+        self.vault_dir = self.tmp / "vault"
 
     def init(self, **kwargs):
         """Run `cadabby init` against the scratch vault, swallowing its chatter."""

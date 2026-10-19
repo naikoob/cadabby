@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import stat
-import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -18,15 +17,13 @@ from cadabby.fsutil import (
     atomic_write,
     compute_file_sha256,
 )
+from tests.helpers import temp_dir
 
 
 class TestFsutil(unittest.TestCase):
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.dir = Path(self.tmp_dir.name)
-
-    def tearDown(self):
-        self.tmp_dir.cleanup()
+        self.tmp_dir = temp_dir(self)
+        self.dir = self.tmp_dir
 
     def test_atomic_write_and_hash(self):
         target = self.dir / "sub" / "note.md"
@@ -222,11 +219,8 @@ class TestFsutil(unittest.TestCase):
 
 class TestAtomicWriteDurability(unittest.TestCase):
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.dir = Path(self.tmp_dir.name)
-
-    def tearDown(self):
-        self.tmp_dir.cleanup()
+        self.tmp_dir = temp_dir(self)
+        self.dir = self.tmp_dir
 
     def test_a_name_near_name_max_can_still_be_rewritten(self):
         target = self.dir / ("n" * 250 + ".md")
@@ -253,11 +247,8 @@ class TestAtomicWriteDurability(unittest.TestCase):
 
 class TestWriteHardening(unittest.TestCase):
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.dir = Path(self.tmp_dir.name).resolve()
-
-    def tearDown(self):
-        self.tmp_dir.cleanup()
+        self.tmp_dir = temp_dir(self)
+        self.dir = self.tmp_dir.resolve()
 
     def test_contained_refuses_links_out_and_allows_links_in(self):
         from cadabby.errors import VaultEscapeError
@@ -316,13 +307,10 @@ class TestAtomicWriteIsAtomic(unittest.TestCase):
     """T4: M12, M15 and M39 survived because only the happy path was tested."""
 
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.dir = Path(self.tmp_dir.name).resolve()
+        self.tmp_dir = temp_dir(self)
+        self.dir = self.tmp_dir.resolve()
         self.target = self.dir / "note.md"
         self.target.write_text("old bytes\n", "utf-8")
-
-    def tearDown(self):
-        self.tmp_dir.cleanup()
 
     def test_a_failure_before_the_rename_leaves_the_old_bytes(self):
         from unittest import mock
