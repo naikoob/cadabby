@@ -7,11 +7,17 @@ Defines the contracts between the domain/application core and external infrastru
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from cadabby.constants import DEFAULT_LIMIT
 from cadabby.domain import DomainDefinition, Note
 from cadabby.graph import LinkTargetIndex
+
+if TYPE_CHECKING:
+    # Annotation-only: search.py and queries.py belong to the cache adapter's
+    # layer, and a port must not import its own adapter's modules (§9.1).
+    from cadabby.queries import DebtRow
+    from cadabby.search import SearchResult
 
 
 @runtime_checkable
@@ -65,8 +71,8 @@ class NoteStoragePort(Protocol):
 class IndexCachePort(Protocol):
     """Secondary port for searching, caching, and epistemic health reporting."""
 
-    def scan(self, force: bool = False) -> tuple[int, int, int, int]:
-        """Incrementally synchronize the index with storage."""
+    def scan(self, force: bool = False, regenerate_index: bool = True) -> tuple[int, int, int, int]:
+        """Incrementally synchronize the index with storage; regenerate index.md if anything changed (§4.3)."""
         ...
 
     def search(
@@ -78,7 +84,7 @@ class IndexCachePort(Protocol):
         tag: str | None = None,
         domain: str | None = None,
         limit: int = DEFAULT_LIMIT,
-    ) -> list[Any]:
+    ) -> list[SearchResult]:
         """Execute epistemic search with trust and status boosting."""
         ...
 
@@ -120,7 +126,7 @@ class IndexCachePort(Protocol):
         """Raw files no note's `sources:` resolves to, sorted (§2.5, §4.5)."""
         ...
 
-    def verification_debt_rows(self) -> Sequence[Any]:
+    def verification_debt_rows(self) -> Sequence[DebtRow]:
         """Active stale-verified notes, sorted by CID, each split by who owes it (§3.4, §4.5)."""
         ...
 

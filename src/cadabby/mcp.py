@@ -11,7 +11,7 @@ import re
 import sys
 from collections.abc import Iterator
 from types import TracebackType
-from typing import Any, Self
+from typing import Any, Self, TypedDict
 
 from cadabby import __version__
 from cadabby.cache import VaultCache
@@ -70,7 +70,16 @@ MAX_LIMIT = 1000
 MAX_TARGETS = 50
 MAX_BUDGET_TOKENS = 1_000_000
 
-_TOOL_SPECS: list[dict[str, Any]] = [
+
+class ToolSpec(TypedDict):
+    """One MCP tool declaration, exactly as `tools/list` serves it (§5.1)."""
+
+    name: str
+    description: str
+    inputSchema: dict[str, Any]  # JSON Schema: open-ended by nature
+
+
+_TOOL_SPECS: list[ToolSpec] = [
     {
         "name": "vault_search",
         "description": (
@@ -315,7 +324,7 @@ _TOOL_SPECS: list[dict[str, Any]] = [
 
 
 
-def _closed(spec: dict[str, Any]) -> dict[str, Any]:
+def _closed(spec: ToolSpec) -> ToolSpec:
     """A tool declaration whose schema refuses unknown keys (§5.1).
 
     `qurey` or `patch` silently dropped turns a typo into a call that
@@ -329,7 +338,7 @@ def _closed(spec: dict[str, Any]) -> dict[str, Any]:
 
 # The one tool registry: what tools/list serves, and what every argument is
 # validated against. A tuple, so no caller can append a ninth tool to it.
-TOOLS: tuple[dict[str, Any], ...] = tuple(_closed(spec) for spec in _TOOL_SPECS)
+TOOLS: tuple[ToolSpec, ...] = tuple(_closed(spec) for spec in _TOOL_SPECS)
 
 _REQUIRED_ARGS: dict[str, tuple[str, ...]] = {t["name"]: tuple(t["inputSchema"].get("required", ())) for t in TOOLS}
 _PROPERTIES: dict[str, dict[str, Any]] = {t["name"]: t["inputSchema"].get("properties", {}) for t in TOOLS}

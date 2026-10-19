@@ -39,6 +39,41 @@ class TestAdaptersProtocolConformance(unittest.TestCase):
         with VaultCache(self.vault) as cache:
             self.assertIsInstance(cache, IndexCachePort)
 
+    def test_every_adapter_takes_the_parameters_its_port_declares(self):
+        """Parameter lists match between each port and each of its adapters (§9.1).
+
+        `@runtime_checkable` checks only that member *names* exist, so
+        `IndexCachePort.scan` lacked `regenerate_index`, which `cadabby sync`
+        passes, and nothing noticed. Names, kinds and defaults are compared;
+        return annotations are not, since an adapter's `list[X]` legitimately
+        narrows a port's `Sequence[X]`.
+        """
+        import inspect
+
+        from cadabby.vault import Vault
+
+        def params(fn: object) -> list[tuple[str, object, object]]:
+            sig = inspect.signature(fn)
+            return [(p.name, p.kind, p.default) for p in sig.parameters.values()]
+
+        pairs = {
+            NoteStoragePort: (DiskNoteStorage, InMemoryNoteStorage),
+            LedgerPort: (FileLedger, InMemoryLedger),
+            VaultLayoutPort: (Vault, InMemoryVaultLayout),
+            IndexCachePort: (VaultCache,),
+        }
+        checked = 0
+        for port, adapters in pairs.items():
+            # The port's own methods (typing.get_protocol_members is 3.13+).
+            for member, declared in sorted(vars(port).items()):
+                if member.startswith("_") or not inspect.isfunction(declared):
+                    continue
+                for adapter in adapters:
+                    with self.subTest(port=port.__name__, member=member, adapter=adapter.__name__):
+                        self.assertEqual(params(getattr(adapter, member)), params(declared))
+                        checked += 1
+        self.assertGreater(checked, 30)  # the loop really ran over every port
+
 
 class TestDiskNoteStorage(unittest.TestCase):
     def setUp(self):

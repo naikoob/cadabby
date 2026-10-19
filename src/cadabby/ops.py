@@ -11,7 +11,7 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, TypedDict
 
 from cadabby.adapters.disk_storage import DiskNoteStorage, FileLedger
 from cadabby.cache import VaultCache
@@ -72,15 +72,19 @@ from cadabby.vault import Vault, cid_to_path, path_to_cid
 __all__ = [
     "EDIT_OPS",
     "ENGINE_OWNED_FIELDS",
+    "EditOp",
     "GRAPH_VIEWS",
     "GroundNotesUseCase",
     "MoveNoteUseCase",
     "MovePlan",
     "QUEUE_ITEM_CAP",
     "RAW_GROUND_MAX_BYTES",
+    "ReplaceTextEdit",
     "ScaffoldNoteUseCase",
+    "SectionEdit",
     "UpdateNoteUseCase",
     "VerifyNoteUseCase",
+    "VerifyPayload",
     "WriteResult",
     "_FORBIDDEN_NAME_CHARS",
     "_MovedNote",
@@ -270,11 +274,34 @@ EDIT_OPS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _validate_edits(edits: list[dict[str, Any]]) -> list[dict[str, str]]:
-    """Check every edit's shape before any is applied, so a bad one writes nothing."""
+class ReplaceTextEdit(TypedDict):
+    """`{"op": "replace_text", "old", "new"}` after validation (§5.1)."""
+
+    op: Literal["replace_text"]
+    old: str
+    new: str
+
+
+class SectionEdit(TypedDict):
+    """`{"op": "replace_section" | "append_section", "heading", "body"}` after validation (§5.1)."""
+
+    op: Literal["replace_section", "append_section"]
+    heading: str
+    body: str
+
+
+EditOp = ReplaceTextEdit | SectionEdit
+
+
+def _validate_edits(edits: list[dict[str, Any]]) -> list[EditOp]:
+    """Check every edit's shape before any is applied, so a bad one writes nothing.
+
+    The input is untrusted JSON, hence `dict[str, Any]`; what comes out is an
+    `EditOp` holding exactly the fields its op takes.
+    """
     if not isinstance(edits, list):
         raise InvalidArgumentError("edits must be a list of {op, ...} objects")
-    clean: list[dict[str, str]] = []
+    clean: list[EditOp] = []
     for i, edit in enumerate(edits):
         if not isinstance(edit, dict):
             raise InvalidArgumentError(f"edits[{i}] must be an object")
@@ -286,7 +313,10 @@ def _validate_edits(edits: list[dict[str, Any]]) -> list[dict[str, str]]:
         missing = [k for k in required if not isinstance(edit.get(k), str)]
         if missing:
             raise InvalidArgumentError(f"edits[{i}] ({op}) requires string field(s): {', '.join(missing)}")
-        clean.append({"op": op, **{k: edit[k] for k in required}})
+        if op == "replace_text":
+            clean.append(ReplaceTextEdit(op="replace_text", old=edit["old"], new=edit["new"]))
+        else:
+            clean.append(SectionEdit(op=op, heading=edit["heading"], body=edit["body"]))
     return clean
 
 
@@ -570,6 +600,21 @@ def update_note_result(
     return WriteResult.of(note, _refresh(cache))
 
 
+class VerifyPayload(TypedDict):
+    """What `vault_verify_note` and `cadabby verify --json` return (§5.1).
+
+    `of` is the body hash the attestation binds; `already_verified` says the
+    actor had already attested this exact body, so nothing was written.
+    """
+
+    cid: str
+    actor: str
+    of: str
+    trust_tier: str
+    already_verified: bool
+    warnings: list[str]
+
+
 def verify_note(
     vault: Vault,
     cid_or_path: str,
@@ -580,7 +625,7 @@ def verify_note(
     ledger: LedgerPort | None = None,
     cache: IndexCachePort | None = None,
     expected_body_hash: str | None = None,
-) -> dict[str, Any]:
+) -> VerifyPayload:
     """Appends a content-bound verification attestation to a note."""
     active_storage, active_ledger = _resolve_adapters(vault, storage, ledger)
     uc = VerifyNoteUseCase(active_storage, active_ledger)
@@ -591,15 +636,14 @@ def verify_note(
         is_human_authorized=is_human_authorized,
         expected_body_hash=expected_body_hash,
     )
-    warnings = _refresh(cache)
-    return {
-        "cid": res.cid,
-        "actor": res.actor,
-        "of": res.of,
-        "trust_tier": res.trust_tier,
-        "already_verified": res.already_verified,
-        "warnings": warnings,
-    }
+    return VerifyPayload(
+        cid=res.cid,
+        actor=res.actor,
+        of=res.of,
+        trust_tier=res.trust_tier,
+        already_verified=res.already_verified,
+        warnings=_refresh(cache),
+    )
 
 
 def search_notes(
