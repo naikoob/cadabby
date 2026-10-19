@@ -406,6 +406,36 @@ class TestArchitecturalErrorAndCacheBoundaries(unittest.TestCase):
                 imported.update(a.name for a in node.names)
         self.assertFalse(imported & {"cadabby.cache", "cadabby.vault"}, sorted(imported))
 
+    def test_driving_adapters_read_through_the_use_case_facades(self):
+        """cli.py and mcp.py read the vault only through ops (§9.1).
+
+        Each adapter handler used to call `cache.scan()` before searching,
+        grounding, or graphing, and status was built in lint.py: six copies of
+        "scan first" and a use case outside the use-case layer. The facades in
+        ops scan for themselves now. Only `cadabby sync` scans directly, since
+        that scan, with its own index regeneration, is the whole command (§4.3).
+        """
+        import ast
+
+        src_root = Path(__file__).resolve().parent.parent / "src" / "cadabby"
+        violations: list[str] = []
+        for name in ("cli.py", "mcp.py"):
+            tree = ast.parse((src_root / name).read_text("utf-8"), filename=name)
+            for fn in ast.walk(tree):
+                if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for node in ast.walk(fn):
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                        attr = node.func.attr
+                        if attr == "search" or (attr == "scan" and (name, fn.name) != ("cli.py", "cmd_sync")):
+                            violations.append(f"{name}:{node.lineno} {fn.name} calls .{attr}()")
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module == "cadabby.lint":
+                    leaked = sorted({a.name for a in node.names} - {"run_vault_lint"})
+                    if leaked:
+                        violations.append(f"{name}:{node.lineno} imports {leaked} from cadabby.lint")
+        self.assertEqual(violations, [])
+
 
 if __name__ == "__main__":
     unittest.main()

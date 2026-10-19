@@ -23,6 +23,7 @@ from typing import Any, Self
 import cadabby.indexer as _indexer
 import cadabby.queries as queries
 from cadabby.constants import (
+    DEFAULT_LIMIT,
     DIR_RAW,
     SCHEMA_VERSION,
 )
@@ -741,7 +742,7 @@ class VaultCache:
         trust: str | None = None,
         tag: str | None = None,
         domain: str | None = None,
-        limit: int = 20,
+        limit: int = DEFAULT_LIMIT,
     ) -> list[SearchResult]:
         """Perform BM25 or filter-only search across cognitive domain notes with epistemic rank boosting (§4.4)."""
         return execute_search(

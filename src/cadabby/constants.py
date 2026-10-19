@@ -79,6 +79,10 @@ DEFAULT_INTEGRITY = "mtime_size"
 INTEGRITY_MODES: tuple[str, ...] = ("mtime_size", "hash")
 DEFAULT_LOG_ROTATE_BYTES = 262144  # 256 KB
 
+# Results per `vault_search` and entries per list in `vault_graph` when the caller
+# gives no `limit` (or `limit: null`), on both the CLI and MCP surfaces (§5.1).
+DEFAULT_LIMIT = 20
+
 # Directory & file conventions
 DIR_RAW = "raw"
 DIR_WIKI = "wiki"

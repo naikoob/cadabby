@@ -10,7 +10,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Any
 
-from cadabby.constants import DIR_RAW, FTS_COLUMN_WEIGHTS, FTS_FIELD_HIT_FLOOR
+from cadabby.constants import DEFAULT_LIMIT, DIR_RAW, FTS_COLUMN_WEIGHTS, FTS_FIELD_HIT_FLOOR
 from cadabby.errors import InvalidArgumentError
 from cadabby.vault import path_to_layer
 
@@ -288,7 +288,7 @@ def execute_search(
     trust: str | None = None,
     tag: str | None = None,
     domain: str | None = None,
-    limit: int = 20,
+    limit: int = DEFAULT_LIMIT,
 ) -> list[SearchResult]:
     """Perform BM25 or filter-only search across cognitive domain notes with epistemic rank boosting (§4.4)."""
     # The OR fill compares against `limit`, so it must be a real count: a

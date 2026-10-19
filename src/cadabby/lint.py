@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections import Counter
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -101,49 +100,6 @@ def run_vault_lint(vault: Vault, cache: VaultCache | None = None) -> list[LintFi
         return _run_vault_lint_impl(vault, cache)
     with VaultCache(vault) as local_cache:
         return _run_vault_lint_impl(vault, local_cache)
-
-
-def status_report(vault: Vault, cache: VaultCache, *, lint: bool = False) -> dict[str, Any]:
-    """The one check report behind `vault_status` and `cadabby status` (§4.5, §6.3).
-
-    `finding_counts` always rides along, so every check shows red or green
-    without a second call; the `findings` list itself only on request, since
-    a messy vault produces hundreds. Findings describe the vault, not the
-    call, so nothing here signals failure. `queues` carries the index.md
-    worklists themselves, from the same queries, so an agent never has to read
-    that file off disk to know what is owed.
-    """
-    findings = run_vault_lint(vault, cache=cache)  # scans first
-    report = cache.get_status()
-    by_code = Counter(f.code for f in findings)
-    report["finding_counts"] = {
-        "error": sum(1 for f in findings if f.severity == "error"),
-        "warning": sum(1 for f in findings if f.severity == "warning"),
-        "by_code": dict(sorted(by_code.items())),
-    }
-    debt = cache.verification_debt_rows()
-    report["queues"] = {
-        "unprocessed_raw": _queue(cache.unprocessed_raw_paths()),
-        "unfiled": _queue([r["cid"] for r in cache.unfiled_note_rows()]),
-        "verification_debt": {
-            "agent_payable": _queue([d.cid for d in debt if not d.human_owed]),
-            "human_owed": _queue([d.cid for d in debt if d.human_owed]),
-        },
-    }
-    if lint:
-        report["findings"] = [f.to_dict() for f in findings]
-    return report
-
-
-# Queue entries returned per call. `vault_status` runs at the start of nearly
-# every task, so a neglected vault's hundreds of sources would cost every turn
-# that reads it; the totals still say how much is left (§4.5).
-QUEUE_ITEM_CAP = 25
-
-
-def _queue(items: list[str]) -> dict[str, Any]:
-    """`{"total", "items"}`: the first QUEUE_ITEM_CAP entries, in index.md order."""
-    return {"total": len(items), "items": items[:QUEUE_ITEM_CAP]}
 
 
 def _markdown_path_hint(source_cid: str, target_raw: str, resolver: LinkTargetIndex) -> str:

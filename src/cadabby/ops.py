@@ -7,6 +7,7 @@ Implements the Driving Use Cases layer in Hexagonal Architecture.
 from __future__ import annotations
 
 import copy
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,7 +15,7 @@ from typing import Any
 
 from cadabby.adapters.disk_storage import DiskNoteStorage, FileLedger
 from cadabby.cache import VaultCache
-from cadabby.constants import DIR_RAW, DIR_WIKI, TEMPLATE_TITLE_PLACEHOLDER
+from cadabby.constants import DEFAULT_LIMIT, DIR_RAW, DIR_WIKI, TEMPLATE_TITLE_PLACEHOLDER
 from cadabby.domain import (
     ENGINE_OWNED_FIELDS,
     Note,
@@ -37,6 +38,7 @@ from cadabby.ground import (
     _truncate_sections,
     _truncate_to_budget,
 )
+from cadabby.lint import run_vault_lint
 from cadabby.move import (
     MoveNoteUseCase,
     MovePlan,
@@ -64,6 +66,7 @@ from cadabby.resolve import (
     sanitize_filename,
     with_md_suffix,
 )
+from cadabby.search import SearchResult
 from cadabby.vault import Vault, cid_to_path, path_to_cid
 
 __all__ = [
@@ -73,6 +76,7 @@ __all__ = [
     "GroundNotesUseCase",
     "MoveNoteUseCase",
     "MovePlan",
+    "QUEUE_ITEM_CAP",
     "RAW_GROUND_MAX_BYTES",
     "ScaffoldNoteUseCase",
     "UpdateNoteUseCase",
@@ -102,12 +106,15 @@ __all__ = [
     "ground_notes",
     "load_existing_note",
     "move_note",
+    "raw_sources_match",
     "resolve_note_cid",
     "sanitize_filename",
     "scaffold_note",
     "scaffold_note_result",
+    "search_notes",
     "update_note",
     "update_note_result",
+    "vault_status",
     "verify_note",
     "with_md_suffix",
 ]
@@ -595,6 +602,88 @@ def verify_note(
     }
 
 
+def search_notes(
+    vault: Vault,
+    cache: IndexCachePort,
+    *,
+    query: str = "",
+    type_: str | None = None,
+    status: str | None = None,
+    trust: str | None = None,
+    tag: str | None = None,
+    domain: str | None = None,
+    limit: int | None = None,
+) -> list[SearchResult]:
+    """Epistemically ranked search, `vault_search` and `cadabby search` alike (§4.4, §5.1).
+
+    Scans first, as every read facade does (§4.3): a note written since the
+    last call must be findable, and the adapters no longer each remember to.
+    `limit` of None (an omitted or `null` argument) means DEFAULT_LIMIT.
+    """
+    cache.scan()
+    return cache.search(
+        query=query,
+        type_=type_,
+        status=status,
+        trust=trust,
+        tag=tag,
+        domain=domain,
+        limit=DEFAULT_LIMIT if limit is None else limit,
+    )
+
+
+def raw_sources_match(cache: IndexCachePort, query: str) -> bool:
+    """Whether a `raw/` source matches `query`, which the default corpus leaves out (§2.4, §5.3).
+
+    Backs the CLI's hint when an unscoped search finds nothing. Call it after
+    `search_notes`, which has already scanned; it does not scan again.
+    """
+    return bool(query) and bool(cache.search(query=query, domain=DIR_RAW, limit=1))
+
+
+# Queue entries returned per call. `vault_status` runs at the start of nearly
+# every task, so a neglected vault's hundreds of sources would cost every turn
+# that reads it; the totals still say how much is left (§4.5).
+QUEUE_ITEM_CAP = 25
+
+
+def _queue(items: list[str]) -> dict[str, Any]:
+    """`{"total", "items"}`: the first QUEUE_ITEM_CAP entries, in index.md order."""
+    return {"total": len(items), "items": items[:QUEUE_ITEM_CAP]}
+
+
+def vault_status(vault: Vault, cache: VaultCache, *, lint: bool = False) -> dict[str, Any]:
+    """The one check report behind `vault_status` and `cadabby status` (§4.5, §6.3).
+
+    `finding_counts` always rides along, so every check shows red or green
+    without a second call; the `findings` list itself only on request, since
+    a messy vault produces hundreds. Findings describe the vault, not the
+    call, so nothing here signals failure. `queues` carries the index.md
+    worklists themselves, from the same queries, so an agent never has to read
+    that file off disk to know what is owed.
+    """
+    findings = run_vault_lint(vault, cache=cache)  # scans first
+    report = cache.get_status()
+    by_code = Counter(f.code for f in findings)
+    report["finding_counts"] = {
+        "error": sum(1 for f in findings if f.severity == "error"),
+        "warning": sum(1 for f in findings if f.severity == "warning"),
+        "by_code": dict(sorted(by_code.items())),
+    }
+    debt = cache.verification_debt_rows()
+    report["queues"] = {
+        "unprocessed_raw": _queue(list(cache.unprocessed_raw_paths())),
+        "unfiled": _queue([r["cid"] for r in cache.unfiled_note_rows()]),
+        "verification_debt": {
+            "agent_payable": _queue([d.cid for d in debt if not d.human_owed]),
+            "human_owed": _queue([d.cid for d in debt if d.human_owed]),
+        },
+    }
+    if lint:
+        report["findings"] = [f.to_dict() for f in findings]
+    return report
+
+
 def ground_notes(
     vault: Vault,
     targets: Sequence[str],
@@ -602,13 +691,17 @@ def ground_notes(
     cache: IndexCachePort | None = None,
     storage: NoteStoragePort | None = None,
 ) -> list[dict[str, Any]]:
-    """Retrieve notes (content and 1-hop graph) or raw/ sources (text and citing notes) (§5.1)."""
+    """Retrieve notes (content and 1-hop graph) or raw/ sources (text and citing notes) (§5.1).
+
+    Scans the cache it uses first (§4.3), whether passed in or opened here.
+    """
     active_storage, _ = _resolve_adapters(vault, storage)
     if cache is None:
         with VaultCache(vault) as active_cache:
             active_cache.scan()
             uc = GroundNotesUseCase(storage=active_storage, cache=active_cache, vault=vault)
             return uc.execute(targets=targets, budget_tokens=budget_tokens)
+    cache.scan()
     uc = GroundNotesUseCase(storage=active_storage, cache=cache, vault=vault)
     return uc.execute(targets=targets, budget_tokens=budget_tokens)
 
@@ -622,15 +715,18 @@ def graph_view(
     *,
     view: str = "neighborhood",
     target: str | None = None,
-    limit: int = 20,
+    limit: int | None = None,
     storage: NoteStoragePort | None = None,
 ) -> dict[str, Any]:
     """Link structure without note text: one note's neighborhood, or the MOC overview (§5.1 `vault_graph`).
 
     `target` names a note exactly as for ground and the write tools, so a name
     resolves (or is refused as ambiguous) the same way on every surface. The
-    cache must already be scanned; every entry point scans first (§4.3).
+    arguments are checked first, then the cache is scanned (§4.3). `limit` of
+    None (an omitted or `null` argument) means DEFAULT_LIMIT.
     """
+    if limit is None:
+        limit = DEFAULT_LIMIT
     if view not in GRAPH_VIEWS:
         raise InvalidArgumentError(f"view must be one of {list(GRAPH_VIEWS)}")
     if limit < 1:
@@ -638,11 +734,13 @@ def graph_view(
     if view == "mocs":
         if target is not None:
             raise InvalidArgumentError("view 'mocs' covers every MOC; omit 'target'")
+        cache.scan()
         return {"view": "mocs"} | cache.get_moc_overview(limit)
     if not target or not target.strip():
         raise InvalidArgumentError("view 'neighborhood' needs a 'target' note")
     if _strip_dot_slash(strip_link_wrapper(target)).startswith(f"{DIR_RAW}/"):
         raise InvalidArgumentError("raw/ sources are not graph nodes; vault_ground a raw/ path lists the notes citing it")
+    cache.scan()
     active_storage, _ = _resolve_adapters(vault, storage)
     listed = list(active_storage.list_note_cids())
     cid = resolve_note_cid(active_storage, target, LinkTargetIndex(listed), cids=listed)

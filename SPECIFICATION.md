@@ -1047,7 +1047,7 @@ cadabby/
 │       ├── indexer.py          # index.md gap report (2.5) and log.md append/rotate
 │       ├── lint.py             # The dynamic six gates across all domains (6.3)
 │       ├── audit.py            # Git blame provenance audit (3.5)
-│       ├── ops.py              # scaffold, update, verify, graph_view, and use-case facades (9.1)
+│       ├── ops.py              # Use-case facades the CLI and MCP share: writes, search, status, ground, graph (9.1)
 │       ├── resolve.py          # Shared name/path resolution, location checks, layout binding (5.1)
 │       ├── move.py             # MovePlan and MoveNoteUseCase: link rewriting, step ordering, rollback (5.1)
 │       ├── ground.py           # GroundNotesUseCase: note/raw-source grounding and token budgeting (5.1)

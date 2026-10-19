@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 
+from cadabby.constants import DEFAULT_LIMIT
 from cadabby.domain import DomainDefinition, Note
 from cadabby.graph import LinkTargetIndex
 
@@ -76,7 +77,7 @@ class IndexCachePort(Protocol):
         trust: str | None = None,
         tag: str | None = None,
         domain: str | None = None,
-        limit: int = 20,
+        limit: int = DEFAULT_LIMIT,
     ) -> list[Any]:
         """Execute epistemic search with trust and status boosting."""
         ...

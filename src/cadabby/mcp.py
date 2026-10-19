@@ -15,7 +15,7 @@ from typing import Any, Self
 
 from cadabby import __version__
 from cadabby.cache import VaultCache
-from cadabby.constants import DIR_WIKI
+from cadabby.constants import DEFAULT_LIMIT, DIR_WIKI
 from cadabby.errors import (
     HUMAN_ATTESTATION_REFUSED,
     INVALID_ARGUMENT,
@@ -23,9 +23,17 @@ from cadabby.errors import (
     InvalidArgumentError,
     classify,
 )
-from cadabby.lint import status_report
 from cadabby.okf import actor_name
-from cadabby.ops import graph_view, ground_notes, move_note, scaffold_note_result, update_note_result, verify_note
+from cadabby.ops import (
+    graph_view,
+    ground_notes,
+    move_note,
+    scaffold_note_result,
+    search_notes,
+    update_note_result,
+    vault_status,
+    verify_note,
+)
 from cadabby.vault import Vault
 
 
@@ -88,7 +96,7 @@ _TOOL_SPECS: list[dict[str, Any]] = [
                 "status": {"type": "string", "description": "Filter by note status"},
                 "trust": {"type": "string", "description": "Filter by trust tier (human-reviewed, machine-confirmed, …)"},
                 "tag": {"type": "string", "description": "Filter by note tag"},
-                "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "default": 20, "description": "Max results"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "default": DEFAULT_LIMIT, "description": "Max results"},
             },
         },
     },
@@ -171,7 +179,7 @@ _TOOL_SPECS: list[dict[str, Any]] = [
                     "minLength": 1,
                     "description": "Note (CID, path, stem, or wikilink); required for 'neighborhood', refused for 'mocs'",
                 },
-                "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "default": 20, "description": "Max entries per list"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "default": DEFAULT_LIMIT, "description": "Max entries per list"},
             },
         },
     },
@@ -457,20 +465,20 @@ class McpServer:
         return {"tools": copy.deepcopy(list(TOOLS))}
 
     def _tool_search(self, args: dict[str, Any]) -> dict[str, Any]:
-        self.cache.scan()
-        res = self.cache.search(
+        res = search_notes(
+            self.vault,
+            self.cache,
             query=args.get("query") or "",
             type_=args.get("type"),
             status=args.get("status"),
             trust=args.get("trust"),
             tag=args.get("tag"),
             domain=args.get("domain"),
-            limit=20 if args.get("limit") is None else args["limit"],
+            limit=args.get("limit"),
         )
         return _tool_ok([r.to_dict() for r in res])
 
     def _tool_ground(self, args: dict[str, Any]) -> dict[str, Any]:
-        self.cache.scan()
         grounded = ground_notes(
             self.vault,
             args["targets"],
@@ -520,17 +528,16 @@ class McpServer:
         return _tool_ok(res)
 
     def _tool_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        return _tool_ok(status_report(self.vault, self.cache, lint=_bool_arg(args, "lint", default=False)))
+        return _tool_ok(vault_status(self.vault, self.cache, lint=_bool_arg(args, "lint", default=False)))
 
     def _tool_graph(self, args: dict[str, Any]) -> dict[str, Any]:
-        self.cache.scan()
         return _tool_ok(
             graph_view(
                 self.vault,
                 self.cache,
                 view=args.get("view") or "neighborhood",
                 target=args.get("target"),
-                limit=20 if args.get("limit") is None else args["limit"],
+                limit=args.get("limit"),
             )
         )
 

@@ -23,12 +23,15 @@ from cadabby.ops import (
     UpdateNoteUseCase,
     VerifyNoteUseCase,
     _truncate_to_budget,
+    graph_view,
     ground_notes,
     move_note,
     resolve_note_cid,
     sanitize_filename,
     scaffold_note,
+    search_notes,
     update_note,
+    vault_status,
     verify_note,
 )
 from cadabby.vault import Vault
@@ -909,7 +912,66 @@ class TestScaffoldTakeover(unittest.TestCase):
             self.assertEqual(row["target_cid"], "archive/legacy")
 
 
+class TestUseCaseFacades(unittest.TestCase):
+    """The read facades scan for themselves (§4.3, §9.1).
+
+    The CLI and MCP adapters used to call `cache.scan()` before each read, a
+    convention copied into six handlers. Each test warms the cache, writes a
+    note behind its back, and calls the facade without scanning: the note is
+    visible only if the facade scanned.
+    """
+
+    NOTE = (
+        "---\ntype: concept\ntitle: Quokka Facade\ndescription: Written after the cache was warmed\n"
+        "status: active\n---\n\nquokkafacade links [[epistemic-trust-tiers]].\n"
+    )
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.vault = Vault(copy_demo_vault(Path(self.tmp_dir.name) / "vault"))
+        self.cache = VaultCache(self.vault)
+        self.cache.scan()
+        self.notes_before = self.cache.get_status()["total_notes"]
+        (self.vault.root / "wiki" / "quokka-facade.md").write_text(self.NOTE, encoding="utf-8")
+
+    def tearDown(self):
+        self.cache.close()
+        self.tmp_dir.cleanup()
+
+    def test_search_notes_scans_first(self):
+        results = search_notes(self.vault, self.cache, query="quokkafacade")
+        self.assertEqual([r.cid for r in results], ["wiki/quokka-facade"])
+
+    def test_search_notes_none_limit_means_the_default(self):
+        self.assertEqual(
+            [r.cid for r in search_notes(self.vault, self.cache, query="trust", limit=None)],
+            [r.cid for r in search_notes(self.vault, self.cache, query="trust", limit=20)],
+        )
+
+    def test_ground_notes_scans_the_cache_it_is_given(self):
+        [item] = ground_notes(self.vault, ["wiki/quokka-facade"], cache=self.cache)
+        # Content comes from storage either way; links come from the cache,
+        # so they are present only if this call scanned.
+        self.assertEqual([link["resolved_cid"] for link in item["links"]], ["wiki/epistemic-trust-tiers"])
+
+    def test_graph_view_scans_first(self):
+        data = graph_view(self.vault, self.cache, target="wiki/quokka-facade")
+        self.assertEqual(data["view"], "neighborhood")
+        self.assertEqual(data["note"]["cid"], "wiki/quokka-facade")
+
+    def test_graph_view_checks_arguments_before_scanning(self):
+        with patch.object(self.cache, "scan") as scan:
+            with self.assertRaises(ValueError):
+                graph_view(self.vault, self.cache, view="sideways", target="wiki/quokka-facade")
+            with self.assertRaises(ValueError):
+                graph_view(self.vault, self.cache, view="mocs", target="wiki/quokka-facade")
+            scan.assert_not_called()
+
+    def test_vault_status_scans_first(self):
+        report = vault_status(self.vault, self.cache)
+        self.assertEqual(report["total_notes"], self.notes_before + 1)
+        self.assertIn("wiki/quokka-facade", report["queues"]["unfiled"]["items"])
+
+
 if __name__ == "__main__":
     unittest.main()
-
-

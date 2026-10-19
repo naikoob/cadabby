@@ -17,7 +17,7 @@ from typing import Any
 from cadabby.adapters.disk_storage import DiskNoteStorage
 from cadabby.audit import run_vault_audit
 from cadabby.cache import VaultCache, reset_cache_files
-from cadabby.constants import DIR_RAW, DIR_WIKI, NOTE_TYPES, TRUST_TIERS
+from cadabby.constants import DEFAULT_LIMIT, DIR_RAW, DIR_WIKI, NOTE_TYPES, TRUST_TIERS
 from cadabby.errors import (
     EXIT_ENVIRONMENT,
     EXIT_FINDINGS,
@@ -29,15 +29,18 @@ from cadabby.errors import (
 )
 from cadabby.indexer import rotate_vault_log, sync_vault_index
 from cadabby.installer import InitRefusedError, init_vault
-from cadabby.lint import run_vault_lint, status_report
+from cadabby.lint import run_vault_lint
 from cadabby.okf import actor_name, is_actor_human, is_valid_actor
 from cadabby.ops import (
     graph_view,
     ground_notes,
     move_note,
+    raw_sources_match,
     resolve_note_cid,
     scaffold_note_result,
+    search_notes,
     update_note_result,
+    vault_status,
     verify_note,
 )
 from cadabby.vault import Vault
@@ -134,8 +137,9 @@ def cmd_search(args: argparse.Namespace) -> int:
     """Search vault notes with normalized epistemic BM25 ranking."""
     vault = resolve_cli_vault(args)
     with VaultCache(vault) as cache:
-        cache.scan()
-        results = cache.search(
+        results = search_notes(
+            vault,
+            cache,
             query=args.query,
             type_=args.type,
             status=args.status,
@@ -149,13 +153,7 @@ def cmd_search(args: argparse.Namespace) -> int:
         # gets the hint: a filter is a deliberate narrowing, and --json must
         # stay the bare list vault_search returns.
         scoped = any((args.type, args.status, args.trust, args.tag, getattr(args, "domain", None)))
-        raw_hit = bool(
-            not results
-            and args.query
-            and not scoped
-            and not args.json
-            and cache.search(query=args.query, domain=DIR_RAW, limit=1)
-        )
+        raw_hit = not results and not scoped and not args.json and raw_sources_match(cache, args.query)
 
     if args.json:
         out = [r.to_dict() for r in results]
@@ -186,7 +184,6 @@ def cmd_ground(args: argparse.Namespace) -> int:
     """Retrieve full content and 1-hop graph for specified CIDs."""
     vault = resolve_cli_vault(args)
     with VaultCache(vault) as cache:
-        cache.scan()
         grounded = ground_notes(vault, args.targets, budget_tokens=args.budget_tokens, cache=cache)
 
     if args.json:
@@ -437,7 +434,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     """Print high-level vault status, distribution, and verification debt."""
     vault = resolve_cli_vault(args)
     with VaultCache(vault) as cache:
-        status_data = status_report(vault, cache, lint=getattr(args, "lint", False))
+        status_data = vault_status(vault, cache, lint=getattr(args, "lint", False))
 
     if args.json:
         print(json.dumps(status_data, indent=2))
@@ -574,13 +571,12 @@ def cmd_graph(args: argparse.Namespace) -> int:
     vault = resolve_cli_vault(args)
     mocs = getattr(args, "mocs", False)
     with VaultCache(vault) as cache:
-        cache.scan()
         data = graph_view(
             vault,
             cache,
             view="mocs" if mocs else "neighborhood",
             target=None if mocs else args.target,
-            limit=getattr(args, "limit", None) or 20,
+            limit=getattr(args, "limit", None),
         )
 
     if args.json:
@@ -768,7 +764,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("--status", help="Filter by note status")
     p_search.add_argument("--trust", help="Filter by trust tier")
     p_search.add_argument("--tag", help="Filter by tag")
-    p_search.add_argument("--limit", type=_positive_int, default=20, help="Maximum results, at least 1 (default: 20)")
+    p_search.add_argument("--limit", type=_positive_int, default=DEFAULT_LIMIT, help=f"Maximum results, at least 1 (default: {DEFAULT_LIMIT})")
     p_search.add_argument("--json", action="store_true", help="Output as JSON")
     p_search.set_defaults(func=cmd_search)
 
@@ -798,7 +794,7 @@ def build_parser() -> argparse.ArgumentParser:
     graph_what = p_graph.add_mutually_exclusive_group(required=True)
     graph_what.add_argument("target", nargs="?", type=_non_blank, help="Note CID, stem, path or wikilink to centre on")
     graph_what.add_argument("--mocs", action="store_true", help="Every MOC's link counts and overlaps, for splits and merges")
-    p_graph.add_argument("--limit", type=_positive_int, default=20, help="Max entries per list, at least 1 (default: 20)")
+    p_graph.add_argument("--limit", type=_positive_int, default=DEFAULT_LIMIT, help=f"Max entries per list, at least 1 (default: {DEFAULT_LIMIT})")
     p_graph.add_argument("--json", action="store_true", help="Output as JSON")
     p_graph.set_defaults(func=cmd_graph)
 
