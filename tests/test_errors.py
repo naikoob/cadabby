@@ -436,6 +436,40 @@ class TestArchitecturalErrorAndCacheBoundaries(unittest.TestCase):
                         violations.append(f"{name}:{node.lineno} imports {leaked} from cadabby.lint")
         self.assertEqual(violations, [])
 
+    def test_no_function_exceeds_the_complexity_ceiling(self):
+        """No function in src/cadabby has cyclomatic complexity above 30.
+
+        `parse_frontmatter` and `install_antigravity` both reached 40, and the
+        parser hid a reachable `assert` (an INTERNAL that failed every scan)
+        inside one of its forty paths. Both were split; the most complex
+        function left is at 29. Count: 1, plus one per branch, loop, handler,
+        `with`, conditional expression, comprehension, assert, match case,
+        and each extra operand of `and`/`or`.
+        """
+        import ast
+
+        ceiling = 30
+        branch_nodes = (
+            ast.If, ast.For, ast.While, ast.ExceptHandler, ast.With, ast.IfExp,
+            ast.comprehension, ast.Assert, ast.match_case,
+        )
+        src_root = Path(__file__).resolve().parent.parent / "src" / "cadabby"
+        over: list[str] = []
+        for path in sorted(src_root.rglob("*.py")):
+            tree = ast.parse(path.read_text("utf-8"), filename=str(path))
+            for fn in ast.walk(tree):
+                if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                score = 1
+                for node in ast.walk(fn):
+                    if isinstance(node, branch_nodes):
+                        score += 1
+                    elif isinstance(node, ast.BoolOp):
+                        score += len(node.values) - 1
+                if score > ceiling:
+                    over.append(f"{path.relative_to(src_root)}:{fn.lineno} {fn.name} = {score}")
+        self.assertEqual(over, [], f"split these below {ceiling}")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -449,53 +449,83 @@ def install_antigravity(
         return False, problem
     repo_plugin = get_repo_plugin_dir().resolve()
     desired_entry = make_mcp_server_entry(vault_path)
-    desired_mcp_cfg = {"mcpServers": {"cadabby": desired_entry}}
-
-    # Case 1: Unbound install (no specific vault)
     if vault_path is None:
+        return _install_antigravity_unbound(dest, repo_plugin, desired_entry, force=force, dry_run=dry_run)
+    return _install_antigravity_bound(
+        dest, repo_plugin, desired_entry, Path(vault_path).resolve(), force=force, dry_run=dry_run
+    )
+
+
+def _install_antigravity_unbound(
+    dest: Path, repo_plugin: Path, desired_entry: dict[str, Any], *, force: bool, dry_run: bool
+) -> tuple[bool, str]:
+    """No vault: link (or, where links fail, copy) the packaged plugin directory."""
+    if dest.is_symlink():
+        target = dest.resolve()
+        if target == repo_plugin:
+            return True, f"Antigravity plugin already installed at {dest} (unchanged)."
+        elif not force:
+            return False, f"Conflict: {dest} links to {target}. Use --force to overwrite."
+    elif dest.exists():
+        if _plugin_entry_lenient(dest / "mcp_config.json") == desired_entry:
+            return True, f"Antigravity plugin already installed at {dest} (unchanged)."
+        if not force:
+            return False, f"Conflict: Directory already exists at {dest}. Use --force to overwrite."
+        if not _is_replaceable_plugin_dir(dest):
+            return False, _refuse_to_delete(dest, ", even with --force")
+
+    if dry_run:
+        return True, f"[dry-run] Would link {dest} -> {repo_plugin}"
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.is_symlink() or dest.exists():
         if dest.is_symlink():
-            target = dest.resolve()
-            if target == repo_plugin:
-                return True, f"Antigravity plugin already installed at {dest} (unchanged)."
-            elif not force:
-                return False, f"Conflict: {dest} links to {target}. Use --force to overwrite."
-        elif dest.exists():
-            mcp_file = dest / "mcp_config.json"
-            if mcp_file.exists():
-                try:
-                    cur_cfg = json.loads(mcp_file.read_text("utf-8"))
-                    if isinstance(cur_cfg, dict):
-                        mcp_servers = cur_cfg.get("mcpServers")
-                        if isinstance(mcp_servers, dict) and mcp_servers.get("cadabby") == desired_entry:
-                            return True, f"Antigravity plugin already installed at {dest} (unchanged)."
-                except (json.JSONDecodeError, OSError):
-                    pass
-            if not force:
-                return False, f"Conflict: Directory already exists at {dest}. Use --force to overwrite."
-            if not _is_replaceable_plugin_dir(dest):
-                return False, _refuse_to_delete(dest, ", even with --force")
+            dest.unlink()
+        else:
+            shutil.rmtree(dest)
 
-        if dry_run:
-            return True, f"[dry-run] Would link {dest} -> {repo_plugin}"
+    try:
+        dest.symlink_to(repo_plugin)
+        action = "Linked"
+    except OSError:
+        shutil.copytree(repo_plugin, dest)
+        action = "Copied"
 
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if dest.is_symlink() or dest.exists():
-            if dest.is_symlink():
-                dest.unlink()
-            else:
-                shutil.rmtree(dest)
+    return True, f"{action} Antigravity plugin to {dest}"
 
-        try:
-            dest.symlink_to(repo_plugin)
-            action = "Linked"
-        except OSError:
-            shutil.copytree(repo_plugin, dest)
-            action = "Copied"
 
-        return True, f"{action} Antigravity plugin to {dest}"
+def _plugin_entry_lenient(mcp_file: Path) -> Any:
+    """The `mcpServers.cadabby` entry of an existing plugin config, or None if absent or unreadable.
 
-    # Case 2: Bound install (vault_path is provided)
-    resolved_vault = Path(vault_path).resolve()
+    Only the unbound install's "already installed?" probe uses this, and an
+    unreadable file there just means "not ours as-is". The bound install
+    refuses to rewrite a file it cannot read instead.
+    """
+    if not mcp_file.exists():
+        return None
+    try:
+        cur_cfg = json.loads(mcp_file.read_text("utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(cur_cfg, dict):
+        return None
+    mcp_servers = cur_cfg.get("mcpServers")
+    return mcp_servers.get("cadabby") if isinstance(mcp_servers, dict) else None
+
+
+def _install_antigravity_bound(
+    dest: Path,
+    repo_plugin: Path,
+    desired_entry: dict[str, Any],
+    resolved_vault: Path,
+    *,
+    force: bool,
+    dry_run: bool,
+) -> tuple[bool, str]:
+    """A vault: a copied plugin whose mcp_config.json names that vault."""
+    desired_mcp_cfg = {"mcpServers": {"cadabby": desired_entry}}
+    configured = f"Configured Antigravity plugin at {dest} (vault: {resolved_vault})"
+
     if dest.is_symlink():
         if not force:
             return False, f"Conflict: {dest} links to {dest.resolve()}. Use --force to overwrite with vault-configured plugin."
@@ -503,56 +533,54 @@ def install_antigravity(
             return True, f"[dry-run] Would replace symlink at {dest} with vault-configured plugin (vault: {resolved_vault})"
         dest.unlink()
         _write_bound_plugin(repo_plugin, dest, desired_mcp_cfg)
-        return True, f"Configured Antigravity plugin at {dest} (vault: {resolved_vault})"
+        return True, configured
 
-    if dest.exists():
-        mcp_file = dest / "mcp_config.json"
-        if mcp_file.exists():
-            try:
-                cur_cfg = json.loads(mcp_file.read_text("utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError) as e:
-                # Same refusal as install_claude: rewriting a file we could not
-                # read would silently discard every other server it configures.
-                return False, f"Failed to parse existing JSON at {mcp_file}: {e}. Aborting."
-            if not isinstance(cur_cfg, dict) or not isinstance(cur_cfg.get("mcpServers", {}), dict):
-                return False, f"Unexpected structure in {mcp_file}: expected an object with 'mcpServers'. Aborting."
-            existing_entry = cur_cfg.get("mcpServers", {}).get("cadabby")
-            entry_stale = existing_entry != desired_entry
-            if entry_stale and existing_entry is not None and not _is_stale_self(existing_entry, desired_entry) and not force:
-                return False, f"Conflict: Antigravity plugin at {dest} is configured for another vault. Use --force to overwrite."
+    if not dest.exists():
+        if dry_run:
+            return True, f"[dry-run] Would copy plugin to {dest} and configure vault: {resolved_vault}"
+        _write_bound_plugin(repo_plugin, dest, desired_mcp_cfg)
+        return True, configured
 
-            # Re-sync the plugin's own files, not just its MCP entry. They are
-            # engine-owned shims (§7.4), and without this a vault installed once
-            # keeps its original skill and agent manifests forever -- the exact
-            # staleness this command is supposed to cure.
-            changed = _sync_tree(repo_plugin, dest, dry_run, skip=frozenset({"mcp_config.json"}))
+    mcp_file = dest / "mcp_config.json"
+    if not mcp_file.exists():
+        if not force:
+            return False, f"Conflict: Directory already exists at {dest}. Use --force to overwrite."
+        if not _is_replaceable_plugin_dir(dest):
+            return False, _refuse_to_delete(dest, ", even with --force")
+        if dry_run:
+            return True, f"[dry-run] Would configure Antigravity plugin at {dest} (vault: {resolved_vault})"
+        shutil.rmtree(dest)
+        _write_bound_plugin(repo_plugin, dest, desired_mcp_cfg)
+        return True, configured
 
-            if not changed and not entry_stale:
-                return True, f"Antigravity plugin already installed at {dest} (unchanged)."
-            if dry_run:
-                return True, f"[dry-run] Would update {dest} (vault: {resolved_vault})"
+    try:
+        cur_cfg = json.loads(mcp_file.read_text("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        # Same refusal as install_claude: rewriting a file we could not
+        # read would silently discard every other server it configures.
+        return False, f"Failed to parse existing JSON at {mcp_file}: {e}. Aborting."
+    if not isinstance(cur_cfg, dict) or not isinstance(cur_cfg.get("mcpServers", {}), dict):
+        return False, f"Unexpected structure in {mcp_file}: expected an object with 'mcpServers'. Aborting."
+    existing_entry = cur_cfg.get("mcpServers", {}).get("cadabby")
+    entry_stale = existing_entry != desired_entry
+    if entry_stale and existing_entry is not None and not _is_stale_self(existing_entry, desired_entry) and not force:
+        return False, f"Conflict: Antigravity plugin at {dest} is configured for another vault. Use --force to overwrite."
 
-            if entry_stale:
-                cur_cfg.setdefault("mcpServers", {})["cadabby"] = desired_entry
-                _write_within(dest, mcp_file, _dump_json_like(cur_cfg, mcp_file.read_text("utf-8")))
-            return True, f"Configured Antigravity plugin at {dest} (vault: {resolved_vault})"
-        else:
-            if not force:
-                return False, f"Conflict: Directory already exists at {dest}. Use --force to overwrite."
-            if not _is_replaceable_plugin_dir(dest):
-                return False, _refuse_to_delete(dest, ", even with --force")
-            if dry_run:
-                return True, f"[dry-run] Would configure Antigravity plugin at {dest} (vault: {resolved_vault})"
-            shutil.rmtree(dest)
-            _write_bound_plugin(repo_plugin, dest, desired_mcp_cfg)
-            return True, f"Configured Antigravity plugin at {dest} (vault: {resolved_vault})"
+    # Re-sync the plugin's own files, not just its MCP entry. They are
+    # engine-owned shims (§7.4), and without this a vault installed once
+    # keeps its original skill and agent manifests forever -- the exact
+    # staleness this command is supposed to cure.
+    changed = _sync_tree(repo_plugin, dest, dry_run, skip=frozenset({"mcp_config.json"}))
 
-    # dest does not exist
+    if not changed and not entry_stale:
+        return True, f"Antigravity plugin already installed at {dest} (unchanged)."
     if dry_run:
-        return True, f"[dry-run] Would copy plugin to {dest} and configure vault: {resolved_vault}"
+        return True, f"[dry-run] Would update {dest} (vault: {resolved_vault})"
 
-    _write_bound_plugin(repo_plugin, dest, desired_mcp_cfg)
-    return True, f"Configured Antigravity plugin at {dest} (vault: {resolved_vault})"
+    if entry_stale:
+        cur_cfg.setdefault("mcpServers", {})["cadabby"] = desired_entry
+        _write_within(dest, mcp_file, _dump_json_like(cur_cfg, mcp_file.read_text("utf-8")))
+    return True, configured
 
 
 def uninstall_antigravity(

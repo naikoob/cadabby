@@ -216,6 +216,160 @@ def split_frontmatter(content: str) -> tuple[str | None, str]:
     return raw_fm, body
 
 
+class _FrontmatterParser:
+    """The §3.2 line grammar as a state machine, one method per indent level.
+
+    One instance parses one block and is then discarded. The state is the
+    container the current top-level key holds: nothing yet, a sequence of
+    scalars, a sequence of flat mappings, or a nested flat mapping. Every
+    message and line number is part of the surface: lint prints them, and an
+    agent repairing a note finds the line by them.
+    """
+
+    def __init__(self) -> None:
+        self.data: dict[str, Any] = {}
+        # Every top-level key seen, including an empty `key:` that never gains a
+        # value and so never reaches `data`: its later duplicate is still a duplicate.
+        self.seen_keys: set[str] = set()
+        self.key: str | None = None  # the top-level key whose container is open
+        self.container: str | None = None  # "scalar_seq", "dict_seq", "flat_map"
+        self.seq: list[Any] | None = None
+        self.map: dict[str, Any] | None = None
+        self.item_map: dict[str, Any] | None = None  # the open `- key: value` item
+
+    def feed(self, line: str, line_idx: int) -> None:
+        """Consume one frontmatter line; `line_idx` is its 1-based line in the file."""
+        if "\t" in line:
+            raise FrontmatterParseError("Tab characters are not permitted in frontmatter", line_idx)
+
+        content_part, _ = split_comment(line)
+        stripped = content_part.strip()
+        if not stripped:  # empty or comment-only
+            return
+
+        indent = len(content_part) - len(content_part.lstrip(" "))
+        if indent > 4:
+            raise FrontmatterParseError("Excessive indentation or unsupported nesting depth (> 4 spaces)", line_idx)
+        if indent == 0:
+            self._top_level(stripped, line_idx)
+        elif indent == 2:
+            if self.key is None:
+                raise FrontmatterParseError("Unexpected indentation without preceding parent key", line_idx)
+            # Sequence item: '- ...' or a bare '-'. `-foo` is not an item: YAML
+            # reads it as a plain scalar, which has no place at indent 2.
+            if stripped == "-" or stripped.startswith("- "):
+                self._sequence_item(self.key, stripped, line_idx)
+            else:
+                self._nested_mapping(self.key, stripped, line_idx)
+        elif indent == 4:
+            self._item_sibling(stripped, line_idx)
+        else:
+            raise FrontmatterParseError(f"Invalid indentation ({indent} spaces)", line_idx)
+
+    def _top_level(self, stripped: str, line_idx: int) -> None:
+        """Indent 0: `key: value`, or `key:` opening a container."""
+        self.key = None
+        self.container = None
+        self.seq = None
+        self.map = None
+        self.item_map = None
+
+        mapping = _split_mapping(stripped)
+        if mapping is None:
+            raise FrontmatterParseError("Expected 'key: value' or 'key:' mapping at indent 0", line_idx)
+        k, v_val = mapping
+        if not RE_KEY.match(k):
+            raise FrontmatterParseError(f"Invalid key name '{k}'", line_idx)
+        if k in self.seen_keys:
+            raise FrontmatterParseError(f"Duplicate top-level key '{k}'", line_idx)
+        self.seen_keys.add(k)
+
+        if not v_val:
+            self.key = k  # begins a container (sequence or nested mapping)
+        else:
+            self.data[k] = parse_scalar(v_val, line_idx)
+
+    def _sequence_item(self, key: str, stripped: str, line_idx: int) -> None:
+        """Indent 2, `- ...`: a scalar item, or the first key of a flat-mapping item."""
+        seq_val = stripped[1:].strip()
+        if seq_val.startswith("-"):
+            raise FrontmatterParseError("Sequences of sequences are not permitted", line_idx)
+
+        is_quoted_scalar = seq_val.startswith(('"', "'"))
+        item_mapping = None if is_quoted_scalar else _split_mapping(seq_val)
+
+        # A key that already holds a nested mapping cannot also hold a
+        # sequence. Without this check the item reached an assert:
+        # INTERNAL with no message, failing every scan of the vault.
+        if self.container == "flat_map":
+            raise FrontmatterParseError("Cannot mix sequence items with mapping items under the same key", line_idx)
+
+        seq = self.seq
+        if seq is None:
+            self.container = "dict_seq" if item_mapping is not None else "scalar_seq"
+            seq = self.seq = []
+            self.data[key] = seq
+
+        if item_mapping is not None:
+            # Sequence of flat mappings: '- key: value'
+            if self.container == "scalar_seq":
+                raise FrontmatterParseError("Cannot mix scalar and mapping items in sequence", line_idx)
+            self.container = "dict_seq"
+            sub_k, sub_v = item_mapping
+            if not RE_KEY.match(sub_k):
+                raise FrontmatterParseError(f"Invalid mapping key '{sub_k}' in sequence", line_idx)
+            self.item_map = {sub_k: parse_scalar(sub_v, line_idx)}
+            seq.append(self.item_map)
+        else:
+            # Sequence of scalars: '- scalar'
+            if self.container == "dict_seq":
+                raise FrontmatterParseError("Cannot mix scalar and mapping items in sequence", line_idx)
+            self.container = "scalar_seq"
+            self.item_map = None
+            seq.append(parse_scalar(seq_val, line_idx))
+
+    def _nested_mapping(self, key: str, stripped: str, line_idx: int) -> None:
+        """Indent 2, `key: value`: a member of the nested flat mapping under `key`."""
+        nested = _split_mapping(stripped)
+        if nested is None:
+            raise FrontmatterParseError("Expected 'key: value' mapping at indent 2", line_idx)
+
+        if self.container is None:
+            self.container = "flat_map"
+            self.map = {}
+            self.data[key] = self.map
+        mapping = self.map
+        if self.container != "flat_map" or mapping is None:
+            raise FrontmatterParseError("Cannot mix sequence items with mapping items under the same key", line_idx)
+
+        sub_k, sub_v_val = nested
+        if not RE_KEY.match(sub_k):
+            raise FrontmatterParseError(f"Invalid key name '{sub_k}' at indent 2", line_idx)
+        if sub_k in mapping:
+            raise FrontmatterParseError(f"Duplicate nested key '{sub_k}'", line_idx)
+        if not sub_v_val:
+            raise FrontmatterParseError("Mappings nested more than two levels are not permitted", line_idx)
+        mapping[sub_k] = parse_scalar(sub_v_val, line_idx)
+
+    def _item_sibling(self, stripped: str, line_idx: int) -> None:
+        """Indent 4: a sibling key of the open `- key: value` sequence item."""
+        item_map = self.item_map
+        if self.container != "dict_seq" or item_map is None:
+            raise FrontmatterParseError("Indent 4 is only valid for sibling keys of sequence mappings", line_idx)
+
+        sibling = _split_mapping(stripped)
+        if sibling is None:
+            raise FrontmatterParseError("Expected 'key: value' at indent 4", line_idx)
+        sub_k, sub_v_val = sibling
+        if not RE_KEY.match(sub_k):
+            raise FrontmatterParseError(f"Invalid key name '{sub_k}' at indent 4", line_idx)
+        if sub_k in item_map:
+            raise FrontmatterParseError(f"Duplicate sibling key '{sub_k}' in sequence mapping", line_idx)
+        if not sub_v_val:
+            raise FrontmatterParseError("Mappings nested more than two levels are not permitted", line_idx)
+        item_map[sub_k] = parse_scalar(sub_v_val, line_idx)
+
+
 def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     """Parse markdown frontmatter and body strictly conforming to §3.2.
 
@@ -228,160 +382,10 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     if raw_fm is None:
         return {}, body  # `content` minus any leading BOM
 
-    data: dict[str, Any] = {}
-    # Every top-level key seen, including an empty `key:` that never gains a
-    # value and so never reaches `data`: its later duplicate is still a duplicate.
-    seen_keys: set[str] = set()
-    lines = split_lines(raw_fm)
-
-    # Parser state tracking
-    current_key: str | None = None
-    current_container_type: str | None = None  # "scalar_seq", "dict_seq", "flat_map"
-    current_seq: list[Any] | None = None
-    current_map: dict[str, Any] | None = None
-    current_seq_item_map: dict[str, Any] | None = None
-
-    for line_idx, line in enumerate(lines, start=2):  # line 1 was opening '---'
-        if "\t" in line:
-            raise FrontmatterParseError("Tab characters are not permitted in frontmatter", line_idx)
-
-        content_part, _ = split_comment(line)
-        stripped = content_part.strip()
-
-        # Skip empty or comment-only lines
-        if not stripped:
-            continue
-
-        indent = len(content_part) - len(content_part.lstrip(" "))
-
-        if indent > 4:
-            raise FrontmatterParseError("Excessive indentation or unsupported nesting depth (> 4 spaces)", line_idx)
-
-        # Level 0: Top-level mapping keys
-        if indent == 0:
-            current_key = None
-            current_container_type = None
-            current_seq = None
-            current_map = None
-            current_seq_item_map = None
-
-            mapping = _split_mapping(stripped)
-            if mapping is None:
-                raise FrontmatterParseError("Expected 'key: value' or 'key:' mapping at indent 0", line_idx)
-
-            k, v_val = mapping
-            if not RE_KEY.match(k):
-                raise FrontmatterParseError(f"Invalid key name '{k}'", line_idx)
-            if k in seen_keys:
-                raise FrontmatterParseError(f"Duplicate top-level key '{k}'", line_idx)
-            seen_keys.add(k)
-
-            if not v_val:
-                # Key begins a container (sequence or nested mapping)
-                current_key = k
-            else:
-                data[k] = parse_scalar(v_val, line_idx)
-            continue
-
-        # Indent 2: Sub-items under a top-level key
-        if indent == 2:
-            if current_key is None:
-                raise FrontmatterParseError("Unexpected indentation without preceding parent key", line_idx)
-
-            # Sequence item: '- ...' or a bare '-'. `-foo` is not an item: YAML
-            # reads it as a plain scalar, which has no place at indent 2.
-            if stripped == "-" or stripped.startswith("- "):
-                seq_val = stripped[1:].strip()
-                if seq_val.startswith("-"):
-                    raise FrontmatterParseError("Sequences of sequences are not permitted", line_idx)
-
-                is_quoted_scalar = seq_val.startswith(('"', "'"))
-                item_mapping = None if is_quoted_scalar else _split_mapping(seq_val)
-                is_mapping_item = item_mapping is not None
-
-                # A key that already holds a nested mapping cannot also hold a
-                # sequence. Without this check the item reached an assert:
-                # INTERNAL with no message, failing every scan of the vault.
-                if current_container_type == "flat_map":
-                    raise FrontmatterParseError("Cannot mix sequence items with mapping items under the same key", line_idx)
-
-                # Initialize list container if not already started
-                if current_container_type is None:
-                    current_container_type = "dict_seq" if is_mapping_item else "scalar_seq"
-                    current_seq = []
-                    data[current_key] = current_seq
-
-                if is_mapping_item:
-                    # Sequence of flat mappings: '- key: value'
-                    if current_container_type == "scalar_seq":
-                        raise FrontmatterParseError("Cannot mix scalar and mapping items in sequence", line_idx)
-                    current_container_type = "dict_seq"
-                    assert item_mapping is not None
-                    sub_k, sub_v = item_mapping
-                    if not RE_KEY.match(sub_k):
-                        raise FrontmatterParseError(f"Invalid mapping key '{sub_k}' in sequence", line_idx)
-                    current_seq_item_map = {sub_k: parse_scalar(sub_v, line_idx)}
-                    assert current_seq is not None
-                    current_seq.append(current_seq_item_map)
-                else:
-                    # Sequence of scalars: '- scalar'
-                    if current_container_type == "dict_seq":
-                        raise FrontmatterParseError("Cannot mix scalar and mapping items in sequence", line_idx)
-                    current_container_type = "scalar_seq"
-                    current_seq_item_map = None
-                    assert current_seq is not None
-                    current_seq.append(parse_scalar(seq_val, line_idx))
-                continue
-
-            # Nested flat mapping under top-level key: 'key: value'
-            nested = _split_mapping(stripped)
-            if nested is None:
-                raise FrontmatterParseError("Expected 'key: value' mapping at indent 2", line_idx)
-
-            if current_container_type is None:
-                current_container_type = "flat_map"
-                current_map = {}
-                data[current_key] = current_map
-
-            if current_container_type != "flat_map":
-                raise FrontmatterParseError("Cannot mix sequence items with mapping items under the same key", line_idx)
-
-            sub_k, sub_v_val = nested
-            if not RE_KEY.match(sub_k):
-                raise FrontmatterParseError(f"Invalid key name '{sub_k}' at indent 2", line_idx)
-            assert current_map is not None
-            if sub_k in current_map:
-                raise FrontmatterParseError(f"Duplicate nested key '{sub_k}'", line_idx)
-
-            if not sub_v_val:
-                raise FrontmatterParseError("Mappings nested more than two levels are not permitted", line_idx)
-            current_map[sub_k] = parse_scalar(sub_v_val, line_idx)
-            continue
-
-        # Indent 4: Sibling keys for a sequence item mapping
-        if indent == 4:
-            if current_container_type != "dict_seq" or current_seq_item_map is None:
-                raise FrontmatterParseError("Indent 4 is only valid for sibling keys of sequence mappings", line_idx)
-
-            sibling = _split_mapping(stripped)
-            if sibling is None:
-                raise FrontmatterParseError("Expected 'key: value' at indent 4", line_idx)
-
-            sub_k, sub_v_val = sibling
-            if not RE_KEY.match(sub_k):
-                raise FrontmatterParseError(f"Invalid key name '{sub_k}' at indent 4", line_idx)
-            if sub_k in current_seq_item_map:
-                raise FrontmatterParseError(f"Duplicate sibling key '{sub_k}' in sequence mapping", line_idx)
-
-            if not sub_v_val:
-                raise FrontmatterParseError("Mappings nested more than two levels are not permitted", line_idx)
-            current_seq_item_map[sub_k] = parse_scalar(sub_v_val, line_idx)
-            continue
-
-        # Any other indentation
-        raise FrontmatterParseError(f"Invalid indentation ({indent} spaces)", line_idx)
-
-    return data, body
+    parser = _FrontmatterParser()
+    for line_idx, line in enumerate(split_lines(raw_fm), start=2):  # line 1 was opening '---'
+        parser.feed(line, line_idx)
+    return parser.data, body
 
 
 class FrontmatterSerializeError(CadabbyError, ValueError):
