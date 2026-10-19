@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tempfile
+import unittest
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -59,3 +61,58 @@ def create_test_vault(
     if config is not None:
         (dst / FILE_CONFIG).write_text(json.dumps(config, indent=2) + "\n", "utf-8")
     return Vault(dst)
+
+
+def temp_dir(case: unittest.TestCase) -> Path:
+    """A fresh temporary directory, removed after the test.
+
+    Registered with the test rather than cleaned in tearDown, so it is removed
+    even when setUp fails partway (tearDown never runs then). Cleanups run
+    after tearDown, so a tearDown that closes a cache or server still does so
+    before the directory goes.
+    """
+    return Path(case.enterContext(tempfile.TemporaryDirectory()))
+
+
+def demo_vault(case: unittest.TestCase, name: str = "vault") -> Vault:
+    """A private copy of examples/demo-vault, removed after the test."""
+    return Vault(copy_demo_vault(temp_dir(case) / name))
+
+
+def note_text(
+    title: str,
+    *,
+    type_: str = "concept",
+    description: str = "d",
+    status: str = "active",
+    extra: Sequence[str] = (),
+    quote_title: bool = False,
+    quote_description: bool = False,
+    body: str = "",
+) -> str:
+    """One valid note: the four required fields, then any `extra` frontmatter lines, then `body`.
+
+    The quoting switches exist so the suite's older writers keep their exact
+    bytes: lint line numbers, audit blame lines and body hashes depend on them.
+    `body` is everything after the closing `---` line, verbatim.
+    """
+    title_text = f'"{title}"' if quote_title else title
+    description_text = f'"{description}"' if quote_description else description
+    lines = [
+        "---",
+        f"type: {type_}",
+        f"title: {title_text}",
+        f"description: {description_text}",
+        f"status: {status}",
+        *extra,
+        "---",
+    ]
+    return "\n".join(lines) + "\n" + body
+
+
+def write_note(root: Path, rel: str, text: str) -> Path:
+    """Write `text` to root/rel, creating parent folders; return the path."""
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, "utf-8")
+    return path
