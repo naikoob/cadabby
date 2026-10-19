@@ -76,6 +76,17 @@ def is_valid_actor(actor: Any) -> bool:
     return bool(RE_ACTOR.fullmatch(actor))
 
 
+def actor_name(raw: str) -> str:
+    """`raw` reduced to the §3.4 actor character set: anything else becomes '-', edges trimmed.
+
+    The one sanitizer for names Cadabby did not choose: an MCP client's
+    `clientInfo.name` and the OS username `verify --human` stamps (§3.5), which
+    on SSSD/AD hosts reads `alice@corp.example.com` and on Windows may hold a
+    space. Empty when nothing usable is left; callers decide what that means.
+    """
+    return re.sub(r"[^A-Za-z0-9._-]", "-", raw).strip("-")
+
+
 def is_actor_human(actor: str) -> bool:
     """Return True if actor represents a human identity."""
     return actor.startswith("human:")

@@ -29,7 +29,8 @@ from cadabby.errors import (
     classify,
 )
 from cadabby.fsutil import compute_bytes_sha256
-from cadabby.graph import LinkTargetIndex, strip_link_wrapper
+from cadabby.frontmatter import FrontmatterParseError, split_frontmatter
+from cadabby.graph import LINK_KIND_WIKI, LinkTargetIndex, iter_link_spans, strip_link_wrapper
 from cadabby.ground import (
     RAW_GROUND_MAX_BYTES,
     GroundNotesUseCase,
@@ -44,7 +45,7 @@ from cadabby.move import (
     _MovedNote,
     _reparse,
     _Rewrite,
-    _shortest_wiki_target,
+    _stable_wiki_target,
     _write_steps,
 )
 from cadabby.ports import IndexCachePort, LedgerPort, NoteStoragePort, VaultLayoutPort
@@ -89,7 +90,7 @@ __all__ = [
     "_parse_relative_target",
     "_reparse",
     "_require_actor",
-    "_shortest_wiki_target",
+    "_stable_wiki_target",
     "_strip_dot_slash",
     "_truncate_sections",
     "_truncate_to_budget",
@@ -153,6 +154,48 @@ class ScaffoldNoteUseCase:
         stem = sanitize_filename(title)
         return f"{target_domain}/{stem}.md", f"{target_domain}/{stem}"
 
+    def _taken_over_links(self, new_cid: str) -> list[str]:
+        """Wikilinks that open another note today and would open `new_cid` once it exists (§5.1).
+
+        Creating the note changes no citing body, so drift detection never
+        sees the link change meaning -- a human-reviewed note would go on
+        vouching for a link that now opens something else. A dead link the
+        new note resolves is not a takeover. Only a link whose last segment
+        is the new stem can change, so without a note sharing that stem
+        (casefolded, a cheap superset) nothing is read.
+        """
+        cids = list(self.storage.list_note_cids())
+        stem = new_cid.rsplit("/", 1)[-1].casefold()
+        if not any(c.rsplit("/", 1)[-1].casefold() == stem for c in cids):
+            return []
+        before, after = LinkTargetIndex(cids), LinkTargetIndex([*cids, new_cid])
+        found: list[str] = []
+        for cid in cids:
+            for span in iter_link_spans(self._body_for_links(cid)):
+                if span.kind != LINK_KIND_WIKI:
+                    continue
+                was, will = before.resolve(span.target), after.resolve(span.target)
+                if was is not None and will != was:
+                    found.append(f"{cid_to_path(cid)}: [[{span.target}]] opens {was}")
+        return found
+
+    def _body_for_links(self, cid: str) -> str:
+        """A note's body to scan for links; an unparseable note is read as raw text, as move does."""
+        try:
+            note = self.storage.get_note(cid)
+            if note is not None:
+                return note.body
+        except Exception:  # noqa: BLE001 -- an unreadable note must not hide its links
+            pass
+        try:
+            raw = self.storage.read_raw(cid) or ""
+        except Exception:  # noqa: BLE001 -- unreadable even as text: lint reports it
+            return ""
+        try:
+            return split_frontmatter(raw)[1]
+        except FrontmatterParseError:
+            return raw
+
     def execute(
         self,
         title: str,
@@ -188,6 +231,14 @@ class ScaffoldNoteUseCase:
 
         rel_path, cid = self._resolve_scaffold_destination(title, domain, path)
         _check_new_location(self.storage, self.vault, rel_path, type_, verb="scaffold")
+        if taken := self._taken_over_links(cid):
+            sample = "; ".join(taken[:5])
+            more = f" (+{len(taken) - 5} more)" if len(taken) > 5 else ""
+            raise InvalidArgumentError(
+                f"Cannot scaffold {rel_path}: it would take over {len(taken)} link(s) that open another note "
+                f"today ({sample}{more}). Choose another name, or first repoint those links to the full CID "
+                f"with vault_update_note."
+            )
 
         note = Note.new(
             cid=cid,

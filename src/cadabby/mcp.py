@@ -24,6 +24,7 @@ from cadabby.errors import (
     classify,
 )
 from cadabby.lint import status_report
+from cadabby.okf import actor_name
 from cadabby.ops import graph_view, ground_notes, move_note, scaffold_note_result, update_note_result, verify_note
 from cadabby.vault import Vault
 
@@ -436,7 +437,7 @@ class McpServer:
         client_name = client_info.get("name") if isinstance(client_info, dict) else None
         # The actor grammar is ASCII (§3.4). `\w` admitted letters like 'é',
         # minting an actor that verify then refused on every call.
-        safe_name = re.sub(r"[^A-Za-z0-9._-]", "-", str(client_name or "unknown")).strip("-") or "client"
+        safe_name = actor_name(str(client_name or "unknown")) or "client"
         self.client_id = f"agent:{safe_name}"
 
         return {

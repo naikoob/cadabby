@@ -30,7 +30,7 @@ from cadabby.errors import (
 from cadabby.indexer import rotate_vault_log, sync_vault_index
 from cadabby.installer import InitRefusedError, init_vault
 from cadabby.lint import run_vault_lint, status_report
-from cadabby.okf import is_actor_human, is_valid_actor
+from cadabby.okf import actor_name, is_actor_human, is_valid_actor
 from cadabby.ops import (
     graph_view,
     ground_notes,
@@ -336,14 +336,21 @@ def cmd_move(args: argparse.Namespace) -> int:
     for line in result["blocked"]:
         print(f"  BLOCKED: {line}")
     if not result["applied"]:
-        if result["blocked"]:
+        needs = result.get("needs_approval") or []
+        if result["blocked"] and len(result["blocked"]) == len(needs):
+            approvals = " ".join(f"--approve-stale {c}" for c in needs)
+            print(
+                f"Dry run: nothing written. Once the user agrees, re-run with "
+                f"--apply {approvals} --plan-token {result['plan_token']}"
+            )
+        elif result["blocked"]:
             print("Dry run: resolve the blockers above first.")
         else:
             print(f"Dry run: nothing written. Re-run with --apply --plan-token {result['plan_token']} to move.")
     return EXIT_OK
 
 
-def _confirm_human_attestation(vault: Vault, cid: str) -> tuple[bool, str | None]:
+def _confirm_human_attestation(vault: Vault, cid: str, actor: str) -> tuple[bool, str | None]:
     """Ask the person at the keyboard to type back a one-time token (§3.5).
 
     The TTY check alone is satisfied by any pseudo-terminal, which is exactly
@@ -367,6 +374,7 @@ def _confirm_human_attestation(vault: Vault, cid: str) -> tuple[bool, str | None
     print(f"You are about to record that you personally reviewed '{note.title}'.")
     print(f"  cid:  {note.cid}")
     print(f"  body: {shown}")
+    print(f"  as:   {actor}")
     try:
         answer = input(f"Type {token} to sign, anything else to abort: ")
     except EOFError:
@@ -386,10 +394,20 @@ def cmd_verify(args: argparse.Namespace) -> int:
     if args.human:
         if not sys.stdin.isatty():
             raise InvalidArgumentError("--human requires an interactive TTY")
-        confirmed, reviewed_hash = _confirm_human_attestation(vault, args.cid)
+        # Settled before the prompt: a person must never review and type the
+        # token only to have the stamp refused. SSSD/AD usernames carry '@'
+        # and Windows ones may carry spaces, so the name is reduced to the
+        # actor grammar exactly as an MCP client name is (§3.5).
+        login = getpass.getuser()
+        name = actor_name(login)
+        if not name:
+            raise InvalidArgumentError(
+                f"Cannot sign as OS user {login!r}: no letter or digit of it fits the actor grammar (§3.4)"
+            )
+        actor = f"human:{name}"
+        confirmed, reviewed_hash = _confirm_human_attestation(vault, args.cid, actor)
         if not confirmed:
             raise InvalidArgumentError("Aborted: confirmation token did not match; nothing was written")
-        actor = f"human:{getpass.getuser()}"
         is_human = True
     elif args.agent:
         actor = args.agent if args.agent.startswith(("agent:", "process:")) else f"agent:{args.agent}"

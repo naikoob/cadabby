@@ -13,6 +13,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 from urllib.parse import quote
 
+from cadabby.constants import DIR_WIKI
 from cadabby.domain import Note
 from cadabby.errors import AlreadyExistsError, AmbiguousNoteError, InvalidArgumentError, NotFoundError
 from cadabby.frontmatter import FrontmatterParseError, split_frontmatter
@@ -45,17 +46,44 @@ from cadabby.resolve import (
     with_md_suffix,
 )
 from cadabby.ports import LedgerPort, NoteStoragePort, VaultLayoutPort
-from cadabby.vault import cid_to_path, path_to_cid
+from cadabby.vault import cid_to_path, normalize_rel, path_to_cid
 
 
-def _shortest_wiki_target(cid: str, resolver: LinkTargetIndex) -> str:
-    """The shortest wikilink text that opens `cid`: its stem, then longer path suffixes, then the CID."""
-    parts = cid.split("/")
-    for i in range(len(parts) - 1, -1, -1):
-        candidate = "/".join(parts[i:])
-        if resolver.resolve(candidate) == cid:
-            return candidate
-    return cid
+def _stable_wiki_target(cid: str) -> str:
+    """The wikilink text that opens `cid` and that no note added later can take over (§5.1).
+
+    A `wiki/` note's bare stem and any full CID are exact names, matched before
+    any suffix or stem; a shorter name for a domain or `archive/` note opens it
+    only while no higher-ranked note shares that name (§4.4). Wiki short names
+    never contain '/' and CIDs always do, so the two forms cannot collide.
+    """
+    return cid.removeprefix(f"{DIR_WIKI}/") if cid.startswith(f"{DIR_WIKI}/") else cid
+
+
+def _is_stable_wiki_text(text: str, cid: str) -> bool:
+    """Whether wikilink `text` names `cid` in a form no note added later can take over (§4.4)."""
+    return normalize_rel(text).removesuffix(".md") in (cid, _stable_wiki_target(cid))
+
+
+def _fragile_warnings(fragile: Sequence[tuple[str, str, str]]) -> list[str]:
+    """One warning per moved note whose untouched links now open it only by a name others could take (§5.1).
+
+    Rewriting them would unbind each citing note's attestations, so they are
+    left byte-identical and named instead; the user decides.
+    """
+    by_target: dict[str, list[tuple[str, str]]] = {}
+    for rel_path, text, cid in fragile:
+        by_target.setdefault(cid, []).append((rel_path, text))
+    out = []
+    for cid, links in sorted(by_target.items()):
+        sample = ", ".join(f"{rel}: [[{text}]]" for rel, text in links[:3])
+        more = f" (+{len(links) - 3} more)" if len(links) > 3 else ""
+        name = cid.rsplit("/", 1)[-1]
+        out.append(
+            f"{len(links)} link(s) still open {cid}, but only while no other note is named '{name}': "
+            f"{sample}{more}; [[{_stable_wiki_target(cid)}]] would not depend on that"
+        )
+    return out
 
 
 def _markdown_path_text(path: str, angle: bool) -> str:
@@ -181,9 +209,18 @@ class MovePlan:
     to_target: str = ""
     is_folder: bool = False
     rewrites: list[_Rewrite] = field(default_factory=list)
+    # Refusals no approval can lift: retargeted links, unreadable notes, ...
     blocked: list[str] = field(default_factory=list)
+    # human-reviewed referrers not yet named in approve_stale: their CIDs, and why.
+    needs_approval: list[str] = field(default_factory=list)
+    unapproved: list[str] = field(default_factory=list)
     newly_resolved: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+
+    @property
+    def refusals(self) -> list[str]:
+        """Every reason this plan cannot be applied as it stands."""
+        return [*self.blocked, *self.unapproved]
 
     @property
     def source(self) -> Note:
@@ -203,7 +240,14 @@ class MovePlan:
 
     @property
     def token(self) -> str:
-        """A fingerprint of what this plan would write and refuse, over the exact bytes it read."""
+        """A fingerprint of what this plan would write and refuse, over the exact bytes it read.
+
+        `unapproved` is left out. approve_stale records the user's consent to a
+        rewrite the dry run already showed, tier change and all -- that note's
+        rewrite and source hash are in `rewrites` either way -- so the token of
+        a dry run blocked only for approval is the token its approved apply
+        passes back (§5.1).
+        """
 
         def digest(text: str) -> str:
             return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -248,7 +292,8 @@ class MovePlan:
                 for m in self.moved
             ],
             "notes": [impact(r.original.cid, r.links, r.original, r.updated) for r in self.rewrites],
-            "blocked": list(self.blocked),
+            "blocked": self.refusals,
+            "needs_approval": list(self.needs_approval),
             "newly_resolved": list(self.newly_resolved),
             "warnings": list(self.warnings),
         }
@@ -318,12 +363,13 @@ class MoveNoteUseCase:
         after = LinkTargetIndex([c for c in cids if c not in moves] + list(moves.values()))
         approved = self._approvals(approve_stale, moves, before)
 
+        fragile: list[tuple[str, str, str]] = []
         for cid in cids:
             moving_item = moved_by_cid.get(cid)
             note = moving_item.source if moving_item is not None else self._read(cid, plan, moves, before, after)
             if note is None:
                 continue
-            edits = self._link_edits(note, moves, before, after, plan.newly_resolved, plan.blocked)
+            edits = self._link_edits(note, moves, before, after, plan.newly_resolved, plan.blocked, fragile)
             if not edits:
                 continue
             body = _apply_spans(note.body, edits)
@@ -333,17 +379,19 @@ class MoveNoteUseCase:
             else:
                 plan.rewrites.append(_Rewrite(original=note, updated=replace(note, body=body), links=len(edits)))
             if note.trust_tier == "human-reviewed" and cid not in approved:
-                plan.blocked.append(
+                plan.needs_approval.append(cid)
+                plan.unapproved.append(
                     f"{note.rel_path} is human-reviewed; rewriting its links would make it stale-verified. "
                     f"Ask the user, then pass it in approve_stale"
                 )
+        plan.warnings.extend(_fragile_warnings(fragile))
         return plan
 
     def apply(self, plan: MovePlan, actor: str) -> None:
         """Write the plan destination-first, so a crash leaves a duplicate, never a lost note."""
         _require_actor(actor)
-        if plan.blocked:
-            raise InvalidArgumentError("Move refused: " + "; ".join(plan.blocked))
+        if plan.refusals:
+            raise InvalidArgumentError("Move refused: " + "; ".join(plan.refusals))
         steps = _write_steps(plan.moved)  # computed before any write; raises on a cycle
         undo: list[Callable[[], None]] = []
         retired: set[str] = set()
@@ -583,8 +631,14 @@ class MoveNoteUseCase:
         after: LinkTargetIndex,
         newly_resolved: list[str],
         blocked: list[str],
+        fragile: list[tuple[str, str, str]] | None = None,
     ) -> list[tuple[LinkSpan, str]]:
-        """The target rewrites a move makes in `note`, each checked to read back as the same link."""
+        """The target rewrites a move makes in `note`, each checked to read back as the same link.
+
+        A link that still opens the moved note is left byte-identical (§5.1),
+        but if the move leaves it resolvable only by a name another note could
+        take (§4.4), `(rel_path, text, new_cid)` is appended to `fragile`.
+        """
         raw_edits: list[tuple[LinkSpan, str]] = []
         moving = note.cid in moves
         old_paths_to_new = {cid_to_path(k): cid_to_path(v) for k, v in moves.items()}
@@ -596,10 +650,16 @@ class MoveNoteUseCase:
                 if was in moves:
                     expected_cid = moves[was]
                     if will != expected_cid:
-                        text = _shortest_wiki_target(expected_cid, after)
+                        text = _stable_wiki_target(expected_cid)
                         if span.embed and is_attachment_target(text):
                             text += ".md"  # `![[v1.5]]` reads as an attachment, `![[v1.5.md]]` as the note
                         raw_edits.append((span, text))
+                    elif (
+                        fragile is not None
+                        and _is_stable_wiki_text(span.target, was)
+                        and not _is_stable_wiki_text(span.target, expected_cid)
+                    ):
+                        fragile.append((note.rel_path, span.target, expected_cid))
                 elif was != will and was is None:
                     newly_resolved.append(f"{note.rel_path}: [[{span.target}]] was dead and would open {will}")
                 elif was != will:

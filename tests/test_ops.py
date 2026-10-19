@@ -24,6 +24,7 @@ from cadabby.ops import (
     VerifyNoteUseCase,
     _truncate_to_budget,
     ground_notes,
+    move_note,
     resolve_note_cid,
     sanitize_filename,
     scaffold_note,
@@ -865,6 +866,47 @@ class TestOpsErgonomics(unittest.TestCase):
         InMemoryNoteStorage().save_note(note)  # no template folder: an ordinary domain note
         with self.assertRaisesRegex(ValueError, "Cannot save note"):
             InMemoryNoteStorage(template_rel="templates").save_note(note)
+
+
+class TestScaffoldTakeover(unittest.TestCase):
+    """§5.1, §10 C79/C80. A new note never changes what an existing link opens."""
+
+    def _uc(self) -> tuple[ScaffoldNoteUseCase, InMemoryNoteStorage, InMemoryLedger]:
+        storage, ledger = InMemoryNoteStorage(), InMemoryLedger()
+        return ScaffoldNoteUseCase(storage, ledger), storage, ledger
+
+    def test_scaffold_refuses_to_take_over_a_resolved_link(self):
+        uc, storage, ledger = self._uc()
+        uc.execute(title="Plan", type_="concept", description="d", path="projects/plan")
+        uc.execute(title="R2", type_="concept", description="d", path="wiki/r2", body="See [[plan]].\n")
+        logged = len(ledger.entries)
+        with self.assertRaises(ValueError) as ctx:
+            uc.execute(title="Plan", type_="concept", description="d", path="wiki/plan")
+        self.assertIn("wiki/r2.md: [[plan]] opens projects/plan", str(ctx.exception))
+        self.assertFalse(storage.note_exists("wiki/plan"))
+        self.assertEqual(len(ledger.entries), logged)
+
+    def test_scaffold_may_resolve_a_dead_link(self):
+        uc, storage, _ = self._uc()
+        uc.execute(title="Runbook", type_="guide", description="d", path="wiki/runbook", body="Next: [[missing]].\n")
+        uc.execute(title="Missing", type_="guide", description="d", path="wiki/missing")
+        self.assertTrue(storage.note_exists("wiki/missing"))
+
+    def test_scaffold_after_an_archive_move_is_not_a_takeover(self):
+        """The simulation's scenario: the move writes [[archive/legacy]], so a new wiki/legacy is safe."""
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = Vault(copy_demo_vault(Path(tmp) / "demo-vault"))
+            scaffold_note(vault, "Legacy", "concept", "d", path="wiki/legacy")
+            scaffold_note(vault, "Ref", "concept", "d", path="wiki/ref", body="See [[wiki/legacy]].\n")
+            move_note(vault, "wiki/legacy", "archive/legacy.md", apply=True)
+            self.assertIn("[[archive/legacy]]", (vault.root / "wiki/ref.md").read_text("utf-8"))
+            scaffold_note(vault, "Legacy", "concept", "A new note", path="wiki/legacy")
+            with VaultCache(vault) as cache:
+                cache.scan()
+                row = cache.get_connection().execute(
+                    "SELECT target_cid FROM links WHERE source_cid = 'wiki/ref';"
+                ).fetchone()
+            self.assertEqual(row["target_cid"], "archive/legacy")
 
 
 if __name__ == "__main__":

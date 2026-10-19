@@ -877,6 +877,8 @@ class TestHarnessShimsStayThin(unittest.TestCase):
         # vault_move_note has no `dry_run` argument (it is `apply`); naming one
         # in code style invites an agent to send it.
         self.assertNotIn("`dry_run`", technician)
+        # Stable link form (§4.4): agents link non-wiki notes by full CID.
+        self.assertIn("**Link form**", librarian)
         # 9. Flat wiki/ vs hierarchical domains and archive/ retirement lifecycle guidance.
         self.assertIn("**`archive/`**: the conventional retirement domain", agents_md)
         self.assertIn("Retiring work to `archive/`", librarian)

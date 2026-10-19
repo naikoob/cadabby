@@ -1376,6 +1376,50 @@ class TestSimulationRemediations(unittest.TestCase):
         self.assertEqual(json.loads(search("Paxos", json=True)), [])
         self.assertNotIn(hint, search("Zanzibar"))
 
+    def _human_verify(self, vault: Path, login: str, prompt: unittest.mock.Mock) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with (
+            unittest.mock.patch("sys.stdin.isatty", return_value=True),
+            unittest.mock.patch("builtins.input", prompt),
+            unittest.mock.patch("getpass.getuser", return_value=login),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            code = _run_like_main(
+                cmd_verify, DummyArgs(vault=str(vault), cid="wiki/a", human=True, agent=None, method=None, json=False)
+            )
+        return code, out.getvalue(), err.getvalue()
+
+    def _vault_with_note(self) -> Path:
+        vault = self.dir / "v"
+        self.assertEqual(self._init(vault)[0], 0)
+        McpServer(Vault(vault)).handle_tools_call(
+            "vault_scaffold_note", {"title": "A", "type": "concept", "description": "d", "path": "wiki/a.md"}
+        )
+        return vault
+
+    def test_human_verify_sanitizes_the_os_username(self):
+        """§3.5, §10 C79. SSSD/AD and Windows usernames sign as the actor grammar allows, shown first."""
+        vault = self._vault_with_note()
+        for login, actor in (("alice@corp.example.com", "human:alice-corp.example.com"), ("John Smith", "human:John-Smith")):
+            with self.subTest(login=login):
+                answer = unittest.mock.Mock(side_effect=lambda msg: msg.split("Type ")[1].split(" ")[0])
+                code, out, err = self._human_verify(vault, login, answer)
+                self.assertEqual(code, 0, err)
+                self.assertIn(f"as:   {actor}", out)
+                self.assertIn(f"by: {actor}", (vault / "wiki" / "a.md").read_text("utf-8").replace('"', ""))
+
+    def test_human_verify_refuses_an_unusable_username_before_prompting(self):
+        """§3.5, §10 C79. Nothing of the name fits the grammar: refused before the person reviews anything."""
+        vault = self._vault_with_note()
+        prompt = unittest.mock.Mock(return_value="x")
+        code, out, err = self._human_verify(vault, "李雷", prompt)
+        self.assertEqual(code, EXIT_ENVIRONMENT)
+        self.assertIn("INVALID_ARGUMENT", err)
+        prompt.assert_not_called()
+        self.assertNotIn("Type ", out)
+        self.assertNotIn("human:", (vault / "wiki" / "a.md").read_text("utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

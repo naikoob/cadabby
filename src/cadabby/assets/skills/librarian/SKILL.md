@@ -27,6 +27,7 @@ The **librarian** grows the knowledge base from `raw/` while keeping provenance 
 ## 3. Linking
 
 - Cross-link generously with `[[Wikilinks]]` or `[[Wikilinks|Aliases]]`, to notes only.
+- **Link form**: link a `wiki/` note by its bare stem (`[[raft]]`) and any other note by its full CID (`[[customers/acme/README]]`, `[[archive/cs244b/syllabus]]`). A shorter name for a non-wiki note opens it only until another note shares that name. If scaffolding is refused because it would take over existing links, tell the user and offer another name or repointing those links to full CIDs.
 - **Citing raw evidence**: `raw/` files are never wikilink targets (`[[raw/paper.md]]` is `LINK_DEAD`, and never scaffold a stub note to stand in for a raw file). Record provenance in `sources:`; for clickable in-body citations, use relative Markdown links — `[Paper](../raw/paper.md)` from `wiki/Note.md`, `[Paper](../../raw/paper.md)` from `customers/acme/Deal.md`: one `../` per folder between the note and the vault root.
 - **Protect `human-reviewed` notes**: Check `trust_tier` and ask the user before editing the body of any `human-reviewed` note or MOC.
 - Batch related updates to the same note into one call's `edits` list, not one call per link.

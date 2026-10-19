@@ -46,15 +46,15 @@ Code `[[target-note]]` is not a link.
 
 LINKER_AFTER = """# Linker
 
-- plain [[renamed-note]]
-- alias [[renamed-note|Target]]
-- anchor [[renamed-note#Heading]]
-- embed ![[renamed-note#Heading]]
+- plain [[customers/acme/renamed-note]]
+- alias [[customers/acme/renamed-note|Target]]
+- anchor [[customers/acme/renamed-note#Heading]]
+- embed ![[customers/acme/renamed-note#Heading]]
 - md [md](../customers/acme/renamed-note.md#Heading) and [angle](<../customers/acme/renamed-note.md>)
 
 | col | link |
 | --- | --- |
-| a | [[renamed-note\\|Aliased]] |
+| a | [[customers/acme/renamed-note\\|Aliased]] |
 
 Code `[[target-note]]` is not a link.
 
@@ -183,6 +183,71 @@ class TestMoveNote(unittest.TestCase):
         self.assertIn("fa-tiling.md", names)
         self.assertNotIn("flash-attention.md", names)
         self.assertEqual([f for f in run_vault_lint(self.vault) if f.severity == "error"], [])
+
+    def test_approval_keeps_the_blocked_dry_runs_token(self):
+        """§5.1, §10 C45. approve_stale is consent, not vault state: the blocked dry run's token applies."""
+        dry = move_note(self.vault, "wiki/flash-attention", "fa-tiling")
+        self.assertEqual(dry["needs_approval"], ["wiki/epistemic-trust-tiers"])
+        with self.assertRaises(ValueError):  # still refused without the approval
+            move_note(self.vault, "wiki/flash-attention", "fa-tiling", apply=True, plan_token=dry["plan_token"])
+
+        approved_dry = move_note(self.vault, "wiki/flash-attention", "fa-tiling", approve_stale=["wiki/epistemic-trust-tiers"])
+        self.assertEqual(approved_dry["plan_token"], dry["plan_token"])
+        self.assertEqual(approved_dry["needs_approval"], [])
+
+        # An edit to the referrer after the dry run is still a conflict.
+        ref = self.root / "wiki/epistemic-trust-tiers.md"
+        original = ref.read_text("utf-8")
+        ref.write_text(original + "\nEdited meanwhile.\n", "utf-8")
+        with self.assertRaises(VaultConflictError):
+            move_note(
+                self.vault, "wiki/flash-attention", "fa-tiling", apply=True,
+                approve_stale=["wiki/epistemic-trust-tiers"], plan_token=dry["plan_token"],
+            )
+        ref.write_text(original, "utf-8")
+
+        applied = move_note(
+            self.vault, "wiki/flash-attention", "fa-tiling", apply=True,
+            approve_stale=["wiki/epistemic-trust-tiers"], plan_token=dry["plan_token"],
+        )
+        tiers = {n["cid"]: n["tier_after"] for n in applied["notes"]}
+        self.assertEqual(tiers["wiki/epistemic-trust-tiers"], "stale-verified")
+
+    def test_a_rewrite_to_an_archived_note_uses_its_full_cid(self):
+        """§4.4, §10 C80. `[[legacy]]` would open the archived note only until another note is named legacy."""
+        self._write("wiki/legacy.md", _fm("Legacy") + "# Legacy\n")
+        self._write("wiki/ref.md", _fm("Ref") + "See [[wiki/legacy]] and [[legacy|old flow]].\n")
+        move_note(self.vault, "wiki/legacy", "archive/legacy.md", apply=True)
+        body = (self.root / "wiki/ref.md").read_text("utf-8")
+        self.assertIn("See [[archive/legacy]]", body)
+        # The bare link still resolves, so it is left byte-identical (§3.4).
+        self.assertIn("[[legacy|old flow]]", body)
+
+    def test_a_wiki_rename_keeps_the_bare_stem(self):
+        """§10 C80. A wiki note's bare stem is an exact name nothing can take over, so it stays short."""
+        self._write("wiki/old-name.md", _fm("Old") + "# Old\n")
+        self._write("wiki/ref.md", _fm("Ref") + "See [[old-name]].\n")
+        move_note(self.vault, "wiki/old-name", "new-name", apply=True)
+        self.assertIn("See [[new-name]].", (self.root / "wiki/ref.md").read_text("utf-8"))
+
+    def test_a_bare_link_left_fragile_by_a_move_is_warned(self):
+        """§5.1, §10 C80. Not rewritten (that would unbind attestations), but named, and outside the token."""
+        self._write("wiki/legacy.md", _fm("Legacy") + "# Legacy\n")
+        self._write("wiki/ref.md", _fm("Ref") + "See [[legacy]].\n")
+        before = (self.root / "wiki/ref.md").read_text("utf-8")
+        plan = move_note(self.vault, "wiki/legacy", "archive/legacy.md")
+        self.assertEqual(plan["notes"], [])
+        fragile = [w for w in plan["warnings"] if "only while no other note is named 'legacy'" in w]
+        self.assertEqual(len(fragile), 1, plan["warnings"])
+        self.assertIn("wiki/ref.md: [[legacy]]", fragile[0])
+        self.assertIn("[[archive/legacy]]", fragile[0])
+        move_note(self.vault, "wiki/legacy", "archive/legacy.md", apply=True, plan_token=plan["plan_token"])
+        self.assertEqual((self.root / "wiki/ref.md").read_text("utf-8"), before)
+
+        # A link that was already fragile is not reported again on a later move.
+        self._write("wiki/ref2.md", _fm("Ref2") + "See [[legacy]].\n")
+        again = move_note(self.vault, "archive/legacy", "archive/old/legacy.md")
+        self.assertFalse(any("named 'legacy'" in w for w in again["warnings"]), again["warnings"])
 
     def test_conflict_mid_apply_restores_every_file(self):
         """§10 C45. A referrer edited between plan and apply aborts the move and undoes what was written."""
@@ -369,13 +434,13 @@ class TestMoveNote(unittest.TestCase):
         )
         self.assertEqual(applied["moved_note"]["tier_after"], "stale-verified")
 
-    def test_destination_stem_collision_uses_the_shortest_qualified_wikilink(self):
-        """§5.1. A bare stem that would open another note is lengthened until it opens the moved one."""
+    def test_a_rewrite_to_a_domain_note_uses_its_full_cid(self):
+        """§5.1, §10 C80. `[[acme/architecture]]` would open the note only until a `clients/acme/architecture` exists."""
         self._write("wiki/architecture.md", _fm("Wiki Architecture") + "# Arch\n")
         self._write("wiki/design-notes.md", _fm("Design") + "# Design\n")
         self._write("wiki/reader.md", _fm("Reader") + "See [[design-notes]].\n")
         move_note(self.vault, "wiki/design-notes", "customers/acme/architecture", apply=True)
-        self.assertIn("See [[acme/architecture]].", (self.root / "wiki/reader.md").read_text("utf-8"))
+        self.assertIn("See [[customers/acme/architecture]].", (self.root / "wiki/reader.md").read_text("utf-8"))
         self.assertNotIn("LINK_DEAD", {f.code for f in run_vault_lint(self.vault)})
 
     def test_dead_links_the_move_brings_to_life_are_reported_not_blocked(self):
@@ -431,7 +496,7 @@ class TestMoveNote(unittest.TestCase):
         uc = MoveNoteUseCase(CaseInsensitiveDisk(self.vault), FileLedger(self.vault), vault=self.vault)
         plan = uc.plan("wiki/Flash-Attention", "fa-renamed")
         self.assertEqual(plan.source.cid, "wiki/flash-attention")
-        self.assertTrue(any("epistemic-trust-tiers" in b for b in plan.blocked))
+        self.assertTrue(any("epistemic-trust-tiers" in b for b in plan.refusals))
 
     def test_a_rewrite_that_would_not_read_back_blocks_the_plan(self):
         """§5.1. Every rewritten link is re-parsed; one that no longer names the moved note is a blocker."""
@@ -593,7 +658,7 @@ class TestMoveNote(unittest.TestCase):
         # External referrer in wiki/overview.md was updated for both markdown and qualified wikilink
         overview_after = (self.root / "wiki/overview.md").read_text("utf-8")
         self.assertIn("[deal](../customers/enterprise/northwind/deal.md)", overview_after)
-        self.assertIn("[[README]]", overview_after)
+        self.assertIn("[[customers/enterprise/northwind/README]]", overview_after)
         self.assertEqual([f for f in run_vault_lint(self.vault) if f.severity == "error"], [])
 
     def test_folder_move_into_archive_retires_subtree_atomically(self):
