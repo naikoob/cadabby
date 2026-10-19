@@ -40,7 +40,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         self.tmp_dir = temp_dir(self)
         self.root = self.tmp_dir
 
-    def test_ac1_init_produces_zero_lint_errors(self):
+    def test_init_produces_zero_lint_errors(self):
         """No current §10 criterion. Pins §5.3: what `init` scaffolds is itself lint-clean."""
         vault_dir = self.root / "new-vault"
         args = DummyArgs(vault=str(vault_dir), name="new-vault", obsidian=True)
@@ -52,7 +52,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         errors = [f for f in findings if f.severity == "error"]
         self.assertEqual(len(errors), 0, f"Scaffolded vault failed lint: {errors}")
 
-    def test_ac2_disposable_cache_reproducibility(self):
+    def test_wiping_dot_cadabby_reproduces_search_results(self):
         """§10 C1. Deleting .cadabby/ and re-running reproduces byte-identical search results."""
         vault_dir = copy_demo_vault(self.root / "demo-vault")
         vault = Vault(vault_dir)
@@ -113,7 +113,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
 
         self.assertEqual(hits1, hits2)
 
-    def test_ac3_restricted_yaml_grammar(self):
+    def test_restricted_yaml_grammar(self):
         """§10 C3 (parser half). Accepts §3.2 constructs; rejects tabs, unquoted colons, multiline scalars."""
         # Rejects tab
         with self.assertRaises(FrontmatterParseError) as ctx1:
@@ -136,7 +136,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         serialized = serialize_frontmatter(fm, body)
         self.assertEqual(serialized, valid)
 
-    def test_ac4_body_edit_downgrades_to_stale_verified(self):
+    def test_body_edit_downgrades_to_stale_verified(self):
         """§10 C2. A body edit downgrades the note to stale-verified on the next scan."""
         vault_dir = copy_demo_vault(self.root / "demo-vault")
         vault = Vault(vault_dir)
@@ -164,7 +164,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         self.assertEqual(cur.fetchone()[0], 1)
         cache.close()
 
-    def test_ac5_frontmatter_edit_preserves_human_reviewed(self):
+    def test_frontmatter_edit_preserves_human_reviewed(self):
         """No current §10 criterion. Pins §3.3: the body hash is body-only, so metadata edits do not demote."""
         vault_dir = copy_demo_vault(self.root / "demo-vault")
         vault = Vault(vault_dir)
@@ -183,7 +183,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         self.assertEqual(cur.fetchone()[0], "human-reviewed")
         cache.close()
 
-    def test_ac6_rename_leaves_no_stale_records(self):
+    def test_rename_leaves_no_stale_records(self):
         """§10 C14. A rename leaves no stale row, and the FTS integrity check passes afterward."""
         vault_dir = copy_demo_vault(self.root / "demo-vault")
         vault = Vault(vault_dir)
@@ -211,7 +211,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         self.assertTrue(cache.check_fts_integrity())
         cache.close()
 
-    def test_ac7_epistemic_ranking_ordering(self):
+    def test_epistemic_ranking_ordering(self):
         """§10 C15. human-reviewed outranks unverified; deprecated is pushed below both."""
         vault_dir = copy_demo_vault(self.root / "demo-vault")
         vault = Vault(vault_dir)
@@ -239,7 +239,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         self.assertGreater(top.score, second.score)
         cache.close()
 
-    def test_ac8_concurrent_writers_no_corruption(self):
+    def test_concurrent_writers_no_corruption(self):
         """No current §10 criterion. Pins §8: concurrent writers to different notes do not corrupt the vault."""
         vault_dir = copy_demo_vault(self.root / "demo-vault")
         vault = Vault(vault_dir)
@@ -254,7 +254,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         errors = [f for f in findings if f.severity == "error"]
         self.assertEqual(len(errors), 0)
 
-    def test_ac9_update_expected_hash_conflict(self):
+    def test_update_expected_hash_conflict(self):
         """No current §10 criterion. Pins §8: a mismatched expected_hash raises VAULT_CONFLICT and writes nothing."""
         vault_dir = copy_demo_vault(self.root / "demo-vault")
         vault = Vault(vault_dir)
@@ -273,7 +273,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         # Content must remain intact
         self.assertEqual(note_file.read_text("utf-8"), original_content)
 
-    def test_ac10_mcp_capabilities_and_human_refusal(self):
+    def test_mcp_capabilities_and_human_refusal(self):
         """§10 C10 and C12. Exactly 8 tools over JSON-RPC, and `by: human:*` is refused."""
         vault_dir = copy_demo_vault(self.root / "demo-vault")
         vault = Vault(vault_dir)
@@ -313,7 +313,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         )
         self.assertTrue(res_by["isError"])
 
-    def test_ac11_audit_provenance_mismatch(self):
+    def test_audit_provenance_mismatch(self):
         """§10 C13. audit flags a human attestation whose commit author is unmapped."""
         vault_dir = copy_demo_vault(self.root / "demo-vault")
         vault = Vault(vault_dir)
@@ -347,7 +347,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
             self.assertEqual(findings[0].code, "PROVENANCE_MISMATCH")
             self.assertIn("untrusted-agent@bot.net", findings[0].message)
 
-    def test_ac12_full_autonomous_agent_workflow(self):
+    def test_full_autonomous_agent_workflow(self):
         """No current §10 criterion. Pins §7.1's portability claim: .mcp.json alone is a working surface."""
         vault_dir = copy_demo_vault(self.root / "demo-vault")
         vault = Vault(vault_dir)
@@ -393,7 +393,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         self.assertFalse(lint_out["isError"])
         self.assertEqual(json.loads(lint_out["content"][0]["text"])["finding_counts"]["error"], 0)
 
-    def test_ac16_sync_zero_git_diff(self):
+    def test_sync_zero_git_diff(self):
         """§10 C16. sync run twice produces no Git diff on the second run."""
         vault_dir = copy_demo_vault(self.root / "demo-vault")
 
@@ -408,7 +408,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
 
         self.assertEqual(index_first, index_second)
 
-    def test_ac17_init_untouched_claude_notification(self):
+    def test_init_untouched_claude_notification(self):
         """§10 C21. init leaves an existing CLAUDE.md untouched and says so."""
         vault_dir = self.root / "existing-claude-vault"
         vault_dir.mkdir(parents=True, exist_ok=True)
@@ -426,7 +426,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         output = f.getvalue()
         self.assertIn("Existing file left untouched: CLAUDE.md", output)
 
-    def test_ac18_installer_idempotency_and_uninstall(self):
+    def test_installer_idempotency_and_uninstall(self):
         """§10 C22. install --all is byte-idempotent; --uninstall restores the prior config exactly."""
         claude_dest = self.root / ".claude.json"
         ag_dest = self.root / "antigravity" / "plugins" / "cadabby"
@@ -461,7 +461,7 @@ class TestAcceptanceCriteria(unittest.TestCase):
         self.assertEqual(claude_dest.read_text("utf-8"), initial_claude)
         self.assertFalse(ag_dest.exists())
 
-    def test_ac19_single_definition_invariant(self):
+    def test_single_definition_invariant(self):
         """§10 C23. No persona behavior text appears in more than one file."""
         repo_root = Path(__file__).resolve().parent.parent
 

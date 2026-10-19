@@ -38,6 +38,7 @@ Each rule is cheap to break and hard to see once broken.
 | The MCP tool surface or resources | `mcp.py` | §5, §7, `test_mcp.py` |
 | CLI flags, output, exit codes | `cli.py`, `errors.py` | §5.4, `test_cli.py`, `test_errors.py` |
 | `init` / `install` and file ownership | `installer.py` | §7.6, `test_installer.py` |
+| A module's imports, layering, or a function's size | that module | §9, §9.1, `test_architecture.py` |
 | Anything shipped into a user's vault | `src/cadabby/assets/` | §7.1, §7.5, `test_templates.py` |
 
 The full file tree is §9, and `TestSpecRepositoryTree` keeps it true.
