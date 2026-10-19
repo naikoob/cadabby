@@ -299,6 +299,12 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
                 item_mapping = None if is_quoted_scalar else _split_mapping(seq_val)
                 is_mapping_item = item_mapping is not None
 
+                # A key that already holds a nested mapping cannot also hold a
+                # sequence. Without this check the item reached an assert:
+                # INTERNAL with no message, failing every scan of the vault.
+                if current_container_type == "flat_map":
+                    raise FrontmatterParseError("Cannot mix sequence items with mapping items under the same key", line_idx)
+
                 # Initialize list container if not already started
                 if current_container_type is None:
                     current_container_type = "dict_seq" if is_mapping_item else "scalar_seq"

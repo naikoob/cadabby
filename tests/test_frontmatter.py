@@ -259,6 +259,20 @@ class TestSubsetBoundarySymmetry(unittest.TestCase):
         with self.assertRaises(FrontmatterSerializeError):
             serialize_frontmatter({"items": ["scalar_first", {"key": "val"}]}, "# Body\n")
 
+    def test_sequence_and_nested_mapping_under_one_key_rejected_both_ways(self):
+        # Sequence after mapping used to reach an assert: INTERNAL with no
+        # message, which failed every scan of the vault holding the note.
+        for text in (
+            "---\ngenerated:\n  by: agent:x\n  - foo\n---\n",
+            "---\ngenerated:\n  by: agent:x\n  - k: v\n---\n",
+            "---\ntags:\n  - a\n  by: x\n---\n",
+        ):
+            with self.subTest(text=text):
+                with self.assertRaises(FrontmatterParseError) as cm:
+                    parse_frontmatter(text)
+                self.assertEqual(cm.exception.line_number, 4)
+                self.assertIn("Cannot mix sequence items with mapping items", cm.exception.message)
+
     def test_writer_rejects_invalid_key_names(self):
         for bad_data in (
             {"bad key": "val"},
