@@ -1171,6 +1171,77 @@ class TestScanIsOneTransaction(unittest.TestCase):
         self.assertLessEqual({"wiki/one", "wiki/two"}, healed)
 
 
+class TestConcurrentScans(unittest.TestCase):
+    """C83: simultaneous scans serialize on the write lock instead of colliding (§8).
+
+    Up to 0.5.2 each scan read which notes the cache held before taking the
+    write lock, so two scans both decided to insert the same new note and the
+    loser failed with `UNIQUE constraint failed: notes.rel_path` -- an INTERNAL
+    error on a plain search, whenever the other process was indexing.
+    """
+
+    WORKERS = 6
+    ROUNDS = 5
+    NOTES = 20
+
+    def setUp(self):
+        self.tmp = temp_dir(self)
+        self.root = copy_demo_vault(self.tmp / "demo-vault")
+        self.vault = Vault(self.root)
+        with VaultCache(self.vault) as cache:
+            cache.scan()
+
+    def _write(self, name: str) -> None:
+        (self.root / "wiki" / f"{name}.md").write_text(
+            f"---\ntype: concept\ntitle: {name}\ndescription: d\nstatus: active\n---\n# {name}\n\nword {name}\n", "utf-8"
+        )
+
+    def test_simultaneous_scans_after_new_notes_all_succeed(self):
+        import threading
+
+        errors: list[BaseException] = []
+        for rnd in range(self.ROUNDS):
+            for i in range(self.NOTES):
+                self._write(f"race-{rnd}-{i}")
+            barrier = threading.Barrier(self.WORKERS)
+
+            def worker() -> None:
+                try:
+                    with VaultCache(self.vault) as cache:
+                        barrier.wait()
+                        cache.scan()
+                except BaseException as exc:  # noqa: BLE001 -- collected and asserted below
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=worker) for _ in range(self.WORKERS)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        self.assertEqual([f"{type(e).__name__}: {e}" for e in errors], [])
+        with VaultCache(self.vault) as cache:
+            n = cache.get_connection().execute("SELECT COUNT(*) FROM notes WHERE cid LIKE 'wiki/race-%';").fetchone()[0]
+            self.assertEqual(n, self.ROUNDS * self.NOTES)
+            self.assertTrue(cache.check_fts_integrity())
+
+    def test_a_scan_with_work_waits_for_the_lock_holder(self):
+        """Pending work waits out a brief lock holder (within busy_timeout) and then indexes."""
+        import sqlite3
+        import threading
+
+        self._write("late-arrival")
+        holder = sqlite3.connect(str(self.vault.cache_db_path), check_same_thread=False)  # committed by the timer
+        self.addCleanup(holder.close)
+        holder.execute("BEGIN IMMEDIATE")
+        releaser = threading.Timer(0.3, holder.commit)
+        releaser.start()
+        self.addCleanup(releaser.cancel)
+        with VaultCache(self.vault) as cache:
+            inserted, _, _, _ = cache.scan()
+            self.assertEqual(inserted, 1)
+            self.assertTrue(cache.search("late-arrival"))
+
+
 class TestCamelCaseAndAliasesSearch(unittest.TestCase):
     """§3.1, §4.2, §4.4, §10 C81: CamelCase subword indexing/query expansion and frontmatter aliases."""
 

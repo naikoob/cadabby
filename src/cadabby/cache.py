@@ -507,7 +507,21 @@ class VaultCache:
 
         disk_files = self._discover_files()
 
+        # Nothing to write means no write lock, so a read facade never queues
+        # behind another process's scan (§8): almost every scan ends here.
+        if not force and not raw_exts_changed and not self._has_pending_changes(conn, disk_files, integrity_mode):
+            return 0, 0, 0, conn.execute("SELECT COUNT(*) FROM notes;").fetchone()[0]
+
+        # A transaction left open by a caller would make BEGIN fail, and would
+        # mean the reads below were not this scan's own; fail loudly instead.
+        assert not conn.in_transaction, "scan() must not run inside an open transaction"
         try:
+            # Take the write lock *before* reading what the cache holds. Up to
+            # 0.5.2 the reads came first, on a snapshot another scan could
+            # commit past, so two scans both inserted the same new note and the
+            # loser failed with `UNIQUE constraint failed` (§8). Now a second
+            # scan waits (busy_timeout) and then finds the work done.
+            conn.execute("BEGIN IMMEDIATE;")
             # 1. Deletion reconciliation: rows whose file is gone from disk.
             db_paths = {row["rel_path"] for row in conn.execute("SELECT rel_path FROM notes;")}
             missing_paths = db_paths - disk_files.keys()
@@ -523,32 +537,21 @@ class VaultCache:
             inserted_count = 0
             updated_count = 0
             for rel_path, abs_path in disk_files.items():
-                cached = cached_meta.get(rel_path)
-                is_raw = path_to_layer(rel_path) == DIR_RAW
-                try:
-                    st = abs_path.stat()
-                    f_hash = compute_file_sha256(abs_path) if integrity_mode == "hash" else None
-                    stale_by_config = is_raw and raw_exts_changed
-                    if cached is not None and not force and not stale_by_config and _is_unchanged(cached, st, f_hash, integrity_mode):
-                        continue
-
-                    if is_raw:
-                        self._index_raw_file(rel_path, abs_path, st, f_hash, raw_text_exts)
-                    else:
-                        self._index_note_file(rel_path, abs_path, st, f_hash, template_rel)
-                except FileNotFoundError:
-                    # Deleted between discovery and here (an editor's save-by-rename,
-                    # a concurrent move): it is simply gone, which is what step 1
-                    # would have concluded a moment later (§4.3).
-                    if cached is not None:
-                        self.delete_note(rel_path)
-                        deleted_count += 1
-                    continue
-
-                if cached is None:
+                outcome = self._index_if_changed(
+                    rel_path,
+                    abs_path,
+                    cached_meta.get(rel_path),
+                    integrity_mode=integrity_mode,
+                    force=force or (raw_exts_changed and path_to_layer(rel_path) == DIR_RAW),
+                    raw_text_exts=raw_text_exts,
+                    template_rel=template_rel,
+                )
+                if outcome == "inserted":
                     inserted_count += 1
-                else:
+                elif outcome == "updated":
                     updated_count += 1
+                elif outcome == "deleted":
+                    deleted_count += 1
 
             # 3. Resolve link targets if vault structure changed or new/updated links exist
             if inserted_count or updated_count or deleted_count or force:
@@ -576,6 +579,66 @@ class VaultCache:
             _indexer.sync_vault_index(self.vault, cache=self)
 
         return inserted_count, updated_count, deleted_count, total_count
+
+    def _index_if_changed(
+        self,
+        rel_path: str,
+        abs_path: Path,
+        cached: sqlite3.Row | None,
+        *,
+        integrity_mode: str,
+        force: bool,
+        raw_text_exts: tuple[str, ...],
+        template_rel: str | None,
+    ) -> str | None:
+        """Re-index one file if it differs from its row: "inserted", "updated", "deleted", or None.
+
+        `force` covers both a forced rescan and a raw file whose indexing the
+        raw-extension list decides, when that list changed (§4.3).
+        """
+        try:
+            st = abs_path.stat()
+            f_hash = compute_file_sha256(abs_path) if integrity_mode == "hash" else None
+            if cached is not None and not force and _is_unchanged(cached, st, f_hash, integrity_mode):
+                return None
+            if path_to_layer(rel_path) == DIR_RAW:
+                self._index_raw_file(rel_path, abs_path, st, f_hash, raw_text_exts)
+            else:
+                self._index_note_file(rel_path, abs_path, st, f_hash, template_rel)
+        except FileNotFoundError:
+            # Deleted between discovery and here (an editor's save-by-rename,
+            # a concurrent move): it is simply gone, which is what step 1
+            # would have concluded a moment later (§4.3).
+            if cached is not None:
+                self.delete_note(rel_path)
+                return "deleted"
+            return None
+        return "inserted" if cached is None else "updated"
+
+    def _has_pending_changes(self, conn: sqlite3.Connection, disk_files: dict[str, Path], integrity_mode: str) -> bool:
+        """Whether a scan has anything to write, decided without taking the write lock (§8).
+
+        The same test the write phase applies per file (`_is_unchanged`), so
+        the two cannot disagree; it stops at the first difference. A file that
+        vanishes mid-check counts as a change if the cache still has its row.
+        """
+        cached_meta = {
+            row["rel_path"]: row for row in conn.execute("SELECT rel_path, mtime, file_size, file_hash FROM notes;")
+        }
+        if cached_meta.keys() - disk_files.keys():
+            return True
+        for rel_path, abs_path in disk_files.items():
+            cached = cached_meta.get(rel_path)
+            if cached is None:
+                return True
+            try:
+                st = abs_path.stat()
+                f_hash = compute_file_sha256(abs_path) if integrity_mode == "hash" else None
+            except FileNotFoundError:
+                return True
+            if not _is_unchanged(cached, st, f_hash, integrity_mode):
+                return True
+        return False
 
     def _discover_files(self) -> dict[str, Path]:
         """Every file the cache tracks: raw evidence plus the notes of every cognitive domain."""
