@@ -97,8 +97,8 @@ Run all of these. Stop on any failure.
      a removed MCP tool needs an entry in `mcp._RETIRED_TOOLS`. That entry is only an
      error message, not an alias, so the surface stays at 8 tools. A removed or renamed
      argument gets an entry in `mcp._RETIRED_ARGUMENTS` on the same terms.
-5. **Docs.** Check the README test counts, and that every new CLI flag, MCP parameter
-   and error code is described in the spec.
+5. **Docs.** Check that every new CLI flag, MCP parameter and error code is described
+   in the spec.
 
 ## 4. Release notes
 

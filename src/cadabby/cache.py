@@ -43,8 +43,6 @@ from cadabby.search import (
     _fts_table,
     execute_search,
     extract_camelcase_subwords,
-    or_fallback_fts5_query,
-    sanitize_fts5_query,
 )
 from cadabby.vault import Vault, cid_to_path, note_path_violation, path_to_cid, path_to_layer, path_to_stem
 
@@ -185,11 +183,6 @@ def _schema_state(conn: sqlite3.Connection) -> str:
         return "stale"
     row = conn.execute("SELECT value FROM cache_meta WHERE key = 'schema_version';").fetchone()
     return "current" if row is not None and str(row[0]) == str(SCHEMA_VERSION) else "stale"
-
-
-def _schema_is_current(conn: sqlite3.Connection) -> bool:
-    """True for an empty database or one recorded at SCHEMA_VERSION."""
-    return _schema_state(conn) != "stale"
 
 
 class VaultCache:

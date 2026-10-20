@@ -905,6 +905,40 @@ class TestNamingAndAliasRules(unittest.TestCase):
                 uc.execute(title="Hypertension", type_="concept", description="d", aliases=[bad])
         self.assertEqual(list(storage.list_note_cids()), [])
 
+    def test_scaffold_frontmatter_refuses_fields_with_their_own_argument(self):
+        """§5.1, §10 C81: core keys in `frontmatter` are refused, not silently overridden or left raw."""
+        storage, ledger = InMemoryNoteStorage(), InMemoryLedger()
+        uc = ScaffoldNoteUseCase(storage, ledger)
+        values = {
+            "type": "x", "title": "x", "description": "x", "status": "active",
+            "tags": ["x"], "aliases": ["X"], "sources": ["raw/x.md"],
+        }
+        for key, value in values.items():
+            with self.subTest(key=key), self.assertRaises(ValueError) as ctx:
+                uc.execute(title="Core", type_="concept", description="d", frontmatter={key: value})
+            self.assertIn(f"'{key}' has its own scaffold argument", str(ctx.exception))
+        with self.assertRaises(ValueError) as ctx:
+            uc.execute(title="Core", type_="concept", description="d", frontmatter={"tags": ["x"], "status": "active"})
+        self.assertIn("'status', 'tags' have their own scaffold argument", str(ctx.exception))
+        # Engine-owned keys keep their more specific refusal.
+        with self.assertRaisesRegex(ValueError, "engine-owned"):
+            uc.execute(title="Core", type_="concept", description="d", frontmatter={"generated": {}})
+        self.assertEqual(list(storage.list_note_cids()), [])
+
+        note = uc.execute(title="Custom", type_="concept", description="d", frontmatter={"owner": "x", "n": 3})
+        self.assertEqual((note.frontmatter["owner"], note.frontmatter["n"]), ("x", "3"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = Vault(copy_demo_vault(Path(tmp) / "demo-vault"))
+            server = McpServer(vault)
+            res = server.handle_tools_call(
+                "vault_scaffold_note",
+                {"title": "Wire", "type": "concept", "description": "d", "frontmatter": {"tags": ["x"]}},
+            )
+            self.assertTrue(res["isError"])
+            self.assertEqual(json.loads(res["content"][0]["text"])["error"]["code"], "INVALID_ARGUMENT")
+            self.assertFalse((vault.root / "wiki" / "wire.md").exists())
+
 
 class TestScaffoldTakeover(unittest.TestCase):
     """§5.1, §10 C79/C80. A new note never changes what an existing link opens."""

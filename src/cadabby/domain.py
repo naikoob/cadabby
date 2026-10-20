@@ -25,6 +25,9 @@ from cadabby.okf import canonicalize_aliases, compute_body_hash, derive_trust_ti
 ENGINE_OWNED_FIELDS: tuple[str, ...] = ("verified", "generated")
 _STRING_FIELDS: tuple[str, ...] = ("title", "description", "type", "status")
 _SCHEMA_KEYS: frozenset[str] = frozenset(SCHEMA_KEY_ORDER)
+# Schema keys `Note.new` takes as arguments. Inside scaffold's `frontmatter` they
+# used to be overwritten silently -- or, for `aliases`, kept uncanonicalized.
+_ARGUMENT_KEYS: frozenset[str] = _SCHEMA_KEYS - frozenset(ENGINE_OWNED_FIELDS)
 
 
 def _coerce_custom_numbers(val: Any) -> Any:
@@ -262,10 +265,15 @@ class Note:
             raise InvalidArgumentError(f"Invalid status {status!r}. Must be one of {NOTE_STATUSES}")
         clean_aliases = canonicalize_aliases(aliases) if aliases is not None else []
         validate_frontmatter_patch(extra_frontmatter)
+        if extra_frontmatter and (taken := sorted(_ARGUMENT_KEYS & extra_frontmatter.keys())):
+            one = len(taken) == 1
+            raise InvalidArgumentError(
+                f"{', '.join(repr(k) for k in taken)} {'has its' if one else 'have their'} own scaffold "
+                f"argument; pass {'it' if one else 'them'} there, not inside 'frontmatter'"
+            )
+        # Only custom keys remain, so every value takes the custom-field coercion.
         frontmatter: dict[str, Any] = {
-            k: (v if k in _SCHEMA_KEYS else _coerce_custom_numbers(v))
-            for k, v in (extra_frontmatter or {}).items()
-            if v is not None
+            k: _coerce_custom_numbers(v) for k, v in (extra_frontmatter or {}).items() if v is not None
         }
         frontmatter.update({
             "type": type_,

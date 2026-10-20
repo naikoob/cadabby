@@ -829,7 +829,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_scaffold.add_argument(
         "--frontmatter",
-        help="JSON extra frontmatter fields (never `verified` or `generated`)",
+        help="JSON custom frontmatter fields (never `verified`, `generated`, or a field with its own flag, like --tags)",
     )
     p_scaffold.add_argument("--body", help="Initial note body (Markdown); exclusive with --template")
     p_scaffold.add_argument("--json", action="store_true", help="Output the result as JSON (the MCP payload)")

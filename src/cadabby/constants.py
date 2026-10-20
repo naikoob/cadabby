@@ -13,7 +13,10 @@ from __future__ import annotations
 # content-comparing integrity check can run at all (§4.2).
 # 7 stores tags lowercased whatever casing the file uses, so --tag matches (§4.2).
 # 8 adds `aliases` and `subwords` (CamelCase subword tokens) to `notes` and both FTS tables (§4.2, §4.4).
-SCHEMA_VERSION = 8
+# 9 stores tags in canonical form (`b_tree` -> `b-tree`, okf.canonical_tag) and splits
+#   letter/digit and short-acronym CamelCase runs, so v8 rows hold stale tag and
+#   subword text (§3.2, §4.4). 8 shipped in 0.5.3, so it cannot be reused.
+SCHEMA_VERSION = 9
 
 # `.cadabby.json`'s "schema" (§2.6). Independent of SCHEMA_VERSION above: the
 # cache is disposable and rebuilds on mismatch, the config is user-owned and is

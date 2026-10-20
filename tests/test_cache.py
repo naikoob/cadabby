@@ -11,9 +11,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from cadabby.cache import VaultCache, or_fallback_fts5_query, reset_cache_files, sanitize_fts5_query
+from cadabby.cache import VaultCache, reset_cache_files
 from cadabby.indexer import generate_index_markdown
 from cadabby.ops import scaffold_note
+from cadabby.search import or_fallback_fts5_query, sanitize_fts5_query
 from cadabby.vault import Vault, VaultConfigError
 from tests.helpers import copy_demo_vault, demo_vault, temp_dir
 

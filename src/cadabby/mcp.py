@@ -223,8 +223,9 @@ _TOOL_SPECS: list[ToolSpec] = [
                 "frontmatter": {
                     "type": "object",
                     "description": (
-                        "Optional extra frontmatter fields (max 1 nesting level; numeric scalars are stored "
-                        "as strings; engine-owned 'generated' and 'verified' are refused)"
+                        "Optional custom frontmatter fields (max 1 nesting level; numeric scalars are stored "
+                        "as strings; fields with their own argument, like 'tags' or 'status', and engine-owned "
+                        "'generated' and 'verified' are refused)"
                     ),
                 },
                 "body": {"type": "string", "description": "Initial markdown body"},
