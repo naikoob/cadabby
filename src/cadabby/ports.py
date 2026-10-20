@@ -111,11 +111,11 @@ class IndexCachePort(Protocol):
         ...
 
     def get_moc_overview(self, limit: int) -> dict[str, Any]:
-        """Every wiki MOC's link counts and the largest overlaps between MOCs (§5.1)."""
+        """Every MOC outside archive/ with its link counts, and the largest overlaps between MOCs (§5.1)."""
         ...
 
     def entry_point_rows(self) -> Sequence[Mapping[str, Any]]:
-        """Every wiki MOC (stem, rel_path, description), sorted by stem (§2.5)."""
+        """Every MOC outside archive/ (cid, stem, rel_path, layer, description), wiki MOCs first (§2.5)."""
         ...
 
     def unfiled_note_rows(self) -> Sequence[Mapping[str, Any]]:

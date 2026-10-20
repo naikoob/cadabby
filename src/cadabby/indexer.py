@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from cadabby.constants import LEDGER_TITLE
+from cadabby.constants import DIR_WIKI, LEDGER_TITLE
 from cadabby.fsutil import advisory_lock, append_ledger, atomic_write
 from cadabby.okf import ledger_line, utc_now_iso
 from cadabby.ports import IndexCachePort
@@ -128,12 +128,20 @@ def _note_link(stem: str, rel_path: str) -> str:
 
 
 def _entry_points(cache: IndexCachePort) -> list[str]:
-    """Section 1: every MOC, linked. The human's starting page (§2.5)."""
+    """Section 1: every MOC, linked. The human's starting page (§2.5).
+
+    A wiki MOC is linked by its bare stem, as before. A domain MOC is linked by
+    its full CID (`[[services/services-moc]]`): a bare stem opens a non-wiki
+    note only until another note shares the name.
+    """
     rows = cache.entry_point_rows()
     if not rows:
         return []
     lines = ["## Entry Points", "", "| Map of Content | Description |", "| :--- | :--- |"]
-    lines += [f"| {_note_link(r['stem'], r['rel_path'])} | {_cell(r['description'])} |" for r in rows]
+    lines += [
+        f"| {_note_link(r['stem'] if r['layer'] == DIR_WIKI else r['cid'], r['rel_path'])} | {_cell(r['description'])} |"
+        for r in rows
+    ]
     return lines + [""]
 
 
@@ -143,10 +151,11 @@ def _unfiled(cache: IndexCachePort) -> list[str]:
     The one failure mode flat layout introduces, and the one `lint` cannot
     catch: a note that links outward has edges, so gate 5 sees no orphan.
 
-    Reachability is transitive and may travel through any layer -- a link is a
+    Reachability starts at every MOC outside archive/ (a domain's `type: moc`
+    counts too), is transitive and may travel through any layer -- a link is a
     link, and a wiki note pulled in via a domain note is still filed. Only wiki
-    notes are *reported*, because MOCs are a `wiki/` construct; domains carry
-    their own topology in folders (§2.5). `deprecated` notes are excluded: the
+    notes are *reported*: the flat namespace is the one place a note has no
+    folder to be found by; domains carry their own topology in folders (§2.5). `deprecated` notes are excluded: the
     section is a worklist, and filing a retired note is not work. Without that
     exclusion the report has a floor it can never reach zero from, which would
     defeat the point of shrinking it. The definition lives in

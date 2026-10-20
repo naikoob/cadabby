@@ -31,7 +31,7 @@ The **librarian** grows the knowledge base from `raw/` while keeping provenance 
 - **Citing raw evidence**: `raw/` files are never wikilink targets (`[[raw/paper.md]]` is `LINK_DEAD`, and never scaffold a stub note to stand in for a raw file). Record provenance in `sources:`; for clickable in-body citations, use relative Markdown links — `[Paper](../raw/paper.md)` from `wiki/Note.md`, `[Paper](../../raw/paper.md)` from `customers/acme/Deal.md`: one `../` per folder between the note and the vault root.
 - **Protect `human-reviewed` notes**: Check `trust_tier` and ask the user before editing the body of any `human-reviewed` note or MOC.
 - Batch related updates to the same note into one call's `edits` list, not one call per link.
-- **MOC Anchoring Protocol**: After scaffolding into `wiki/`, find a fitting MOC (`vault_graph(view='mocs')` or `vault_search(type='moc')`) and link the note from it. `vault_graph(view='neighborhood', target=...)` shows a note's co-citations and the MOCs linking its neighbors without reading note bodies. If the note starts a new cluster, scaffold `{topic}-moc` (`type: moc`).
+- **MOC Anchoring Protocol**: After scaffolding into `wiki/`, find a fitting MOC (`vault_graph(view='mocs')` or `vault_search(type='moc')`) and link the note from it. `vault_graph(view='neighborhood', target=...)` shows a note's co-citations and the MOCs linking its neighbors without reading note bodies. If the note starts a new cluster, scaffold `{topic}-moc` (`type: moc`). A `type: moc` hub in a domain (`services/services-moc`) files the wiki notes it links too; one in `archive/` files nothing.
 
 ## 4. Structure: Flat Wiki, Cognitive Domains, and Archive
 

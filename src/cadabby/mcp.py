@@ -170,7 +170,8 @@ _TOOL_SPECS: list[ToolSpec] = [
         "description": (
             "Link structure without note text. view='neighborhood' (default) returns a note's 1- and 2-hop "
             "links and backlinks, co-citations, and bibliographic coupling with neighbor metadata (title, "
-            "type, status, trust_tier) for cross-linking and MOC filing. view='mocs' returns every wiki MOC's "
+            "type, status, trust_tier) for cross-linking and MOC filing. view='mocs' returns, for every MOC "
+            "(type: moc in any domain but archive/), "
             "outgoing/incoming link counts and largest link overlaps (ratio = shared / smaller MOC) for splits "
             "and merges."
         ),

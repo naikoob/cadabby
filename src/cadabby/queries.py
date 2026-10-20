@@ -21,14 +21,20 @@ from cadabby.okf import is_actor_human, latest_stale_actor
 
 
 def entry_point_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    """Every wiki MOC (stem, rel_path, description), sorted by stem (§2.5)."""
+    """Every MOC outside archive/ (cid, stem, rel_path, layer, description): wiki MOCs first, then by stem (§2.5).
+
+    A `type: moc` note is a MOC wherever it lives. Before, a domain MOC such as
+    `services/services-moc` was missing here and from `vault_graph`, and the
+    wiki notes it linked were reported unfiled. Retired MOCs in archive/ are
+    not entry points and file nothing.
+    """
     return conn.execute(
         """
-        SELECT stem, rel_path, description FROM notes
-        WHERE layer = 'wiki' AND type = ? AND parse_error IS NULL
-        ORDER BY stem ASC;
+        SELECT cid, stem, rel_path, layer, description FROM notes
+        WHERE layer != ? AND type = ? AND parse_error IS NULL
+        ORDER BY (layer != 'wiki') ASC, stem ASC, cid ASC;
         """,
-        (TYPE_MOC,),
+        (DIR_ARCHIVE, TYPE_MOC),
     ).fetchall()
 
 
@@ -55,15 +61,17 @@ def unfiled_note_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """Wiki notes no MOC reaches by forward link at any depth, sorted by stem (§2.5).
 
     The one definition of "unfiled": the index.md section and the
-    `vault_status` queue both read it. Reachability is transitive and may
-    travel through any layer; only active wiki notes are reported, because
-    MOCs are a `wiki/` construct and filing a retired note is not work.
+    `vault_status` queue both read it. Reachability starts at every MOC
+    outside archive/ (the same set `entry_point_rows` lists), is transitive
+    and may travel through any layer. Only active wiki notes are reported:
+    the flat namespace is the one place a note has no folder to be found by,
+    and filing a retired note is not work.
     """
     return conn.execute(
         """
         WITH RECURSIVE filed(cid) AS (
             SELECT cid FROM notes
-            WHERE layer = 'wiki' AND type = ? AND parse_error IS NULL
+            WHERE layer != ? AND type = ? AND parse_error IS NULL
           UNION
             SELECT l.target_cid FROM links l
             JOIN filed f ON l.source_cid = f.cid
@@ -76,7 +84,7 @@ def unfiled_note_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
           AND cid NOT IN (SELECT cid FROM filed)
         ORDER BY stem ASC;
         """,
-        (TYPE_MOC,),
+        (DIR_ARCHIVE, TYPE_MOC),
     ).fetchall()
 
 
@@ -137,20 +145,21 @@ def raw_citers(conn: sqlite3.Connection, raw_rel_path: str) -> list[dict[str, An
 
 
 def moc_overview(conn: sqlite3.Connection, limit: int) -> dict[str, Any]:
-    """Every wiki MOC's link counts and the largest overlaps between MOCs (§5.1 `vault_graph`).
+    """Every MOC's link counts and the largest overlaps between MOCs (§5.1 `vault_graph`).
 
-    `outgoing` counts distinct resolved note targets, `incoming` distinct
-    linking notes. An overlap's `ratio` is shared targets over the smaller
-    MOC's target count, so a MOC wholly contained in another reads 1.0
-    whatever the sizes. Both lists are capped at `limit`, with totals.
+    MOCs are the set `entry_point_rows` lists: `type: moc` in any domain but
+    archive/. `outgoing` counts distinct resolved note targets, `incoming`
+    distinct linking notes. An overlap's `ratio` is shared targets over the
+    smaller MOC's target count, so a MOC wholly contained in another reads
+    1.0 whatever the sizes. Both lists are capped at `limit`, with totals.
     """
     mocs = conn.execute(
         """
         SELECT cid, title, trust_tier FROM notes
-        WHERE layer = 'wiki' AND type = ? AND parse_error IS NULL
+        WHERE layer != ? AND type = ? AND parse_error IS NULL
         ORDER BY cid ASC;
         """,
-        (TYPE_MOC,),
+        (DIR_ARCHIVE, TYPE_MOC),
     ).fetchall()
     targets: dict[str, set[str]] = {m["cid"]: set() for m in mocs}
     incoming: dict[str, int] = {m["cid"]: 0 for m in mocs}

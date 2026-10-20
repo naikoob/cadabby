@@ -765,6 +765,22 @@ class TestEightToolSurface(unittest.TestCase):
         one = next(m for m in graph["mocs"] if m["cid"] == "wiki/one-moc")
         self.assertEqual(one["outgoing"], 4)
 
+    def test_a_domain_moc_is_a_moc_and_an_archived_one_is_not(self):
+        """C82: `type: moc` counts in any domain but archive/, for the graph view and for filing."""
+        _note(self.root, "wiki/raft-consensus.md", "Leaf.")
+        _note(self.root, "wiki/stray-note.md", "Leaf.")
+        _note(self.root, "services/auth.md", "Auth.", type_="service")
+        _note(self.root, "services/services-moc.md", "[[raft-consensus]] [[services/auth]]", type_="moc")
+        _note(self.root, "archive/old-moc.md", "[[stray-note]]", type_="moc")
+
+        cids = {m["cid"] for m in self._ok("vault_graph", {"view": "mocs", "limit": 100})["mocs"]}
+        self.assertIn("services/services-moc", cids)
+        self.assertNotIn("archive/old-moc", cids)
+
+        unfiled = self._ok("vault_status", {})["queues"]["unfiled"]["items"]
+        self.assertNotIn("wiki/raft-consensus", unfiled)
+        self.assertIn("wiki/stray-note", unfiled)
+
     def test_graph_refuses_bad_view_target_combinations(self):
         for args in ({"view": "mocs", "target": "sqlite"}, {}, {"target": "raw/karpathy-llm-wiki-gist.md"}, {"view": "tree"}):
             with self.subTest(args=args):

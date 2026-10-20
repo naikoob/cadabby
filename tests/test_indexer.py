@@ -161,7 +161,7 @@ class TestUnfiledTracksTheGraph(IndexerFixture):
         self.assertNotIn("[[Stray]]", self._index())
 
     def test_a_domain_note_is_never_unfiled(self):
-        """Only wiki notes are reported: MOCs are a `wiki/` construct (§2.5).
+        """Only wiki notes are reported: domains carry their topology in folders (§2.5).
 
         Domains carry their own topology in folders and are not required to
         have MOCs at all, so reporting them would put a floor under the
@@ -186,6 +186,28 @@ class TestUnfiledTracksTheGraph(IndexerFixture):
         self._note("Hub-MOC", type_="moc", body="Filed by path: [Stray](Stray.md).")
         self._note("Stray")
         self.assertNotIn("[[Stray]]", self._index())
+
+    def test_a_domain_moc_files_the_wiki_notes_it_links(self):
+        """§10 C82. A `type: moc` is a MOC wherever it lives, so Raft is filed and Hub is an entry point."""
+        self._note("Raft")
+        self._note("services-moc", type_="moc", domain="services", body="See [[Raft]].")
+        md = self._index()
+        self.assertNotIn("| [[Raft]] |", md)
+        self.assertIn("| [[services/services-moc]] |", md)
+
+    def test_an_archived_moc_is_no_entry_point_and_files_nothing(self):
+        """§10 C82. A retired hub must not hide active work."""
+        self._note("Stray")
+        self._note("old-moc", type_="moc", domain="archive", body="See [[Stray]].")
+        md = self._index()
+        self.assertIn("| [[Stray]] |", md)
+        self.assertNotIn("old-moc", md)
+
+    def test_wiki_mocs_are_listed_before_domain_mocs(self):
+        self._note("zeta-moc", type_="moc")
+        self._note("alpha-moc", type_="moc", domain="services")
+        md = self._index()
+        self.assertLess(md.index("[[zeta-moc]]"), md.index("[[services/alpha-moc]]"))
 
 
 class TestDomainsGenerateNothing(IndexerFixture):
