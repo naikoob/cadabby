@@ -334,9 +334,10 @@ _validate_frontmatter_patch = validate_frontmatter_patch
 class UpdateNoteUseCase:
     """Driving use case for updating note frontmatter or sections non-destructively (§5.1, §8)."""
 
-    def __init__(self, storage: NoteStoragePort, ledger: LedgerPort) -> None:
+    def __init__(self, storage: NoteStoragePort, ledger: LedgerPort, vault: VaultLayoutPort | None = None) -> None:
         self.storage = storage
         self.ledger = ledger
+        self.vault = _default_layout(storage, vault)
 
     def execute(
         self,
@@ -352,6 +353,13 @@ class UpdateNoteUseCase:
         _validate_frontmatter_patch(frontmatter_patch)
 
         note = load_existing_note(self.storage, cid_or_path)
+        if frontmatter_patch and frontmatter_patch.get("type") is not None:
+            domain = path_to_layer(note.rel_path)
+            domain_def = self.vault.discover_domains().get(domain)
+            if domain_def and domain_def.allowed_types is not None and frontmatter_patch["type"] not in domain_def.allowed_types:
+                raise InvalidArgumentError(
+                    f"Invalid note type '{frontmatter_patch['type']}'. In domain '{domain}', allowed types are {domain_def.allowed_types}"
+                )
         before = (copy.deepcopy(note.frontmatter), note.body)
 
         if frontmatter_patch:
@@ -605,7 +613,7 @@ def update_note_result(
 ) -> WriteResult:
     """`update_note`, returning the structured result the MCP tool and `--json` report."""
     active_storage, active_ledger = _resolve_adapters(vault, storage, ledger)
-    uc = UpdateNoteUseCase(active_storage, active_ledger)
+    uc = UpdateNoteUseCase(active_storage, active_ledger, vault=vault)
     note = uc.execute(
         cid_or_path=cid_or_path,
         frontmatter_patch=frontmatter_patch,

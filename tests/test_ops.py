@@ -872,6 +872,40 @@ class TestOpsErgonomics(unittest.TestCase):
             InMemoryNoteStorage(template_rel="templates").save_note(note)
 
 
+class TestNamingAndAliasRules(unittest.TestCase):
+    """§5.1, §3.1. Rules enforced at the write tools, exercised through the use cases themselves."""
+
+    def _vault(self) -> tuple[InMemoryNoteStorage, InMemoryLedger]:
+        storage, ledger = InMemoryNoteStorage(), InMemoryLedger()
+        uc = ScaffoldNoteUseCase(storage, ledger)
+        for path in ("customers/acme/overview", "archive/initech/overview"):
+            uc.execute(title="Overview", type_="concept", description="d", path=path)
+        return storage, ledger
+
+    def test_an_archived_duplicate_does_not_make_a_name_ambiguous(self):
+        """§5.1, §10 C49: archive/ yields to an active note, as in link resolution; two archived still refuse."""
+        storage, ledger = self._vault()
+        note = UpdateNoteUseCase(storage, ledger).execute("overview", frontmatter_patch={"title": "Acme Overview"})
+        self.assertEqual(note.cid, "customers/acme/overview")
+        self.assertEqual(storage.get_note("archive/initech/overview").title, "Overview")
+
+        ScaffoldNoteUseCase(storage, ledger).execute(
+            title="Overview", type_="concept", description="d", path="archive/globex/overview"
+        )
+        storage.delete_note("customers/acme/overview")
+        with self.assertRaises(AmbiguousNoteError):
+            UpdateNoteUseCase(storage, ledger).execute("overview", frontmatter_patch={"title": "X"})
+
+    def test_aliases_must_be_single_line(self):
+        """§3.1, §10 C81: a newline, carriage return or tab in an alias is refused at write time."""
+        storage, ledger = InMemoryNoteStorage(), InMemoryLedger()
+        uc = ScaffoldNoteUseCase(storage, ledger)
+        for bad in ("high\nblood pressure", "HTN\r", "a\tb"):
+            with self.subTest(alias=bad), self.assertRaises(ValueError):
+                uc.execute(title="Hypertension", type_="concept", description="d", aliases=[bad])
+        self.assertEqual(list(storage.list_note_cids()), [])
+
+
 class TestScaffoldTakeover(unittest.TestCase):
     """§5.1, §10 C79/C80. A new note never changes what an existing link opens."""
 
@@ -983,7 +1017,7 @@ class TestUseCaseFacades(unittest.TestCase):
             description="Clinical blood pressure management",
             status="active",
             aliases=["HTN", "high blood pressure", "htn"],
-            frontmatter={"owner": "cardiology", "tier": "p1"},
+            frontmatter={"owner": "cardiology", "tier": "p1", "sample_size": 6263, "hr": 0.82},
             body="# Hypertension Protocol\n\nTarget < 130/80 mmHg.\n",
             cache=self.cache,
         )
@@ -993,11 +1027,19 @@ class TestUseCaseFacades(unittest.TestCase):
         self.assertEqual(fm["aliases"], ["HTN", "high blood pressure"])
         self.assertEqual(fm["owner"], "cardiology")
         self.assertEqual(fm["tier"], "p1")
+        self.assertEqual(fm["sample_size"], "6263")
+        self.assertEqual(fm["hr"], "0.82")
         self.assertEqual([r.cid for r in search_notes(self.vault, self.cache, query="HTN")], ["wiki/hypertension-protocol"])
+        [grounded] = ground_notes(self.vault, ["wiki/hypertension-protocol"], cache=self.cache)
+        self.assertEqual(grounded["source_hash"], res.source_hash)
 
         for bad_kwargs in (
             {"status": "bogus"},
             {"aliases": [""]},
+            {"aliases": ["bad\nalias"]},
+            {"frontmatter": {"cid": "forged/cid"}},
+            {"frontmatter": {"status": "bogus"}},
+            {"frontmatter": {"title": "   "}},
             {"frontmatter": {"verified": [{"by": "agent:x"}]}},
             {"frontmatter": {"generated": {"by": "agent:x"}}},
         ):

@@ -412,11 +412,24 @@ class TestLinkSpans(unittest.TestCase):
         self.assertEqual([l.target_stem for l in extract_markdown_note_links(body)], ["note.md"])
 
     def test_candidates_lists_every_note_a_name_could_mean(self):
-        idx = LinkTargetIndex(["wiki/SQLite", "customers/acme/README", "projects/apollo/README", "customers/acme/SQLite"])
+        idx = LinkTargetIndex(
+            ["wiki/SQLite", "customers/acme/README", "projects/apollo/README", "customers/acme/SQLite", "archive/initech/README"]
+        )
         self.assertEqual(idx.candidates("README"), ["customers/acme/README", "projects/apollo/README"])
         self.assertEqual(idx.candidates("acme/README"), ["customers/acme/README"])
+        self.assertEqual(idx.candidates("initech/README"), ["archive/initech/README"])
         self.assertEqual(idx.candidates("SQLite"), ["wiki/SQLite"])  # wiki-relative names are canonical (§4.4)
         self.assertEqual(idx.candidates("missing"), [])
+        # Retiring all but one active note leaves the remaining active note unambiguous
+        single_active = LinkTargetIndex(["customers/acme/overview", "archive/initech/overview"])
+        self.assertEqual(single_active.candidates("overview"), ["customers/acme/overview"])
+
+    def test_latex_math_spans_do_not_yield_wikilinks_while_currency_preserves_links(self):
+        body = (
+            "Over ring $\\mathbb{F}_p[[X]]$ and display $$R[[Y, Z]]$$ we link [[real-note]].\n"
+            "We tested $49/mo vs $99/mo and still extract [[pricing-experiments]].\n"
+        )
+        self.assertEqual([l.target_stem for l in extract_wikilinks(body)], ["real-note", "pricing-experiments"])
 
 
 class TestDottedEmbedsAreAttachments(unittest.TestCase):

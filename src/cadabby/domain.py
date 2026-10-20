@@ -7,11 +7,12 @@ Markdown text scanning (fences, headings, sections) lives in `markdown.py`.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from cadabby.constants import ACTOR_PATTERN, NOTE_STATUSES
+from cadabby.constants import ACTOR_PATTERN, NOTE_STATUSES, SCHEMA_KEY_ORDER
 from cadabby.errors import HumanAttestationRefusedError, InvalidArgumentError
 from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter, serialize_frontmatter
 from cadabby.markdown import replace_markdown_section
@@ -23,10 +24,24 @@ from cadabby.okf import canonicalize_aliases, compute_body_hash, derive_trust_ti
 # `human:*` attestation that vault_verify_note refuses, or erase the audit trail.
 ENGINE_OWNED_FIELDS: tuple[str, ...] = ("verified", "generated")
 _STRING_FIELDS: tuple[str, ...] = ("title", "description", "type", "status")
+_SCHEMA_KEYS: frozenset[str] = frozenset(SCHEMA_KEY_ORDER)
+
+
+def _coerce_custom_numbers(val: Any) -> Any:
+    """Coerce finite JSON int/float scalars in custom frontmatter fields to strings (§3.2, §5.1)."""
+    if isinstance(val, bool) or val is None or isinstance(val, str):
+        return val
+    if isinstance(val, int) or (isinstance(val, float) and math.isfinite(val)):
+        return str(val)
+    if isinstance(val, list):
+        return [_coerce_custom_numbers(item) for item in val]
+    if isinstance(val, dict):
+        return {k: _coerce_custom_numbers(v) for k, v in val.items()}
+    return val
 
 
 def validate_frontmatter_patch(patch: dict[str, Any] | None) -> None:
-    """Refuse a patch that touches engine-owned fields or gives a core field a non-string value (§3.4, §5.1)."""
+    """Refuse a patch that touches engine-owned fields or gives a core field an invalid value (§3.4, §5.1)."""
     if patch is None:
         return
     if not isinstance(patch, dict):
@@ -43,9 +58,16 @@ def validate_frontmatter_patch(patch: dict[str, Any] | None) -> None:
             f"{', '.join(owned)} {'is' if len(owned) == 1 else 'are'} engine-owned: attest with vault_verify_note "
             "(or cadabby verify), and never remove attestation history"
         )
+    if "cid" in patch:
+        raise InvalidArgumentError("'cid' is derived from the note path and cannot be set in frontmatter")
     for key in _STRING_FIELDS:
-        if patch.get(key) is not None and not isinstance(patch[key], str):
-            raise InvalidArgumentError(f"'{key}' must be a string")
+        if patch.get(key) is not None:
+            if not isinstance(patch[key], str):
+                raise InvalidArgumentError(f"'{key}' must be a string")
+            if not patch[key].strip():
+                raise InvalidArgumentError(f"'{key}' must not be empty")
+    if patch.get("status") is not None and patch["status"] not in NOTE_STATUSES:
+        raise InvalidArgumentError(f"Invalid status {patch['status']!r}. Must be one of {NOTE_STATUSES}")
     if patch.get("aliases") is not None:
         canonicalize_aliases(patch["aliases"])
 
@@ -129,7 +151,7 @@ class Note:
             if v is None:
                 self.frontmatter.pop(k, None)
             else:
-                self.frontmatter[k] = v
+                self.frontmatter[k] = v if k in _SCHEMA_KEYS else _coerce_custom_numbers(v)
 
     def replace_section(self, heading: str, content: str) -> None:
         """Replace section under ## heading or append if not present (code-fence safe)."""
@@ -241,7 +263,9 @@ class Note:
         clean_aliases = canonicalize_aliases(aliases) if aliases is not None else []
         validate_frontmatter_patch(extra_frontmatter)
         frontmatter: dict[str, Any] = {
-            k: v for k, v in (extra_frontmatter or {}).items() if v is not None
+            k: (v if k in _SCHEMA_KEYS else _coerce_custom_numbers(v))
+            for k, v in (extra_frontmatter or {}).items()
+            if v is not None
         }
         frontmatter.update({
             "type": type_,

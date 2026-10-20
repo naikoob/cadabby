@@ -36,7 +36,7 @@ from cadabby.graph import (
     extract_wikilinks,
     resolve_markdown_target,
 )
-from cadabby.okf import compute_body_hash, derive_trust_tier, utc_now_iso
+from cadabby.okf import canonical_tag, compute_body_hash, derive_trust_tier, utc_now_iso
 from cadabby.queries import DebtRow
 from cadabby.search import (
     SearchResult,
@@ -388,10 +388,10 @@ class VaultCache:
         or its FTS5 tables (§4.2); both retract old terms before changing a row.
         """
         conn = self.get_connection()
-        # Lowercased here, not only by the agent writer: a hand-written file may
-        # still say `ML` (§3.1 makes casing a warning), and the --tag predicate
-        # lowercases its probe on the assumption that stored tags are canonical.
-        tags_str = " ".join(str(t).lower() for t in (record.tags or []))
+        # Canonicalized here, not only by the agent writer: a hand-written file
+        # may still say `ML` or `b_tree` (§3.1 makes both a warning), and the
+        # --tag predicate canonicalizes its probe the same way (okf.canonical_tag).
+        tags_str = " ".join(canonical_tag(str(t)) for t in (record.tags or []))
         aliases_str = " ".join(
             str(a).strip() for a in (record.aliases or []) if isinstance(a, str) and str(a).strip()
         )

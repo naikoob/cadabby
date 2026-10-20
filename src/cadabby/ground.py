@@ -162,6 +162,7 @@ class GroundNotesUseCase:
             "type": note.type,
             "status": note.status,
             "trust_tier": note.trust_tier,
+            "source_hash": note.source_hash,
             "section": matched_section,
             "directives": domain_def.directives_markdown if domain_def is not None else "",
             "content": content_to_return,

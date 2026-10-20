@@ -396,6 +396,13 @@ def _wrong_kind(dest: Path, want: str) -> str | None:
             f"Conflict: {dest} is a file, but the Antigravity plugin must be a "
             f"directory. Point --path at a directory."
         )
+    if want == "dir" and (outer := enclosing_vault(dest)) is not None:
+        top = dest.relative_to(outer).parts[0]
+        if not top.startswith("."):
+            return (
+                f"Conflict: {dest} sits inside vault {outer} under '{top}/', which is scanned as a "
+                f"cognitive domain. Omit --path to use {outer / DIR_AGENTS / 'plugins' / 'cadabby'}."
+            )
     if want == "file" and dest.is_dir():
         return (
             f"Conflict: {dest} is a directory, but the Claude MCP configuration "

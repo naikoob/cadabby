@@ -109,8 +109,19 @@ def is_canonical_tag(tag: Any) -> bool:
     return tag == tag.lower() and bool(RE_TAG.match(tag))
 
 
+def canonical_tag(tag: str) -> str:
+    """One tag's canonical spelling: lowercase, underscore runs as '-', no edge '-' (§3.1, §3.2).
+
+    The single definition the writer, the cache's tag column, and the --tag
+    predicate all apply. When they differed -- the writer stored `b-tree`
+    while the predicate only lowercased its probe -- `tag: b_tree` found
+    nothing an agent had just tagged `b_tree`.
+    """
+    return re.sub(r"_+", "-", tag.lower()).strip("-")
+
+
 def canonicalize_tags(tags: Any) -> list[str]:
-    """Lowercase and de-duplicate tags, preserving first-seen order (§3.2).
+    """Canonicalize (`canonical_tag`) and de-duplicate tags, preserving first-seen order (§3.2).
 
     Raises:
         InvalidArgumentError: if a tag contains whitespace. Lowercasing cannot
@@ -129,7 +140,7 @@ def canonicalize_tags(tags: Any) -> list[str]:
                 f"Invalid tag '{tag}'. Tags must not contain whitespace; "
                 "use kebab-case (e.g. 'machine-learning')"
             )
-        normalized = tag.lower()
+        normalized = canonical_tag(tag)
         if normalized and normalized not in seen:
             seen.add(normalized)
             canonical.append(normalized)
@@ -140,7 +151,7 @@ def canonicalize_aliases(aliases: Any) -> list[str]:
     """Validate, trim, and case-insensitively deduplicate note aliases (§3.1, §3.2).
 
     Preserves first-seen casing (e.g. `['HTN', 'High Blood Pressure']`) while
-    rejecting non-list values, non-string items, and blank strings.
+    rejecting non-list values, non-string items, control characters, and blank strings.
     """
     if not isinstance(aliases, list):
         raise InvalidArgumentError(f"'aliases' must be a list of strings, got {type(aliases).__name__}")
@@ -150,6 +161,8 @@ def canonicalize_aliases(aliases: Any) -> list[str]:
     for alias in aliases:
         if not isinstance(alias, str):
             raise InvalidArgumentError(f"Invalid alias {alias!r}. Aliases must be strings")
+        if any(ch in alias for ch in ("\n", "\r", "\t")):
+            raise InvalidArgumentError(f"Invalid alias {alias!r}. Aliases must be single-line strings without tabs")
         trimmed = alias.strip()
         if not trimmed:
             raise InvalidArgumentError("Aliases must not be empty or whitespace-only")

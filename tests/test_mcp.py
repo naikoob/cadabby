@@ -1034,6 +1034,20 @@ class TestUncoveredPaths(unittest.TestCase):
         self.assertTrue(err_res["isError"])
         self.assertEqual(err_payload["error"]["code"], "HUMAN_ATTESTATION_REFUSED")
 
+        # Never tools, so never "retired": the message points at the real tool
+        # without inventing a history (vault_lint, actually retired, keeps its).
+        for guess, replacement in (
+            ("vault_get_graph", "vault_graph"),
+            ("vault_read_note", "vault_ground"),
+            ("vault_list_notes", "vault_search"),
+        ):
+            with self.subTest(guess=guess):
+                r_res, r_payload = self._call(guess, {})
+                self.assertTrue(r_res["isError"])
+                self.assertEqual(r_payload["error"]["code"], "UNKNOWN_TOOL")
+                self.assertIn(f"did you mean {replacement}?", r_payload["error"]["message"])
+                self.assertNotIn("retired", r_payload["error"]["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

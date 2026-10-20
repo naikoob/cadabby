@@ -13,6 +13,7 @@ from pathlib import Path
 
 from cadabby.cache import VaultCache, or_fallback_fts5_query, reset_cache_files, sanitize_fts5_query
 from cadabby.indexer import generate_index_markdown
+from cadabby.ops import scaffold_note
 from cadabby.vault import Vault, VaultConfigError
 from tests.helpers import copy_demo_vault, demo_vault, temp_dir
 
@@ -268,6 +269,26 @@ class TestVaultCache(unittest.TestCase):
         for probe in ("ML", "ml", "Ml"):
             with self.subTest(probe=probe):
                 self.assertEqual([r.cid for r in self.cache.search(tag=probe)], ["wiki/ml-note"])
+
+    def test_underscore_tags_match_in_either_spelling(self):
+        """§3.2, §10 C60: writer, tag column and --tag probe share one canonical form (okf.canonical_tag).
+
+        The writer stores `b_tree` as `b-tree`; a probe that only lowercased
+        found nothing an agent had just tagged `b_tree`.
+        """
+        scaffold_note(self.vault, "Agent Note", "concept", "d", path="wiki/agent-note", tags=["b_tree"])
+        (self.vault.wiki_dir / "hand-note.md").write_text(
+            "---\ntype: concept\ntitle: Hand\ndescription: d\nstatus: active\ntags:\n  - b_tree\n---\n# Hand\n",
+            "utf-8",
+        )
+        self.cache.scan()
+        stored = dict(self.cache.get_connection().execute(
+            "SELECT cid, tags FROM notes WHERE cid IN ('wiki/agent-note', 'wiki/hand-note');"
+        ).fetchall())
+        self.assertEqual(stored, {"wiki/agent-note": "b-tree", "wiki/hand-note": "b-tree"})
+        for probe in ("b_tree", "b-tree", "B_Tree", "b__tree"):
+            with self.subTest(probe=probe):
+                self.assertEqual(sorted(r.cid for r in self.cache.search(tag=probe)), ["wiki/agent-note", "wiki/hand-note"])
 
     def test_unparseable_note_keeps_its_name_and_links_stay_unresolved(self):
         """§4.4, §10 C60: a broken note's stem never falls through to another note with that stem."""
@@ -1278,6 +1299,17 @@ class TestCamelCaseAndAliasesSearch(unittest.TestCase):
             self.assertEqual(split_hits[0], "wiki/pod-troubleshooting")
             self.assertIn("wiki/container-restart", split_hits)
             self.assertTrue(cache.check_fts_integrity())
+
+            # Alphanumeric and short-acronym CamelCase splitting + stopword OR filtering
+            from cadabby.search import camelcase_fts5_query, extract_camelcase_subwords
+
+            subwords = set(extract_camelcase_subwords("FlashAttention3 FP8TensorCore SGLT2i SoAChunkAllocator").split())
+            self.assertLessEqual(
+                {"flash", "attention", "flashattention", "fp", "fp8", "tensor", "core", "tensorcore", "sglt", "sglt2", "soa", "soachunk", "chunk", "allocator"},
+                subwords,
+            )
+            self.assertEqual(camelcase_fts5_query("SoAChunkAllocator"), "soa chunk allocator")
+            self.assertEqual(or_fallback_fts5_query("change of control"), "change OR control")
 
             # Updating the note retracts old subwords cleanly
             note_camel.write_text(

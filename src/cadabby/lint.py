@@ -289,11 +289,11 @@ def _alias_findings(rel_path: str, note_aliases: Any) -> Iterator[LintFinding]:
         )
         return
     for alias in note_aliases:
-        if not isinstance(alias, str) or not alias.strip():
+        if not isinstance(alias, str) or not alias.strip() or any(ch in alias for ch in ("\n", "\r", "\t")):
             yield _error(
                 code="ENUM_INVALID",
                 rel_path=rel_path,
-                message=f"Invalid alias {alias!r}. Aliases must be non-empty strings",
+                message=f"Invalid alias {alias!r}. Aliases must be single-line non-empty strings",
             )
 
 

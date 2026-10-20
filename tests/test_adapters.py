@@ -442,7 +442,7 @@ class TestFileLedger(unittest.TestCase):
         from_mem = mem.get_note("wiki/TagParity")
         assert from_disk is not None and from_mem is not None
         self.assertEqual(from_mem.frontmatter, from_disk.frontmatter)
-        self.assertEqual(from_mem.tags, ["storage", "b_tree"])
+        self.assertEqual(from_mem.tags, ["storage", "b-tree"])
 
 
 class TestWriteContainment(unittest.TestCase):

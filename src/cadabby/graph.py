@@ -48,6 +48,8 @@ RE_URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:")
 # `[id]: path` (footnotes `[^1]:` excluded). Only `vault_move_note` reads them.
 RE_MD_IMAGE = re.compile(r"!" + _MD_LABEL + _MD_TARGET)
 RE_MD_REFDEF = re.compile(r"^[ ]{0,3}\[(?!\^)[^\]\n]+\]:[ \t]*(?:<([^>\n]+)>|(\S+))", re.MULTILINE)
+RE_BLOCK_MATH = re.compile(r"(?<!\\)\$\$.*?(?<!\\)\$\$", re.DOTALL)
+RE_INLINE_MATH = re.compile(r"(?<!\\)\$(?!\s)(?:[^$\n]*?(?<!\s))?\$(?![0-9$])")
 
 LINK_KIND_WIKI = "wiki"
 LINK_KIND_MARKDOWN = "markdown"
@@ -67,8 +69,12 @@ class ExtractedLink:
     kind: str = LINK_KIND_WIKI  # "wiki" for [[...]], "markdown" for [label](path.md)
 
 
+def _blank_preserving_newlines(match: re.Match[str]) -> str:
+    return re.sub(r"[^\n]", " ", match.group(0))
+
+
 def strip_code_spans(text: str) -> str:
-    """Blank fenced code and inline code so neither yields links or headings.
+    """Blank fenced code, inline code, and LaTeX math so none yields links.
 
     Length-preserving: every blanked character becomes a space, so an offset
     into the result is an offset into `text`. `iter_link_spans` depends on
@@ -83,7 +89,8 @@ def strip_code_spans(text: str) -> str:
         for open_, _, _, close in code_spans(line):
             chars[open_:close] = " " * (close - open_)
         out.append("".join(chars))
-    return "\n".join(out)
+    cleaned = RE_BLOCK_MATH.sub(_blank_preserving_newlines, "\n".join(out))
+    return RE_INLINE_MATH.sub(_blank_preserving_newlines, cleaned)
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,14 +345,19 @@ class LinkTargetIndex:
 
         An exact CID or `wiki/`-relative name is canonical (§4.4) and never
         ambiguous; otherwise every note whose path ends with the target, or
-        whose stem equals it, is a candidate. Write tools refuse more than one.
+        whose stem equals it, is a candidate. Active domain notes precede
+        `archive/` notes so retiring a note does not make the remaining active
+        note ambiguous. Write tools refuse more than one.
         """
         clean = normalize_rel(target_stem).removesuffix(".md")
         if clean in self._exact_map:
             return [self._exact_map[clean]]
         if "/" in clean:
-            return sorted(c for c in self.known_cids if c.endswith("/" + clean))
-        return sorted(c for c in self.known_cids if c.rsplit("/", 1)[-1] == clean)
+            matches = sorted(c for c in self.known_cids if c.endswith("/" + clean))
+        else:
+            matches = sorted(c for c in self.known_cids if c.rsplit("/", 1)[-1] == clean)
+        active = [c for c in matches if not c.startswith(f"{DIR_ARCHIVE}/")]
+        return active or matches
 
     def suggest(self, target_path: str) -> str | None:
         """Best-guess CID for a missed path, by its final stem (hints only, never resolution)."""

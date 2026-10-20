@@ -405,6 +405,14 @@ class TestInstaller(unittest.TestCase):
         claude_after = json.loads(claude_mcp.read_text("utf-8"))
         self.assertNotIn("cadabby", claude_after.get("mcpServers", {}))
 
+        # Refuses installing Antigravity plugin into a non-dot folder inside a vault
+        (vault / ".cadabby.json").write_text("{}", "utf-8")
+        bad_dest = vault / "antigravity_mcp_config.json"
+        ok_bad, msg_bad = install_antigravity(dest_path=bad_dest, vault_path=vault)
+        self.assertFalse(ok_bad)
+        self.assertIn("cognitive domain", msg_bad)
+        self.assertFalse(bad_dest.exists())
+
     def test_install_and_uninstall_claude_reject_non_dict_or_binary_configs(self):
         cfg = self.root / "bad-claude.json"
         for payload in (b"[1, 2, 3]", b'{"mcpServers": []}', b"\xff\xfe\x00\x00"):

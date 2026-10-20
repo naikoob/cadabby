@@ -223,8 +223,8 @@ _TOOL_SPECS: list[ToolSpec] = [
                 "frontmatter": {
                     "type": "object",
                     "description": (
-                        "Optional extra frontmatter fields (max 1 nesting level; engine-owned 'generated' and "
-                        "'verified' are refused)"
+                        "Optional extra frontmatter fields (max 1 nesting level; numeric scalars are stored "
+                        "as strings; engine-owned 'generated' and 'verified' are refused)"
                     ),
                 },
                 "body": {"type": "string", "description": "Initial markdown body"},
@@ -254,8 +254,8 @@ _TOOL_SPECS: list[ToolSpec] = [
                 "patch_frontmatter": {
                     "type": "object",
                     "description": (
-                        "Frontmatter fields to patch (max 1 nesting level; engine-owned 'generated' and "
-                        "'verified' are refused)"
+                        "Frontmatter fields to patch (max 1 nesting level; numeric scalars are stored "
+                        "as strings; engine-owned 'generated' and 'verified' are refused)"
                     ),
                 },
                 "edits": {
@@ -366,6 +366,14 @@ _PROPERTIES: dict[str, dict[str, Any]] = {t["name"]: t["inputSchema"].get("prope
 # AGENTS.md can correct itself, and the surface stays at eight tools (§5.1).
 _RETIRED_TOOLS: dict[str, str] = {
     "vault_lint": "vault_status with lint: true",
+}
+# Names agents guess that were never tools, mapped to the tool they mean. Kept
+# apart from _RETIRED_TOOLS so the error never claims a history that did not
+# happen: these get "did you mean", not "retired in 0.4.0".
+_LIKELY_GUESSES: dict[str, str] = {
+    "vault_get_graph": "vault_graph",
+    "vault_read_note": "vault_ground",
+    "vault_list_notes": "vault_search",
 }
 # Arguments removed from a tool, worded the same way: never aliases, only the
 # INVALID_ARGUMENT message, checked before the required-argument check so a
@@ -633,6 +641,8 @@ class McpServer:
             message = f"Unknown tool: {name}"
             if replacement := _RETIRED_TOOLS.get(name):
                 message += f" -- retired in 0.4.0; call {replacement} instead"
+            elif guess := _LIKELY_GUESSES.get(name):
+                message += f"; did you mean {guess}?"
             return _tool_error(name, UNKNOWN_TOOL, message, retryable=False)
 
         # Defense in depth: the server stamps its own client id regardless, but

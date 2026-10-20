@@ -12,6 +12,7 @@ from typing import Any
 
 from cadabby.constants import DEFAULT_LIMIT, DIR_RAW, FTS_COLUMN_WEIGHTS, FTS_FIELD_HIT_FLOOR
 from cadabby.errors import InvalidArgumentError
+from cadabby.okf import canonical_tag
 from cadabby.vault import path_to_layer
 
 
@@ -84,6 +85,36 @@ _FTS_TOKEN_RE = re.compile(r'"[^"]*"\*?|\S+')
 _CAMEL_WORD_RE = re.compile(r"[A-Za-z0-9]+")
 _CAMEL_LOWER_UPPER_RE = re.compile(r"([a-z0-9])([A-Z])")
 _CAMEL_ACRONYM_UPPER_RE = re.compile(r"([A-Z]+)([A-Z][a-z])")
+_CAMEL_ALPHA_DIGIT_RE = re.compile(r"([A-Za-z])([0-9])")
+_CAMEL_DIGIT_LOWER_RE = re.compile(r"([0-9])([a-z])")
+_OR_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
+        "in", "into", "is", "it", "of", "on", "or", "that", "the", "to",
+        "was", "with",
+    }
+)
+
+
+def _coalesce_short_acronyms(pieces: list[str]) -> list[str]:
+    """Merge 2-letter Capitalized + 1-letter Uppercase acronym pairs (`So` + `A` -> `SoA`)."""
+    out: list[str] = []
+    i = 0
+    while i < len(pieces):
+        if (
+            i + 1 < len(pieces)
+            and len(pieces[i]) == 2
+            and pieces[i][0].isupper()
+            and pieces[i][1].islower()
+            and len(pieces[i + 1]) == 1
+            and pieces[i + 1].isupper()
+        ):
+            out.append(pieces[i] + pieces[i + 1])
+            i += 2
+        else:
+            out.append(pieces[i])
+            i += 1
+    return out
 
 
 def _split_camelcase_parts(word: str) -> list[str]:
@@ -91,9 +122,14 @@ def _split_camelcase_parts(word: str) -> list[str]:
     if word.islower() or word.isupper() or word.isdigit():
         return []
     first_pass = _CAMEL_LOWER_UPPER_RE.sub(r"\1 \2", word).split()
-    parts: list[str] = []
+    alpha_parts: list[str] = []
     for piece in first_pass:
-        parts.extend(_CAMEL_ACRONYM_UPPER_RE.sub(r"\1 \2", piece).split())
+        alpha_parts.extend(_CAMEL_ACRONYM_UPPER_RE.sub(r"\1 \2", piece).split())
+    parts: list[str] = []
+    for piece in _coalesce_short_acronyms(alpha_parts):
+        sub = _CAMEL_ALPHA_DIGIT_RE.sub(r"\1 \2", piece)
+        sub = _CAMEL_DIGIT_LOWER_RE.sub(r"\1 \2", sub)
+        parts.extend(sub.split())
     return [p.lower() for p in parts] if len(parts) >= 2 else []
 
 
@@ -154,7 +190,8 @@ def or_fallback_fts5_query(clean_query: str) -> str | None:
     """Build an OR-joined FTS5 query to fill an implicit-AND search short of `limit` (§4.4).
 
     Returns None when the caller wrote explicit boolean operators (AND, OR, NOT)
-    or when the query has fewer than two distinct terms.
+    or when the query has fewer than two distinct terms. Common English stopwords
+    are dropped so an OR fallback does not match every note containing 'of' or 'the'.
     """
     tokens = _FTS_TOKEN_RE.findall(clean_query)
     if len(tokens) < 2 or any(t in ("AND", "OR", "NOT") for t in tokens):
@@ -168,7 +205,10 @@ def or_fallback_fts5_query(clean_query: str) -> str | None:
             distinct.append(token)
     if len(distinct) < 2:
         return None
-    return " OR ".join(distinct)
+    content = [t for t in distinct if t.casefold() not in _OR_STOPWORDS]
+    if not content:
+        return None
+    return " OR ".join(content)
 
 
 @dataclass
@@ -264,9 +304,9 @@ def _build_search_filters(
     if tag:
         # Exact, whole-tag containment against the space-joined column. This is
         # unambiguous only because tags may not contain whitespace (§3.1).
-        # Stored tags are canonically lowercase, so fold the probe to match.
+        # Stored tags are canonical (okf.canonical_tag), so the probe is too.
         where_clauses.append("(instr(' ' || n.tags || ' ', ' ' || :tag || ' ') > 0)")
-        params["tag"] = tag.lower()
+        params["tag"] = canonical_tag(tag)
 
     return where_clauses, params
 
