@@ -81,21 +81,94 @@ def sanitize_fts5_query(query: str) -> str:
 
 
 _FTS_TOKEN_RE = re.compile(r'"[^"]*"\*?|\S+')
+_CAMEL_WORD_RE = re.compile(r"[A-Za-z0-9]+")
+_CAMEL_LOWER_UPPER_RE = re.compile(r"([a-z0-9])([A-Z])")
+_CAMEL_ACRONYM_UPPER_RE = re.compile(r"([A-Z]+)([A-Z][a-z])")
+
+
+def _split_camelcase_parts(word: str) -> list[str]:
+    """Split a mixed-case alphanumeric word into its atomic lowercase subword parts."""
+    if word.islower() or word.isupper() or word.isdigit():
+        return []
+    first_pass = _CAMEL_LOWER_UPPER_RE.sub(r"\1 \2", word).split()
+    parts: list[str] = []
+    for piece in first_pass:
+        parts.extend(_CAMEL_ACRONYM_UPPER_RE.sub(r"\1 \2", piece).split())
+    return [p.lower() for p in parts] if len(parts) >= 2 else []
+
+
+def extract_camelcase_subwords(*texts: str | None) -> str:
+    """Extract lowercase CamelCase subwords and adjacent/prefix compounds for FTS5 (§4.2, §4.4).
+
+    `CrashLoopBackOff` yields atomic parts (`crash`, `loop`, `back`, `off`),
+    adjacent pairs (`crashloop`, `loopback`, `backoff`), and progressive
+    prefixes (`crashloopback`), plus any first-pass acronym splits (`SQLiteWAL` -> `sqlite`, `wal`).
+    """
+    seen: dict[str, None] = {}
+    for text in texts:
+        if not text:
+            continue
+        for word in _CAMEL_WORD_RE.findall(text):
+            if word.islower() or word.isupper() or word.isdigit():
+                continue
+            for piece in _CAMEL_LOWER_UPPER_RE.sub(r"\1 \2", word).split():
+                if piece.lower() != word.lower():
+                    seen[piece.lower()] = None
+            parts = _split_camelcase_parts(word)
+            for idx, part in enumerate(parts):
+                seen[part] = None
+                if idx + 1 < len(parts):
+                    seen[part + parts[idx + 1]] = None
+                if 1 < idx + 1 < len(parts):
+                    seen["".join(parts[: idx + 1])] = None
+    return " ".join(seen)
+
+
+def camelcase_fts5_query(clean_query: str) -> str | None:
+    """Expand unquoted CamelCase query tokens into space-joined subwords (§4.4).
+
+    A query for `CrashLoopBackOff` expands to `crash loop back off` (implicit
+    AND), matching notes that write the words separately without matching every
+    note that happens to contain `off` or `back` alone. Returns None when no
+    token splits or when the caller wrote explicit boolean operators.
+    """
+    tokens = _FTS_TOKEN_RE.findall(clean_query)
+    if not tokens or any(t in ("AND", "OR", "NOT") for t in tokens):
+        return None
+    expanded: list[str] = []
+    changed = False
+    for token in tokens:
+        if not token.startswith('"'):
+            parts = _split_camelcase_parts(token.rstrip("*"))
+            if parts:
+                expanded.extend(parts)
+                changed = True
+                continue
+        expanded.append(token)
+    if not changed:
+        return None
+    return " ".join(expanded)
 
 
 def or_fallback_fts5_query(clean_query: str) -> str | None:
-    """Build an OR-joined FTS5 query to fill an implicit-AND multi-term search short of `limit`.
+    """Build an OR-joined FTS5 query to fill an implicit-AND search short of `limit` (§4.4).
 
-    Returns None for empty/single-term queries, duplicate-only terms, or when the caller
-    wrote explicit boolean operators (AND, OR, NOT), preserving strict boolean semantics.
+    Returns None when the caller wrote explicit boolean operators (AND, OR, NOT)
+    or when the query has fewer than two distinct terms.
     """
     tokens = _FTS_TOKEN_RE.findall(clean_query)
     if len(tokens) < 2 or any(t in ("AND", "OR", "NOT") for t in tokens):
         return None
-    distinct = list(dict.fromkeys(t.casefold() for t in tokens))
+    distinct: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        folded = token.casefold()
+        if folded not in seen:
+            seen.add(folded)
+            distinct.append(token)
     if len(distinct) < 2:
         return None
-    return " OR ".join(tokens)
+    return " OR ".join(distinct)
 
 
 @dataclass
@@ -239,8 +312,9 @@ def _search_fts(
         f"(CASE WHEN instr(highlight({fts}, {idx}, char(1), char(2)), char(1)) > 0 THEN {w} ELSE 0.0 END)"
         for idx, w in enumerate(FTS_COLUMN_WEIGHTS)
     )
+    bm25_weights = ", ".join(str(w) for w in FTS_COLUMN_WEIGHTS)
     score_expr = f"""
-        ((-bm25({fts}, {FTS_COLUMN_WEIGHTS[0]}, {FTS_COLUMN_WEIGHTS[1]}, {FTS_COLUMN_WEIGHTS[2]}, {FTS_COLUMN_WEIGHTS[3]}))
+        ((-bm25({fts}, {bm25_weights}))
          + ({FTS_FIELD_HIT_FLOOR} * ({field_hits})))
         * {epistemic_mult_expr}
     """
@@ -262,12 +336,12 @@ def _search_fts(
     """
     try:
         rows = conn.execute(sql, fts_params).fetchall()
-        fallback_query = or_fallback_fts5_query(clean_query)
-        if fallback_query is not None and len(rows) < limit:
-            # All-terms matches keep the top slots; partial matches only fill what is left.
-            seen = {r["cid"] for r in rows}
-            extra = conn.execute(sql, {**fts_params, "query": fallback_query}).fetchall()
-            rows += [r for r in extra if r["cid"] not in seen][: limit - len(rows)]
+        for fill_query in (camelcase_fts5_query(clean_query), or_fallback_fts5_query(clean_query)):
+            if fill_query is not None and len(rows) < limit:
+                # Primary matches keep the top slots; CamelCase subword AND and multi-term OR fill what is left.
+                seen = {r["cid"] for r in rows}
+                extra = conn.execute(sql, {**fts_params, "query": fill_query}).fetchall()
+                rows += [r for r in extra if r["cid"] not in seen][: limit - len(rows)]
         return rows
     except sqlite3.OperationalError as e:
         # Only a MATCH expression FTS5 cannot parse means "no results". A

@@ -1392,6 +1392,40 @@ class TestSimulationRemediations(unittest.TestCase):
         self.assertNotIn("Type ", out)
         self.assertNotIn("human:", (vault / "wiki" / "a.md").read_text("utf-8"))
 
+    def test_cli_scaffold_status_aliases_and_frontmatter(self):
+        from cadabby.cli import build_parser
+        from cadabby.frontmatter import parse_frontmatter
+
+        vault = self.dir / "v"
+        self.assertEqual(self._init(vault)[0], 0)
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "--vault",
+                str(vault),
+                "scaffold",
+                "Kubernetes CrashLoopBackOff",
+                "--type",
+                "guide",
+                "--desc",
+                "Pod restart troubleshooting",
+                "--status",
+                "active",
+                "--aliases",
+                "K8s CrashLoop, CLBO",
+                "--frontmatter",
+                '{"severity": "sev2"}',
+                "--json",
+            ]
+        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(args.func(args), 0)
+        fm, _ = parse_frontmatter((vault / "wiki" / "kubernetes-crashloopbackoff.md").read_text("utf-8"))
+        self.assertEqual(fm["status"], "active")
+        self.assertEqual(fm["aliases"], ["K8s CrashLoop", "CLBO"])
+        self.assertEqual(fm["severity"], "sev2")
+
 
 if __name__ == "__main__":
     unittest.main()

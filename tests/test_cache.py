@@ -1171,6 +1171,87 @@ class TestScanIsOneTransaction(unittest.TestCase):
         self.assertLessEqual({"wiki/one", "wiki/two"}, healed)
 
 
+class TestCamelCaseAndAliasesSearch(unittest.TestCase):
+    """§3.1, §4.2, §4.4, §10 C81: CamelCase subword indexing/query expansion and frontmatter aliases."""
+
+    def setUp(self):
+        self.tmp = temp_dir(self)
+        self.vault_dir = self.tmp / "vault"
+        self.vault_dir.mkdir(parents=True, exist_ok=True)
+        self.vault = Vault(self.vault_dir)
+
+    def test_camelcase_subwords_and_query_splitting(self):
+        """§4.2, §4.4, §10 C81. CamelCase subwords match in both directions and retract cleanly."""
+        note_camel = self.vault.wiki_dir / "pod-troubleshooting.md"
+        note_camel.parent.mkdir(parents=True, exist_ok=True)
+        note_camel.write_text(
+            "---\ntype: guide\ntitle: Pod Troubleshooting\ndescription: Kubelet diagnostics\nstatus: active\n---\n"
+            "# Pod Troubleshooting\nPods stuck in CrashLoopBackOff or OOMKilled after deployment.\n",
+            "utf-8",
+        )
+        note_words = self.vault.wiki_dir / "container-restart.md"
+        note_words.write_text(
+            "---\ntype: concept\ntitle: Container Restart\ndescription: Backoff mechanics\nstatus: active\n---\n"
+            "# Container Restart\nThe runtime enters a crash loop back off delay.\n",
+            "utf-8",
+        )
+        with VaultCache(self.vault) as cache:
+            cache.scan()
+            for q in ("crashloop", "backoff", "crash loop", "oom", "killed"):
+                with self.subTest(query=q):
+                    cids = [r.cid for r in cache.search(q)]
+                    self.assertIn("wiki/pod-troubleshooting", cids)
+
+            # Query-time CamelCase splitting finds the note that wrote the subwords separately
+            split_hits = [r.cid for r in cache.search("CrashLoopBackOff")]
+            self.assertEqual(split_hits[0], "wiki/pod-troubleshooting")
+            self.assertIn("wiki/container-restart", split_hits)
+            self.assertTrue(cache.check_fts_integrity())
+
+            # Updating the note retracts old subwords cleanly
+            note_camel.write_text(
+                "---\ntype: guide\ntitle: Pod Troubleshooting\ndescription: Kubelet diagnostics\nstatus: active\n---\n"
+                "# Pod Troubleshooting\nHealthy pods.\n",
+                "utf-8",
+            )
+            cache.scan(force=True)
+            self.assertNotIn("wiki/pod-troubleshooting", [r.cid for r in cache.search("crashloop")])
+            self.assertTrue(cache.check_fts_integrity())
+
+    def test_aliases_indexed_in_fts_and_not_link_targets(self):
+        """§3.1, §4.2, §4.4, §10 C81. Frontmatter aliases are indexed in FTS5 but do not resolve wikilinks."""
+        htn = self.vault.wiki_dir / "hypertension.md"
+        htn.parent.mkdir(parents=True, exist_ok=True)
+        htn.write_text(
+            "---\ntype: concept\ntitle: Hypertension\ndescription: Elevated arterial pressure\nstatus: active\n"
+            "aliases:\n  - HTN\n  - high blood pressure\n---\n"
+            "# Hypertension\nChronic cardiovascular condition.\n",
+            "utf-8",
+        )
+        citer = self.vault.wiki_dir / "cardiology-notes.md"
+        citer.write_text(
+            "---\ntype: concept\ntitle: Cardiology Notes\ndescription: Clinical notes\nstatus: active\n---\n"
+            "# Cardiology Notes\nSee [[hypertension|HTN]] and dead [[HTN]].\n",
+            "utf-8",
+        )
+        with VaultCache(self.vault) as cache:
+            cache.scan()
+            htn_hits = [r.cid for r in cache.search("HTN")]
+            self.assertEqual(htn_hits[0], "wiki/hypertension", "alias match (2.5) outranks body mention (1.0)")
+            self.assertEqual([r.cid for r in cache.search("high blood pressure")], ["wiki/hypertension"])
+            # Piped [[hypertension|HTN]] resolves via stem; bare [[HTN]] does not resolve via alias
+            conn = cache.get_connection()
+            piped = conn.execute(
+                "SELECT target_cid FROM links WHERE source_cid = 'wiki/cardiology-notes' AND target_raw = 'hypertension';"
+            ).fetchone()
+            bare_alias = conn.execute(
+                "SELECT target_cid FROM links WHERE source_cid = 'wiki/cardiology-notes' AND target_raw = 'HTN';"
+            ).fetchone()
+            self.assertEqual(piped["target_cid"], "wiki/hypertension")
+            self.assertIsNone(bare_alias["target_cid"])
+            self.assertTrue(cache.check_fts_integrity())
+
+
 if __name__ == "__main__":
     unittest.main()
 

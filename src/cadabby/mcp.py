@@ -15,7 +15,7 @@ from typing import Any, Self, TypedDict
 
 from cadabby import __version__
 from cadabby.cache import VaultCache
-from cadabby.constants import DEFAULT_LIMIT, DIR_WIKI
+from cadabby.constants import DEFAULT_LIMIT, DIR_WIKI, NOTE_STATUSES
 from cadabby.errors import (
     HUMAN_ATTESTATION_REFUSED,
     INVALID_ARGUMENT,
@@ -207,7 +207,25 @@ _TOOL_SPECS: list[ToolSpec] = [
                     "description": "Relative path within domain or vault (wiki/ is flat; raw/ and dot folders refused)",
                 },
                 "tags": {"type": "array", "items": {"type": "string"}, "description": "Kebab-case tags"},
+                "aliases": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "description": "Search synonyms and acronyms indexed into FTS5",
+                },
                 "sources": {"type": "array", "items": {"type": "string"}, "description": "Cited raw/ paths"},
+                "status": {
+                    "type": "string",
+                    "enum": list(NOTE_STATUSES),
+                    "default": "draft",
+                    "description": "Initial lifecycle status (default: 'draft')",
+                },
+                "frontmatter": {
+                    "type": "object",
+                    "description": (
+                        "Optional extra frontmatter fields (max 1 nesting level; engine-owned 'generated' and "
+                        "'verified' are refused)"
+                    ),
+                },
                 "body": {"type": "string", "description": "Initial markdown body"},
                 "template": {
                     "type": "string",
@@ -509,6 +527,9 @@ class McpServer:
             domain=args.get("domain") or DIR_WIKI,
             path=args.get("path"),
             template=args.get("template"),
+            status=args.get("status") or "draft",
+            aliases=args.get("aliases"),
+            frontmatter=args.get("frontmatter"),
             cache=self.cache,
         )
         return _tool_ok(result.to_dict())

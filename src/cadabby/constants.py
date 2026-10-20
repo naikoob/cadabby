@@ -12,7 +12,8 @@ from __future__ import annotations
 # 6 backs each FTS table with a view of exactly the rows it indexes, so the
 # content-comparing integrity check can run at all (§4.2).
 # 7 stores tags lowercased whatever casing the file uses, so --tag matches (§4.2).
-SCHEMA_VERSION = 7
+# 8 adds `aliases` and `subwords` (CamelCase subword tokens) to `notes` and both FTS tables (§4.2, §4.4).
+SCHEMA_VERSION = 8
 
 # `.cadabby.json`'s "schema" (§2.6). Independent of SCHEMA_VERSION above: the
 # cache is disposable and rebuilds on mismatch, the config is user-owned and is
@@ -48,13 +49,14 @@ SCHEMA_KEY_ORDER = (
     "description",
     "status",
     "tags",
+    "aliases",
     "sources",
     "verified",
     "generated",
 )
 
 # Ranking weights & default multipliers
-FTS_COLUMN_WEIGHTS = (4.0, 2.0, 1.0, 1.5)  # (title, description, body, tags)
+FTS_COLUMN_WEIGHTS = (4.0, 2.0, 1.0, 1.5, 2.5, 1.0)  # (title, description, body, tags, aliases, subwords)
 FTS_FIELD_HIT_FLOOR = 0.05  # Per-column field-presence floor when FTS5 clamps IDF in small vaults (§4.4)
 
 DEFAULT_TRUST_MULTIPLIERS = {

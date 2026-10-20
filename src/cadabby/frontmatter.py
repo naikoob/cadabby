@@ -13,7 +13,7 @@ from cadabby.constants import SCHEMA_KEY_ORDER
 from cadabby.errors import CadabbyError
 from cadabby.errors import FRONTMATTER_UNPARSEABLE as _CODE_UNPARSEABLE
 from cadabby.errors import FRONTMATTER_UNSERIALIZABLE as _CODE_UNSERIALIZABLE
-from cadabby.okf import canonicalize_tags, split_lines
+from cadabby.okf import canonicalize_aliases, canonicalize_tags, split_lines
 
 RE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 RE_BARE_SAFE = re.compile(r"^[A-Za-z0-9._\-/]+$")
@@ -471,6 +471,15 @@ def _check_key(key: Any, where: str) -> str:
     return key
 
 
+def _canonicalize_frontmatter_lists(data: dict[str, Any]) -> dict[str, Any]:
+    """Canonicalize `tags` and `aliases` without mutating the caller's mapping (§3.1, §3.2)."""
+    if isinstance(data.get("tags"), list):
+        data = {**data, "tags": canonicalize_tags(data["tags"])}
+    if isinstance(data.get("aliases"), list):
+        data = {**data, "aliases": canonicalize_aliases(data["aliases"])}
+    return data
+
+
 def serialize_frontmatter(data: dict[str, Any], body: str = "", newline: str = "\n") -> str:
     """Canonicalizing frontmatter serializer conforming to §3.2.
 
@@ -495,10 +504,7 @@ def serialize_frontmatter(data: dict[str, Any], body: str = "", newline: str = "
     for k in data:
         _check_key(k, str(k))
 
-    # Canonicalize tags: lowercase, de-duplicate, reject whitespace (§3.1).
-    # Copied rather than mutated — callers hold the original dict.
-    if isinstance(data.get("tags"), list):
-        data = {**data, "tags": canonicalize_tags(data["tags"])}
+    data = _canonicalize_frontmatter_lists(data)
 
     # Sort keys: SCHEMA_KEY_ORDER first, then extra keys alphabetically
     ordered_keys = [k for k in SCHEMA_KEY_ORDER if k in data]

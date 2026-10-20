@@ -747,6 +747,24 @@ class TestMarkdownNoteLinks(unittest.TestCase):
         )
         self.assertIn("LINK_DEAD", [c for c, _ in self._codes_for("wiki/Blank.md")])
 
+    def test_gate1_validates_aliases_list(self):
+        """§3.1, §6.3 gate 1. `aliases` must be a list of non-empty strings when present."""
+        (self.vault_root / "wiki" / "BadAliases.md").write_text(
+            "---\ntype: concept\ntitle: Bad Aliases\ndescription: Desc\nstatus: active\naliases: not-a-list\n---\n\n[[Architecture]]\n",
+            "utf-8",
+        )
+        self.assertIn("ENUM_INVALID", [c for c, _ in self._codes_for("wiki/BadAliases.md")])
+        (self.vault_root / "wiki" / "EmptyAliasItem.md").write_text(
+            '---\ntype: concept\ntitle: Empty Alias\ndescription: Desc\nstatus: active\naliases:\n  - ""\n---\n\n[[Architecture]]\n',
+            "utf-8",
+        )
+        self.assertIn("ENUM_INVALID", [c for c, _ in self._codes_for("wiki/EmptyAliasItem.md")])
+        (self.vault_root / "wiki" / "GoodAliases.md").write_text(
+            "---\ntype: concept\ntitle: Good Aliases\ndescription: Desc\nstatus: active\naliases:\n  - HTN\n---\n\n[[Architecture]]\n",
+            "utf-8",
+        )
+        self.assertEqual(self._codes_for("wiki/GoodAliases.md"), [])
+
 
 class TestLintExitCodes(unittest.TestCase):
     """C4, T3: `cadabby lint` exits 1 on error findings in both output modes, 0 when clean."""

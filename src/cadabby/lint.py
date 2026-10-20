@@ -272,8 +272,29 @@ def _schema_findings(rel_path: str, fm: dict[str, Any], domain_def: DomainDefini
     if "status" not in missing and (not isinstance(fm["status"], str) or fm["status"] not in NOTE_STATUSES):
         yield _error(code="ENUM_INVALID", rel_path=rel_path, message=f"Invalid status '{fm['status']}'. Must be one of {NOTE_STATUSES}")
 
+    yield from _alias_findings(rel_path, fm.get("aliases"))
     yield from _tag_findings(rel_path, fm.get("tags"))
     yield from _timestamp_findings(rel_path, fm)
+
+
+def _alias_findings(rel_path: str, note_aliases: Any) -> Iterator[LintFinding]:
+    """Alias list validation (§3.1, §6.3): optional sequence of non-empty strings."""
+    if note_aliases is None:
+        return
+    if not isinstance(note_aliases, list):
+        yield _error(
+            code="ENUM_INVALID",
+            rel_path=rel_path,
+            message=f"'aliases' must be a sequence of non-empty strings, got {type(note_aliases).__name__}",
+        )
+        return
+    for alias in note_aliases:
+        if not isinstance(alias, str) or not alias.strip():
+            yield _error(
+                code="ENUM_INVALID",
+                rel_path=rel_path,
+                message=f"Invalid alias {alias!r}. Aliases must be non-empty strings",
+            )
 
 
 def _tag_findings(rel_path: str, note_tags: Any) -> Iterator[LintFinding]:

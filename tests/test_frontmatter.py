@@ -327,6 +327,29 @@ class TestTagGrammar(unittest.TestCase):
         self.assertFalse(matches("learning"))
 
 
+class TestAliasGrammar(unittest.TestCase):
+    """Enforcement of the §3.1 aliases list in the writer."""
+
+    def test_writer_canonicalizes_aliases_and_preserves_schema_order(self):
+        serialized = serialize_frontmatter(
+            {
+                "type": "concept",
+                "title": "Hypertension",
+                "description": "Elevated blood pressure",
+                "status": "active",
+                "aliases": [" HTN ", "high blood pressure", "htn"],
+                "tags": ["cardiology"],
+            },
+            "# Body\n",
+        )
+        reparsed, _ = parse_frontmatter(serialized)
+        self.assertEqual(reparsed["aliases"], ["HTN", "high blood pressure"])
+        self.assertLess(serialized.index("tags:"), serialized.index("aliases:"))
+        for bad_aliases in (["valid", "   "], ["valid", 42]):
+            with self.subTest(aliases=bad_aliases), self.assertRaises(ValueError):
+                serialize_frontmatter({"type": "concept", "aliases": bad_aliases}, "# Body\n")
+
+
 class TestWriterParserRoundTrip(unittest.TestCase):
     """C30: whatever the canonical writer emits, the parser reads back unchanged."""
 

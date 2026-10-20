@@ -987,6 +987,37 @@ class TestUncoveredPaths(unittest.TestCase):
             resp = self.server.dispatch_request({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
         self.assertEqual(resp["error"]["code"], -32603)
 
+    def test_mcp_scaffold_with_status_aliases_and_frontmatter(self):
+        res, payload = self._call(
+            "vault_scaffold_note",
+            {
+                "title": "Acme Renewal",
+                "type": "account",
+                "description": "FY27 renewal plan",
+                "domain": "customers",
+                "path": "customers/acme/renewal.md",
+                "status": "active",
+                "aliases": ["ACME-FY27", "Acme Corp Renewal"],
+                "frontmatter": {"arr": "$1.2M", "region": "NA"},
+                "body": "# Acme Renewal\n\nDetails.\n",
+            },
+        )
+        self.assertFalse(res["isError"], payload)
+        _, hits = self._call("vault_search", {"query": "ACME-FY27"})
+        self.assertEqual([h["cid"] for h in hits], ["customers/acme/renewal"])
+
+        err_res, err_payload = self._call(
+            "vault_scaffold_note",
+            {
+                "title": "Forged",
+                "type": "concept",
+                "description": "d",
+                "frontmatter": {"verified": [{"by": "human:owner"}]},
+            },
+        )
+        self.assertTrue(err_res["isError"])
+        self.assertEqual(err_payload["error"]["code"], "HUMAN_ATTESTATION_REFUSED")
+
 
 if __name__ == "__main__":
     unittest.main()

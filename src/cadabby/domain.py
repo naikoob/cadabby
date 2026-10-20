@@ -11,11 +11,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from cadabby.constants import ACTOR_PATTERN
+from cadabby.constants import ACTOR_PATTERN, NOTE_STATUSES
 from cadabby.errors import HumanAttestationRefusedError, InvalidArgumentError
 from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter, serialize_frontmatter
 from cadabby.markdown import replace_markdown_section
-from cadabby.okf import compute_body_hash, derive_trust_tier, is_valid_actor, utc_now_iso
+from cadabby.okf import canonicalize_aliases, compute_body_hash, derive_trust_tier, is_valid_actor, utc_now_iso
 
 
 # Written by the engine alone: `verified` only by vault_verify_note / cadabby
@@ -46,6 +46,8 @@ def validate_frontmatter_patch(patch: dict[str, Any] | None) -> None:
     for key in _STRING_FIELDS:
         if patch.get(key) is not None and not isinstance(patch[key], str):
             raise InvalidArgumentError(f"'{key}' must be a string")
+    if patch.get("aliases") is not None:
+        canonicalize_aliases(patch["aliases"])
 
 
 @dataclass
@@ -79,6 +81,11 @@ class Note:
     @property
     def status(self) -> str:
         return str(self.frontmatter.get("status", ""))
+
+    @property
+    def aliases(self) -> list[str]:
+        val = self.frontmatter.get("aliases")
+        return list(val) if isinstance(val, list) else []
 
     @property
     def tags(self) -> list[str]:
@@ -220,22 +227,34 @@ class Note:
         title: str,
         description: str,
         actor: str,
+        status: str = "draft",
+        aliases: list[str] | None = None,
         tags: list[str] | None = None,
         sources: list[str] | None = None,
+        extra_frontmatter: dict[str, Any] | None = None,
         body: str = "",
         at_iso: str | None = None,
     ) -> Note:
-        """A freshly scaffolded note: draft, unverified, attributed to `actor` (§3.1, §3.4)."""
+        """A freshly scaffolded note: unverified, attributed to `actor` (§3.1, §3.4)."""
+        if not isinstance(status, str) or status not in NOTE_STATUSES:
+            raise InvalidArgumentError(f"Invalid status {status!r}. Must be one of {NOTE_STATUSES}")
+        clean_aliases = canonicalize_aliases(aliases) if aliases is not None else []
+        validate_frontmatter_patch(extra_frontmatter)
         frontmatter: dict[str, Any] = {
+            k: v for k, v in (extra_frontmatter or {}).items() if v is not None
+        }
+        frontmatter.update({
             "type": type_,
             "title": title,
             "description": description,
-            "status": "draft",
+            "status": status,
             "tags": tags or [],
             "sources": sources or [],
             "verified": [],
             "generated": {"by": actor, "at": at_iso or utc_now_iso()},
-        }
+        })
+        if clean_aliases:
+            frontmatter["aliases"] = clean_aliases
         return cls(cid=cid, rel_path=rel_path, frontmatter=frontmatter, body=body.strip() or f"# {title}\n\n")
 
     @classmethod

@@ -22,7 +22,7 @@ The **librarian** grows the knowledge base from `raw/` while keeping provenance 
 - **Explicit requests for background notes**: When explicitly asked for a note from your own knowledge, write the whole body inside an Unverified Supplement callout, leave `sources:` empty, never verify it, and tell the user it is unsourced and ranks below grounded notes.
 - **Setting up before sources arrive**: When asked to "set up" a vault or topic before sources exist, scaffold only an MOC or domain hub with headings, open questions, and expected sources; concept notes wait for primary sources.
 - **Guarded Q&A stashing & synthesis completeness**: Save a Q&A answer as a note only if grounded in `raw/` or verified notes, leaving it `unverified` unless checked against primary files. For syntheses or study guides spanning verified and `unverified` notes, cover the full scope, mark unverified parts `[unverified]`, and leave the note `unverified`.
-- Follow `STYLE.md`. Scaffold into `wiki` by default (`moc`, `concept`, `entity`, `synthesis`, `comparison`, `guide`), or pass `domain`, an allowed `type`, and `path` for cognitive domains. Promote finished drafts by patching `status` to `active` (verifying never changes `status`).
+- Follow `STYLE.md`. Scaffold into `wiki` by default (`moc`, `concept`, `entity`, `synthesis`, `comparison`, `guide`), or pass `domain`, an allowed `type`, and `path` for cognitive domains. Pass `status: "active"`, `aliases` (acronyms, abbreviations, colloquial terms), and domain `frontmatter` directly on `vault_scaffold_note` when the initial note is complete, or promote finished drafts later by patching `status` to `active` (verifying never changes `status`).
 
 ## 3. Linking
 

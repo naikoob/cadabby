@@ -219,6 +219,9 @@ class ScaffoldNoteUseCase:
         domain: str = DIR_WIKI,
         path: str | None = None,
         template: str | None = None,
+        status: str = "draft",
+        aliases: list[str] | None = None,
+        frontmatter: dict[str, Any] | None = None,
     ) -> Note:
         if not type_ or not isinstance(type_, str) or not type_.strip():
             raise InvalidArgumentError("Note type must be a non-empty string")
@@ -261,6 +264,9 @@ class ScaffoldNoteUseCase:
             sources=sources,
             actor=actor,
             body=body,
+            status=status,
+            aliases=aliases,
+            extra_frontmatter=frontmatter,
         )
         self.storage.save_note(note)
         self.ledger.append(f"Scaffolded {rel_path}", actor=actor)
@@ -509,6 +515,9 @@ def scaffold_note(
     domain: str = DIR_WIKI,
     path: str | None = None,
     template: str | None = None,
+    status: str = "draft",
+    aliases: list[str] | None = None,
+    frontmatter: dict[str, Any] | None = None,
     storage: NoteStoragePort | None = None,
     ledger: LedgerPort | None = None,
     cache: IndexCachePort | None = None,
@@ -516,7 +525,8 @@ def scaffold_note(
     """Scaffold a new note in the directory matching its type or custom path."""
     result = scaffold_note_result(
         vault, title, type_, description, tags=tags, sources=sources, body=body, actor=actor,
-        domain=domain, path=path, template=template, storage=storage, ledger=ledger, cache=cache,
+        domain=domain, path=path, template=template, status=status, aliases=aliases,
+        frontmatter=frontmatter, storage=storage, ledger=ledger, cache=cache,
     )
     return vault.abs_path(result.rel_path)
 
@@ -533,6 +543,9 @@ def scaffold_note_result(
     domain: str = DIR_WIKI,
     path: str | None = None,
     template: str | None = None,
+    status: str = "draft",
+    aliases: list[str] | None = None,
+    frontmatter: dict[str, Any] | None = None,
     storage: NoteStoragePort | None = None,
     ledger: LedgerPort | None = None,
     cache: IndexCachePort | None = None,
@@ -551,6 +564,9 @@ def scaffold_note_result(
         domain=domain,
         path=path,
         template=template,
+        status=status,
+        aliases=aliases,
+        frontmatter=frontmatter,
     )
     return WriteResult.of(note, _refresh(cache))
 

@@ -42,6 +42,7 @@ from cadabby.search import (
     SearchResult,
     _fts_table,
     execute_search,
+    extract_camelcase_subwords,
     or_fallback_fts5_query,
     sanitize_fts5_query,
 )
@@ -80,6 +81,7 @@ class NoteRecord:
     frontmatter_json: str | None = None
     parse_error: str | None = None
     tags: list[str] | None = None
+    aliases: list[str] | None = None
 
 
 # Every `notes` column upsert_note() writes besides `rel_path`, the row key.
@@ -100,6 +102,8 @@ _NOTE_COLUMNS = (
     "frontmatter_json",
     "parse_error",
     "tags",
+    "aliases",
+    "subwords",
     "body",
 )
 _UPDATE_NOTE_SQL = f"UPDATE notes SET {', '.join(f'{c} = ?' for c in _NOTE_COLUMNS)} WHERE id = ?;"
@@ -268,6 +272,8 @@ class VaultCache:
                 frontmatter_json TEXT,
                 parse_error  TEXT,
                 tags         TEXT NOT NULL DEFAULT '',
+                aliases      TEXT NOT NULL DEFAULT '',
+                subwords     TEXT NOT NULL DEFAULT '',
                 body         TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_notes_layer_type ON notes(layer, type);
@@ -305,14 +311,14 @@ class VaultCache:
             -- other index, so only the structural check was usable -- and it
             -- passes on a stale index (§4.2).
             CREATE VIEW IF NOT EXISTS notes_fts_content AS
-                SELECT id, title, description, body, tags FROM notes
+                SELECT id, title, description, body, tags, aliases, subwords FROM notes
                 WHERE layer != 'raw' AND parse_error IS NULL;
             CREATE VIEW IF NOT EXISTS raw_fts_content AS
-                SELECT id, title, description, body, tags FROM notes
+                SELECT id, title, description, body, tags, aliases, subwords FROM notes
                 WHERE layer = 'raw' AND parse_error IS NULL;
 
             CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
-                title, description, body, tags,
+                title, description, body, tags, aliases, subwords,
                 content = 'notes_fts_content',
                 content_rowid = 'id',
                 tokenize = 'porter unicode61'
@@ -327,7 +333,7 @@ class VaultCache:
             -- the corpora apart is what makes each set of statistics describe the
             -- documents it actually ranks.
             CREATE VIRTUAL TABLE IF NOT EXISTS raw_fts USING fts5(
-                title, description, body, tags,
+                title, description, body, tags, aliases, subwords,
                 content = 'raw_fts_content',
                 content_rowid = 'id',
                 tokenize = 'porter unicode61'
@@ -362,9 +368,17 @@ class VaultCache:
             return
         fts = _fts_table(row["layer"])
         conn.execute(
-            f"INSERT INTO {fts}({fts}, rowid, title, description, body, tags) "
-            "VALUES('delete', ?, ?, ?, ?, ?);",
-            (row["id"], row["title"] or "", row["description"] or "", row["body"] or "", row["tags"] or ""),
+            f"INSERT INTO {fts}({fts}, rowid, title, description, body, tags, aliases, subwords) "
+            "VALUES('delete', ?, ?, ?, ?, ?, ?, ?);",
+            (
+                row["id"],
+                row["title"] or "",
+                row["description"] or "",
+                row["body"] or "",
+                row["tags"] or "",
+                row["aliases"] or "",
+                row["subwords"] or "",
+            ),
         )
 
     def upsert_note(self, record: NoteRecord) -> int:
@@ -378,6 +392,14 @@ class VaultCache:
         # still say `ML` (§3.1 makes casing a warning), and the --tag predicate
         # lowercases its probe on the assumption that stored tags are canonical.
         tags_str = " ".join(str(t).lower() for t in (record.tags or []))
+        aliases_str = " ".join(
+            str(a).strip() for a in (record.aliases or []) if isinstance(a, str) and str(a).strip()
+        )
+        subwords_str = (
+            extract_camelcase_subwords(record.title, record.description, aliases_str, record.body)
+            if record.parse_error is None
+            else ""
+        )
         layer = path_to_layer(record.rel_path)
         # Positionally matched to _NOTE_COLUMNS.
         values = (
@@ -397,11 +419,13 @@ class VaultCache:
             record.frontmatter_json,
             record.parse_error,
             tags_str,
+            aliases_str,
+            subwords_str,
             record.body,
         )
 
         existing = conn.execute(
-            "SELECT id, layer, parse_error, title, description, body, tags FROM notes WHERE rel_path = ?;",
+            "SELECT id, layer, parse_error, title, description, body, tags, aliases, subwords FROM notes WHERE rel_path = ?;",
             (record.rel_path,),
         ).fetchone()
 
@@ -424,9 +448,17 @@ class VaultCache:
         # title alone, which is what makes `raw/paper.pdf` findable by name.
         if record.parse_error is None:
             conn.execute(
-                f"INSERT INTO {_fts_table(layer)}(rowid, title, description, body, tags) "
-                "VALUES (?, ?, ?, ?, ?);",
-                (row_id, record.title or "", record.description or "", record.body, tags_str),
+                f"INSERT INTO {_fts_table(layer)}(rowid, title, description, body, tags, aliases, subwords) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?);",
+                (
+                    row_id,
+                    record.title or "",
+                    record.description or "",
+                    record.body,
+                    tags_str,
+                    aliases_str,
+                    subwords_str,
+                ),
             )
 
         return row_id
@@ -438,7 +470,7 @@ class VaultCache:
         """
         conn = self.get_connection()
         row = conn.execute(
-            "SELECT id, cid, layer, parse_error, title, description, body, tags FROM notes WHERE rel_path = ?;",
+            "SELECT id, cid, layer, parse_error, title, description, body, tags, aliases, subwords FROM notes WHERE rel_path = ?;",
             (rel_path,),
         ).fetchone()
         if row is None:
@@ -585,6 +617,7 @@ class VaultCache:
 
         b_hash = compute_body_hash(body)
         tags = fm.get("tags")
+        aliases = fm.get("aliases")
         sources = fm.get("sources")
 
         def text(key: str) -> str | None:
@@ -609,6 +642,7 @@ class VaultCache:
                 body_hash=b_hash,
                 frontmatter_json=json.dumps(fm),
                 tags=tags if isinstance(tags, list) else None,
+                aliases=aliases if isinstance(aliases, list) else None,
             )
         )
         self._replace_edges(cid, body, sources if isinstance(sources, list) else [], template_rel)

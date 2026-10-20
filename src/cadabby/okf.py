@@ -136,6 +136,30 @@ def canonicalize_tags(tags: Any) -> list[str]:
     return canonical
 
 
+def canonicalize_aliases(aliases: Any) -> list[str]:
+    """Validate, trim, and case-insensitively deduplicate note aliases (§3.1, §3.2).
+
+    Preserves first-seen casing (e.g. `['HTN', 'High Blood Pressure']`) while
+    rejecting non-list values, non-string items, and blank strings.
+    """
+    if not isinstance(aliases, list):
+        raise InvalidArgumentError(f"'aliases' must be a list of strings, got {type(aliases).__name__}")
+
+    canonical: list[str] = []
+    seen: set[str] = set()
+    for alias in aliases:
+        if not isinstance(alias, str):
+            raise InvalidArgumentError(f"Invalid alias {alias!r}. Aliases must be strings")
+        trimmed = alias.strip()
+        if not trimmed:
+            raise InvalidArgumentError("Aliases must not be empty or whitespace-only")
+        folded = trimmed.casefold()
+        if folded not in seen:
+            seen.add(folded)
+            canonical.append(trimmed)
+    return canonical
+
+
 def is_valid_timestamp(ts: Any) -> bool:
     """Return True if ts is a real RFC 3339 UTC instant.
 

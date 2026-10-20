@@ -17,7 +17,7 @@ from typing import Any
 from cadabby.adapters.disk_storage import DiskNoteStorage
 from cadabby.audit import run_vault_audit
 from cadabby.cache import VaultCache, reset_cache_files
-from cadabby.constants import DEFAULT_LIMIT, DIR_RAW, DIR_WIKI, NOTE_TYPES, TRUST_TIERS
+from cadabby.constants import DEFAULT_LIMIT, DIR_RAW, DIR_WIKI, NOTE_STATUSES, NOTE_TYPES, TRUST_TIERS
 from cadabby.errors import (
     EXIT_ENVIRONMENT,
     EXIT_FINDINGS,
@@ -227,7 +227,15 @@ def cmd_scaffold(args: argparse.Namespace) -> int:
     """Scaffold a new note."""
     vault = resolve_cli_vault(args)
     tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else None
+    raw_aliases = getattr(args, "aliases", None)
+    aliases = [a.strip() for a in raw_aliases.split(",") if a.strip()] if raw_aliases else None
     sources = [s.strip() for s in args.sources.split(",") if s.strip()] if args.sources else None
+    raw_fm = getattr(args, "frontmatter", None)
+    frontmatter = (
+        _parse_json_flag(raw_fm, "--frontmatter", dict, "object")
+        if raw_fm
+        else None
+    )
 
     with VaultCache(vault) as cache:
         result = scaffold_note_result(
@@ -242,6 +250,9 @@ def cmd_scaffold(args: argparse.Namespace) -> int:
             domain=getattr(args, "domain", DIR_WIKI),
             path=getattr(args, "path", None),
             template=getattr(args, "template", None),
+            status=getattr(args, "status", None) or "draft",
+            aliases=aliases,
+            frontmatter=frontmatter,
             cache=cache,
         )
     return _report_write(args, result.to_dict(), f"Scaffolded note: {result.rel_path}")
@@ -808,7 +819,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--path", help="Custom relative path within domain or vault; ending in '/' names a folder (stem from the title)"
     )
     p_scaffold.add_argument("--tags", help="Comma-separated tags")
+    p_scaffold.add_argument("--aliases", help="Comma-separated search aliases and acronyms")
     p_scaffold.add_argument("--sources", help="Comma-separated raw sources")
+    p_scaffold.add_argument(
+        "--status",
+        choices=NOTE_STATUSES,
+        default="draft",
+        help="Initial note lifecycle status (default: draft)",
+    )
+    p_scaffold.add_argument(
+        "--frontmatter",
+        help="JSON extra frontmatter fields (never `verified` or `generated`)",
+    )
     p_scaffold.add_argument("--body", help="Initial note body (Markdown); exclusive with --template")
     p_scaffold.add_argument("--json", action="store_true", help="Output the result as JSON (the MCP payload)")
     p_scaffold.add_argument(

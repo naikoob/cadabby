@@ -972,6 +972,44 @@ class TestUseCaseFacades(unittest.TestCase):
         self.assertEqual(report["total_notes"], self.notes_before + 1)
         self.assertIn("wiki/quokka-facade", report["queues"]["unfiled"]["items"])
 
+    def test_scaffold_accepts_status_aliases_and_frontmatter(self):
+        """§3.1, §5.1, §5.3, §10 C81. Scaffold accepts status, aliases, and custom frontmatter in one call."""
+        from cadabby.ops import scaffold_note_result
+
+        res = scaffold_note_result(
+            self.vault,
+            title="Hypertension Protocol",
+            type_="guide",
+            description="Clinical blood pressure management",
+            status="active",
+            aliases=["HTN", "high blood pressure", "htn"],
+            frontmatter={"owner": "cardiology", "tier": "p1"},
+            body="# Hypertension Protocol\n\nTarget < 130/80 mmHg.\n",
+            cache=self.cache,
+        )
+        self.assertEqual(res.cid, "wiki/hypertension-protocol")
+        fm, _ = parse_frontmatter((self.vault.root / res.rel_path).read_text("utf-8"))
+        self.assertEqual(fm["status"], "active")
+        self.assertEqual(fm["aliases"], ["HTN", "high blood pressure"])
+        self.assertEqual(fm["owner"], "cardiology")
+        self.assertEqual(fm["tier"], "p1")
+        self.assertEqual([r.cid for r in search_notes(self.vault, self.cache, query="HTN")], ["wiki/hypertension-protocol"])
+
+        for bad_kwargs in (
+            {"status": "bogus"},
+            {"aliases": [""]},
+            {"frontmatter": {"verified": [{"by": "agent:x"}]}},
+            {"frontmatter": {"generated": {"by": "agent:x"}}},
+        ):
+            with self.subTest(bad=bad_kwargs), self.assertRaises(ValueError):
+                scaffold_note_result(
+                    self.vault,
+                    title="Rejected Note",
+                    type_="concept",
+                    description="Should fail",
+                    **bad_kwargs,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
