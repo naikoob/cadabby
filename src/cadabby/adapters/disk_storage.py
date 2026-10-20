@@ -28,10 +28,13 @@ class DiskNoteStorage(NoteStoragePort):
         rel_path = cid_to_path(cid_or_path)
         if self.vault.note_path_violation(rel_path):
             return None  # e.g. index.md or raw/: a file, but never a note (§2.1)
-        target = self.vault.abs_path(rel_path)
-        if not target.is_relative_to(self.vault.root) or not target.is_file():
+        # The same read rule as the scan's walk (§8): a folder symlinked in is
+        # read under its in-vault name, a single file linking out is not. Before,
+        # a note in `docs -> ~/notes` was searchable but NOT_FOUND here.
+        lexical = self.vault.root / rel_path
+        if not self.vault.note_read_allowed(lexical) or not lexical.is_file():
             return None
-        return rel_path, target
+        return rel_path, lexical.resolve()
 
     def get_note(self, cid_or_path: str) -> Note | None:
         resolved = self._resolve_existing_file(cid_or_path)

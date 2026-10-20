@@ -652,7 +652,34 @@ class Vault:
                     # AGENTS.md is the domain's own manifest, not a note in it.
                     if not f.endswith(".md") or f.startswith(".") or f == FILE_AGENTS:
                         continue
-                    yield Path(root) / f, domain_name, domain_def
+                    path = Path(root) / f
+                    # A regular file can only land outside the vault through a
+                    # folder link note_read_allowed accepts, so only links pay
+                    # for the resolve().
+                    if path.is_symlink() and not self.note_read_allowed(path):
+                        continue
+                    yield path, domain_name, domain_def
+
+    def note_read_allowed(self, lexical: Path) -> bool:
+        """Whether a note file named in-vault may be read: it resolves inside the vault or its own domain folder (§8).
+
+        A folder symlinked in (`docs -> ~/notes`) is the user's choice and is
+        read under its in-vault name. A single file linking out
+        (`wiki/x.md -> /etc/passwd`) is not a note this vault holds: indexing
+        it put the outside file's text into search snippets while no tool
+        could open it. This mirrors iter_raw_files for raw/, and is the one
+        answer shared by the scan walk and the storage adapter.
+        """
+        real = lexical.resolve()
+        if real.is_relative_to(self.root):
+            return True
+        try:
+            rel = lexical.relative_to(self.root)
+        except ValueError:
+            return False
+        if len(rel.parts) < 2:
+            return False  # a file at the vault root has no domain folder to stay inside
+        return real.is_relative_to((self.root / rel.parts[0]).resolve())
 
     def iter_raw_files(self) -> Iterator[Path]:
         """Every file under raw/, in a stable order (§2.4).

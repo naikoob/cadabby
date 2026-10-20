@@ -558,6 +558,97 @@ class TestWriteContainment(unittest.TestCase):
         self.assertVictimUntouched()
 
 
+class TestReadContainment(unittest.TestCase):
+    """C72: a note file linking out of the vault is not read; folders linked in are (§8).
+
+    Before, `wiki/x.md -> /etc/passwd` was indexed, so search snippets showed
+    the outside file while ground could not open it; and a note in a folder
+    you symlinked in was searchable but NOT_FOUND. One predicate now answers
+    for the scan walk and the storage adapter alike.
+    """
+
+    NOTE = "---\ntype: concept\ntitle: T\ndescription: d\nstatus: active\n---\n# T\n\ngiraffe\n"
+
+    def setUp(self):
+        self.tmp = temp_dir(self)
+        base = self.tmp.resolve()
+        self.outside = base / "outside"
+        self.outside.mkdir()
+        self.secret = self.outside / "creds.txt"
+        self.secret.write_text("zebra secret token\n", "utf-8")
+        self.root = base / "vault"
+        self.vault = create_test_vault(self.root, subdirs=("wiki", "raw"))
+        self.storage = DiskNoteStorage(self.vault)
+
+    def _search(self, query: str) -> list[str]:
+        from cadabby.ops import search_notes
+
+        with VaultCache(self.vault) as cache:
+            return [r.cid for r in search_notes(self.vault, cache, query=query)]
+
+    def _indexed(self) -> set[str]:
+        with VaultCache(self.vault) as cache:
+            cache.scan()
+            return {r["cid"] for r in cache.get_connection().execute("SELECT cid FROM notes;")}
+
+    def test_a_note_file_linked_outside_is_not_indexed(self):
+        (self.root / "wiki" / "leak.md").symlink_to(self.secret)
+        self.assertEqual(self._search("zebra"), [])
+        self.assertNotIn("wiki/leak", self._indexed())
+        self.assertNotIn("wiki/leak", self.storage.list_note_cids())
+        self.assertIsNone(self.storage.get_note("wiki/leak"))
+        from cadabby.lint import run_vault_lint
+
+        self.assertFalse([f for f in run_vault_lint(self.vault) if "leak" in f.cid])
+
+    def test_a_link_out_is_dropped_on_rescan(self):
+        """A vault scanned before the link appeared loses the row and its FTS terms (§4.2)."""
+        link = self.root / "wiki" / "leak.md"
+        link.write_text(self.NOTE.replace("giraffe", "zebra"), "utf-8")
+        self.assertEqual(self._search("zebra"), ["wiki/leak"])
+        link.unlink()
+        link.symlink_to(self.secret)
+        self.assertEqual(self._search("zebra"), [])
+        with VaultCache(self.vault) as cache:
+            cache.scan()
+            hits = cache.get_connection().execute("SELECT COUNT(*) FROM notes_fts WHERE notes_fts MATCH 'zebra';")
+            self.assertEqual(hits.fetchone()[0], 0)
+
+    def test_a_note_file_linked_inside_the_vault_is_still_read(self):
+        (self.root / "wiki" / "real.md").write_text(self.NOTE, "utf-8")
+        (self.root / "wiki" / "alias.md").symlink_to("real.md")
+        self.assertIsNotNone(self.storage.get_note("wiki/alias"))
+        self.assertIn("wiki/real", self._search("giraffe"))
+
+    def test_a_folder_linked_in_is_read_but_a_link_out_of_it_is_not(self):
+        notes = self.outside / "notes"
+        notes.mkdir()
+        (notes / "a.md").write_text(self.NOTE, "utf-8")
+        (notes / "b.md").symlink_to(self.secret)  # leaves the linked folder
+        (self.root / "docs").symlink_to(notes, target_is_directory=True)
+        indexed = self._indexed()
+        self.assertIn("docs/a", indexed)
+        self.assertNotIn("docs/b", indexed)
+        self.assertEqual(self._search("zebra"), [])
+
+    def test_a_note_in_a_folder_linked_in_can_be_grounded_but_not_written(self):
+        """Reads follow your own folder links (D2); writes through them stay refused (C72)."""
+        from cadabby.errors import VaultEscapeError
+        from cadabby.ops import ground_notes, update_note
+
+        notes = self.outside / "notes"
+        notes.mkdir()
+        (notes / "a.md").write_text(self.NOTE, "utf-8")
+        (self.root / "docs").symlink_to(notes, target_is_directory=True)
+
+        [entry] = ground_notes(self.vault, ["docs/a"])
+        self.assertEqual(entry["cid"], "docs/a")
+        self.assertIn("giraffe", entry["content"])
+        with self.assertRaises(VaultEscapeError):
+            update_note(self.vault, "docs/a", frontmatter_patch={"description": "x"}, actor="agent:test")
+        self.assertIn("giraffe", (notes / "a.md").read_text("utf-8"))
+
+
 class TestLedgerLines(unittest.TestCase):
     """C72: a ledger entry is one line with a valid actor, in both ledgers."""
 
