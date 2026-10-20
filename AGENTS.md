@@ -2,7 +2,7 @@
 
 Cadabby is a zero-dependency, local-first engine (CLI + MCP server) for LLM Wiki vaults with OKF epistemic trust tiers.
 
-[`SPECIFICATION.md`](SPECIFICATION.md) (v0.5.2) is normative: where code and spec disagree, the spec wins, or both change
+[`SPECIFICATION.md`](SPECIFICATION.md) (v0.5.3) is normative: where code and spec disagree, the spec wins, or both change
 together with their acceptance tests. Don't read the whole spec. §0 maps each section to the question it answers and
 shows how to extract one, and every `§` reference in this repo resolves to a real heading.
 
