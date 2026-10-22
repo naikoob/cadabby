@@ -358,7 +358,7 @@ def cmd_move(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _confirm_human_attestation(vault: Vault, cid: str, actor: str) -> tuple[bool, str | None]:
+def _confirm_human_attestation(vault: Vault, cid: str, actor: str, method: str) -> tuple[bool, str | None]:
     """Ask the person at the keyboard to type back a one-time token (§3.5).
 
     The TTY check alone is satisfied by any pseudo-terminal, which is exactly
@@ -383,6 +383,10 @@ def _confirm_human_attestation(vault: Vault, cid: str, actor: str) -> tuple[bool
     print(f"  cid:  {note.cid}")
     print(f"  body: {shown}")
     print(f"  as:   {actor}")
+    # What an agent would be refused is still a person's to vouch for (§3.4,
+    # §3.5), but they should know they are signing text marked unattested.
+    if why := note.machine_attestation_refusal(method):
+        print(f"  warning: {why}; you are vouching for it yourself")
     try:
         answer = input(f"Type {token} to sign, anything else to abort: ")
     except EOFError:
@@ -413,7 +417,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
                 f"Cannot sign as OS user {login!r}: no letter or digit of it fits the actor grammar (§3.4)"
             )
         actor = f"human:{name}"
-        confirmed, reviewed_hash = _confirm_human_attestation(vault, args.cid, actor)
+        confirmed, reviewed_hash = _confirm_human_attestation(vault, args.cid, actor, args.method or "manual-review")
         if not confirmed:
             raise InvalidArgumentError("Aborted: confirmation token did not match; nothing was written")
         is_human = True

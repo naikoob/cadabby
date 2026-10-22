@@ -339,3 +339,56 @@ class TestNoteAggregateInvariants(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMachineAttestationGuard(unittest.TestCase):
+    """C84: a machine attestation may not contradict the note it signs (§3.4).
+
+    The librarian skill said so for releases; the engine stamped anyway, so a
+    verifier sweeping `agent_payable` debt re-confirmed unattested text.
+    """
+
+    CALLOUT = "> [!WARNING] Unverified Supplement (not attested in raw/)\n> Extrapolated to 1M tokens.\n"
+
+    def _note(self, body: str, *, sources: bool = True) -> Note:
+        src = "sources:\n  - raw/paper.md\n" if sources else ""
+        text = f"---\ntype: concept\ntitle: N\ndescription: d\nstatus: active\n{src}---\n# N\n\n{body}"
+        return Note.from_raw("wiki/n", "wiki/n.md", text)
+
+    def test_a_supplement_callout_refuses_every_machine_method(self):
+        from cadabby.errors import VerificationRefusedError, classify
+
+        for actor in ("agent:verifier", "process:ci"):
+            for method in ("source-crosscheck", "automated-check", "synthetic-test"):
+                with self.subTest(actor=actor, method=method):
+                    note = self._note("Grounded claim.\n\n" + self.CALLOUT)
+                    with self.assertRaises(VerificationRefusedError) as ctx:
+                        note.add_attestation(actor=actor, method=method)
+                    self.assertIn("line 5", str(ctx.exception))
+                    self.assertEqual(classify(ctx.exception).code, "VERIFICATION_REFUSED")
+                    self.assertFalse(classify(ctx.exception).retryable)
+                    self.assertEqual(note.trust_tier, "unverified")
+        for variant in ("> [!warning]- unverified supplement", ">[!WARNING]+ Unverified Supplement: guess"):
+            with self.subTest(variant=variant), self.assertRaises(VerificationRefusedError):
+                self._note(variant + "\n").add_attestation(actor="agent:a")
+        # A person may vouch for anything (§3.5).
+        _, tier, _ = self._note(self.CALLOUT).add_attestation(actor="human:owner")
+        self.assertEqual(tier, "human-reviewed")
+
+    def test_a_fenced_or_unquoted_callout_is_not_a_callout(self):
+        documented = "How to fence a guess:\n\n````markdown\n" + self.CALLOUT + "````\n"
+        prose = "Write `[!WARNING] Unverified Supplement` callouts for guesses.\n"
+        for body in (documented, prose):
+            with self.subTest(body=body[:20]):
+                _, tier, _ = self._note(body).add_attestation(actor="agent:a", method="source-crosscheck")
+                self.assertEqual(tier, "machine-confirmed")
+
+    def test_source_crosscheck_needs_sources(self):
+        from cadabby.errors import VerificationRefusedError
+
+        with self.assertRaises(VerificationRefusedError) as ctx:
+            self._note("Claim.\n", sources=False).add_attestation(actor="agent:a", method="source-crosscheck")
+        self.assertIn("sources:", str(ctx.exception))
+        # A CI test of an unsourced runbook claims no source check.
+        _, tier, _ = self._note("Claim.\n", sources=False).add_attestation(actor="process:ci", method="synthetic-test")
+        self.assertEqual(tier, "machine-confirmed")

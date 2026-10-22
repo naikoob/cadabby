@@ -13,10 +13,17 @@ from pathlib import Path
 from typing import Any
 
 from cadabby.constants import ACTOR_PATTERN, NOTE_STATUSES, SCHEMA_KEY_ORDER
-from cadabby.errors import HumanAttestationRefusedError, InvalidArgumentError
+from cadabby.errors import HumanAttestationRefusedError, InvalidArgumentError, VerificationRefusedError
 from cadabby.frontmatter import FrontmatterParseError, parse_frontmatter, serialize_frontmatter
-from cadabby.markdown import replace_markdown_section
-from cadabby.okf import canonicalize_aliases, compute_body_hash, derive_trust_tier, is_valid_actor, utc_now_iso
+from cadabby.markdown import replace_markdown_section, unverified_supplement_lines
+from cadabby.okf import (
+    canonicalize_aliases,
+    compute_body_hash,
+    derive_trust_tier,
+    is_actor_human,
+    is_valid_actor,
+    utc_now_iso,
+)
 
 
 # Written by the engine alone: `verified` only by vault_verify_note / cadabby
@@ -183,6 +190,23 @@ class Note:
             )
         self.body = self.body.replace(old, new, 1)
 
+    def machine_attestation_refusal(self, method: str) -> str | None:
+        """Why an agent or process may not attest this note, or None (§3.4).
+
+        Two contradictions the engine can see: the body fences text as
+        unattested (an Unverified Supplement callout, under any method, since
+        the MCP default `automated-check` would otherwise walk past it), and
+        `source-crosscheck` claimed for a note that cites no source. Other
+        methods on an unsourced note (a CI test of a runbook) are legitimate.
+        `cadabby verify --human` shows the same reason as a warning.
+        """
+        if lines := unverified_supplement_lines(self.body):
+            where = ", ".join(str(n) for n in lines)
+            return f"the body has {len(lines)} Unverified Supplement callout(s) (body line {where})"
+        if method == "source-crosscheck" and not self.frontmatter.get("sources"):
+            return "method 'source-crosscheck' claims a check against sources, but `sources:` is empty"
+        return None
+
     def add_attestation(
         self,
         actor: str,
@@ -196,6 +220,14 @@ class Note:
         """
         if not is_valid_actor(actor):
             raise InvalidArgumentError(f"Invalid actor format '{actor}'. Must match {ACTOR_PATTERN}")
+        # Before the dedupe below, so the answer does not depend on whether a
+        # matching entry already exists. Humans may vouch for anything (§3.5).
+        if not is_actor_human(actor) and (why := self.machine_attestation_refusal(method)):
+            raise VerificationRefusedError(
+                f"Refusing {actor} on {self.cid}: {why}; a machine attestation would contradict the note. "
+                f"Leave it unverified, ground the claim in raw/ first, or ask a person to run "
+                f"`cadabby verify {self.cid} --human`."
+            )
 
         current_hash = self.body_hash
         verified_list = self.frontmatter.get("verified")

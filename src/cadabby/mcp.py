@@ -289,7 +289,9 @@ _TOOL_SPECS: list[ToolSpec] = [
         "name": "vault_verify_note",
         "description": (
             "Appends a verification entry stamped by: agent:<client_id>, at: now, and of: the current body "
-            "hash. Writing human:* over MCP is refused; a human signs with `cadabby verify <cid> --human`."
+            "hash. Writing human:* over MCP is refused; a human signs with `cadabby verify <cid> --human`. "
+            "Refused (VERIFICATION_REFUSED) when the body has an Unverified Supplement callout, or for method "
+            "'source-crosscheck' when sources: is empty: leave such a note unverified."
         ),
         "inputSchema": {
             "type": "object",

@@ -44,6 +44,13 @@ INTERNAL = "INTERNAL"
 # claiming human review (§3.4).
 HUMAN_ATTESTATION_REFUSED = "HUMAN_ATTESTATION_REFUSED"
 
+# Also distinct from INVALID_ARGUMENT, for the same reason: retrying with
+# another `method` label is exactly the move this refusal must not invite. A
+# machine attestation would contradict the note (an Unverified Supplement
+# callout, or source-crosscheck with no sources); the fix is to leave it
+# unverified or to ground the claim (§3.4).
+VERIFICATION_REFUSED = "VERIFICATION_REFUSED"
+
 
 @dataclass(frozen=True)
 class ErrorInfo:
@@ -107,6 +114,17 @@ class HumanAttestationRefusedError(CadabbyError):
     """
 
     code = HUMAN_ATTESTATION_REFUSED
+
+
+class VerificationRefusedError(CadabbyError):
+    """A machine attestation would contradict the note it signs (§3.4).
+
+    Raised by the Note aggregate, so disk and in-memory storage refuse alike:
+    the body carries an Unverified Supplement callout, or `source-crosscheck`
+    was claimed for a note with no `sources:`. Humans are never refused.
+    """
+
+    code = VERIFICATION_REFUSED
 
 
 class VaultEscapeError(CadabbyError, PermissionError):
@@ -187,6 +205,7 @@ ALL_CODES: frozenset[str] = frozenset(
         UNKNOWN_TOOL,
         INTERNAL,
         HUMAN_ATTESTATION_REFUSED,
+        VERIFICATION_REFUSED,
     }
 )
 
@@ -243,6 +262,7 @@ _EXIT_BY_CODE: dict[str, int] = {
     PERMISSION_DENIED: EXIT_ENVIRONMENT,
     UNKNOWN_TOOL: EXIT_USAGE,
     HUMAN_ATTESTATION_REFUSED: EXIT_ENVIRONMENT,
+    VERIFICATION_REFUSED: EXIT_ENVIRONMENT,
     IO_ERROR: EXIT_UNEXPECTED,
     INTERNAL: EXIT_UNEXPECTED,
 }

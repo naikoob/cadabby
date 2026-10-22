@@ -43,6 +43,25 @@ def iter_fence_states(lines: Iterable[str]) -> Iterator[tuple[str, bool]]:
             yield line, True
 
 
+# The callout the librarian fences unattested text in (§3.4):
+# `> [!WARNING] Unverified Supplement (not attested in raw/)`. Obsidian's fold
+# markers (`[!WARNING]-`) and casing drift still count.
+_RE_UNVERIFIED_SUPPLEMENT = re.compile(r"^ {0,3}>\s*\[!warning\][+-]?\s+unverified supplement\b", re.IGNORECASE)
+
+
+def unverified_supplement_lines(body: str) -> list[int]:
+    """1-based body lines that open an Unverified Supplement callout, outside code fences (§3.4).
+
+    A note documenting the convention inside a fence is not itself unattested,
+    so the one fence model (`iter_fence_states`) decides what is prose.
+    """
+    return [
+        number
+        for number, (line, fenced) in enumerate(iter_fence_states(body.splitlines()), start=1)
+        if not fenced and _RE_UNVERIFIED_SUPPLEMENT.match(line)
+    ]
+
+
 def code_spans(line: str) -> list[tuple[int, int, int, int]]:
     """Inline code spans on one line: `(open, content_start, content_end, close)` offsets.
 

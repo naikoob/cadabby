@@ -787,6 +787,18 @@ class TestEightToolSurface(unittest.TestCase):
                 self.assertEqual(self._call("vault_graph", args)["code"], "INVALID_ARGUMENT")
         self.assertEqual(self._call("vault_graph", {"target": "no-such-note"})["code"], "NOT_FOUND")
 
+    # -- C84: verify guard -------------------------------------------------
+
+    def test_mcp_verify_refusal_is_categorical(self):
+        _note(self.root, "wiki/guessed.md", "> [!WARNING] Unverified Supplement (not attested in raw/)\n> A guess.")
+        before = (self.root / "wiki" / "guessed.md").read_bytes()
+        for args in ({"cid": "guessed"}, {"cid": "guessed", "method": "source-crosscheck"}):
+            with self.subTest(args=args):
+                err = self._call("vault_verify_note", args)
+                self.assertEqual((err["code"], err["retryable"]), ("VERIFICATION_REFUSED", False))
+                self.assertIn("cadabby verify", err["message"])
+        self.assertEqual((self.root / "wiki" / "guessed.md").read_bytes(), before)
+
     # -- C70: retired arguments ---------------------------------------------
 
     def test_retired_arguments_name_their_replacement(self):

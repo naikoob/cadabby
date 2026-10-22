@@ -296,6 +296,24 @@ class TestCli(unittest.TestCase):
         self.assertIn("wiki/sqlite", out)
         self.assertIn("'human:", out)
 
+    def test_human_verify_warns_but_signs_a_supplemented_note(self):
+        """C84: what an agent is refused, a person may still vouch for -- knowingly (§3.4, §3.5)."""
+        vault_root = copy_demo_vault(self.dir / "supplement-vault")
+        note = vault_root / "wiki" / "sqlite.md"
+        note.write_text(
+            note.read_text("utf-8") + "\n> [!WARNING] Unverified Supplement (not attested in raw/)\n> A guess.\n",
+            "utf-8",
+        )
+        agent_args = DummyArgs(vault=str(vault_root), cid="wiki/sqlite", human=False, agent="verifier", method=None)
+        with self.assertRaises(Exception) as ctx:
+            self._run_verify_on_tty(agent_args, answer="")
+        self.assertEqual(getattr(ctx.exception, "code", None), "VERIFICATION_REFUSED")
+
+        code, out = self._run_verify_on_tty(self._verify_args(vault_root, human=True), answer="ab12")
+        self.assertEqual(code, 0)
+        self.assertIn("warning: the body has 1 Unverified Supplement callout", out)
+        self.assertIn("'human-reviewed'", out)
+
     def test_human_verify_wrong_token_writes_nothing(self):
         vault_root = copy_demo_vault(self.dir / "wrong-token-vault")
         note = vault_root / "wiki" / "sqlite.md"

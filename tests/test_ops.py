@@ -1089,3 +1089,30 @@ class TestUseCaseFacades(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRefusedVerificationIsANoOp(unittest.TestCase):
+    """C84 on disk: a refused attestation leaves the note's bytes and the ledger alone (§3.4)."""
+
+    def test_a_refused_verify_writes_nothing(self):
+        from cadabby.errors import VerificationRefusedError
+        from cadabby.ops import verify_note
+        from tests.helpers import copy_demo_vault, note_text, temp_dir, write_note
+
+        root = copy_demo_vault(temp_dir(self) / "demo-vault")
+        vault = Vault(root)
+        path = write_note(
+            root,
+            "wiki/guessed.md",
+            note_text(
+                "Guessed",
+                extra=["sources:", "  - raw/karpathy-llm-wiki-gist.md"],
+                body="# Guessed\n\n> [!WARNING] Unverified Supplement (not attested in raw/)\n> A guess.\n",
+            ),
+        )
+        before = path.read_bytes()
+        log_before = vault.log_path.read_bytes() if vault.log_path.exists() else b""
+        with self.assertRaises(VerificationRefusedError):
+            verify_note(vault, "wiki/guessed", actor="agent:verifier", method="source-crosscheck")
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(vault.log_path.read_bytes() if vault.log_path.exists() else b"", log_before)
