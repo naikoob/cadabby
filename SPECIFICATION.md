@@ -1,6 +1,6 @@
 # Cadabby: Technical Specification
 
-**Version:** 0.5.4  
+**Version:** 0.5.5  
 **Status:** Approved Architecture (Multi-Domain Extended)  
 **Author:** Pair programmed with Antigravity  
 **Target Runtime:** CPython >= 3.11, standard library only
@@ -894,7 +894,7 @@ cadabby/assets/plugins/cadabby/
 
 **Capabilities.** The `cadabby-wiki` skill injects high-level wiki operations into context without consuming prompt tokens up front. The root agent delegates reading, drafting, and cross-linking to **librarian**, and cache maintenance, diagnostics, and linting to **technician**. Slash commands `/ingest`, `/vault-status`, and `/vault-lint` are available in the chat UI.
 
-> **Verified Architecture (v0.5.4).** The manifest layout conforms to the single-definition invariant (§7.1): entry-point progressive disclosure skill at `skills/cadabby-wiki/SKILL.md` and thin subagent manifests in `agents/` delegating runbook execution directly to `.agents/skills/<persona>/SKILL.md` in the active vault. `cadabby init` scaffolds this plugin directly into `.agents/plugins/cadabby/` to guarantee zero-configuration, vault-scoped MCP auto-mount for Antigravity, symmetric with `.mcp.json` for Claude Code.
+> **Verified Architecture (v0.5.5).** The manifest layout conforms to the single-definition invariant (§7.1): entry-point progressive disclosure skill at `skills/cadabby-wiki/SKILL.md` and thin subagent manifests in `agents/` delegating runbook execution directly to `.agents/skills/<persona>/SKILL.md` in the active vault. `cadabby init` scaffolds this plugin directly into `.agents/plugins/cadabby/` to guarantee zero-configuration, vault-scoped MCP auto-mount for Antigravity, symmetric with `.mcp.json` for Claude Code.
 
 ### 7.3. Claude Code Integration
 
@@ -1165,7 +1165,7 @@ That phrasing is a rule, not a style. A criterion that restates its requirement 
 
 A note on scope: the five-phase build order that used to open this section was removed at 0.3.1. It described the order in which already-shipped code was written, nothing checked it, and it was the one part of this document that could rot undetectably. Git history has it.
 
-### Criteria for 0.5.4
+### Criteria for 0.5.5
 
 * **C1.** Deleting `.cadabby/` and re-running any command reproduces byte-identical search results across all cognitive domains.
 * **C2.** Editing a verified note's body downgrades it to `stale-verified` on the next scan, and `status` counts it as verification debt.
