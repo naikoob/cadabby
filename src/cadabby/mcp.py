@@ -5,13 +5,14 @@ Conforms strictly to Cadabby Technical Specification §5.1, §5.2.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import re
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from types import TracebackType
-from typing import Any, Self, TypedDict
+from typing import Any, ClassVar, Self, TypedDict
 
 from cadabby import __version__
 from cadabby.cache import VaultCache
@@ -189,7 +190,10 @@ _TOOL_SPECS: list[ToolSpec] = [
                     "minLength": 1,
                     "description": "Note (CID, path, stem, or wikilink); required for 'neighborhood', refused for 'mocs'",
                 },
-                "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "default": DEFAULT_LIMIT, "description": "Max entries per list"},
+                "limit": {
+                    "type": "integer", "minimum": 1, "maximum": MAX_LIMIT,
+                    "default": DEFAULT_LIMIT, "description": "Max entries per list",
+                },
             },
         },
     },
@@ -291,7 +295,9 @@ _TOOL_SPECS: list[ToolSpec] = [
             "Appends a verification entry stamped by: agent:<client_id>, at: now, and of: the current body "
             "hash. Writing human:* over MCP is refused; a human signs with `cadabby verify <cid> --human`. "
             "Refused (VERIFICATION_REFUSED) when the body has an Unverified Supplement callout, or for method "
-            "'source-crosscheck' when sources: is empty: leave such a note unverified."
+            "'source-crosscheck' when sources: is empty: leave such a note unverified. Method defaults to "
+            "'source-crosscheck', so a call that names no method is refused on a note citing no source; pass "
+            "a method explicitly to attest something other than a check against sources."
         ),
         "inputSchema": {
             "type": "object",
@@ -299,7 +305,7 @@ _TOOL_SPECS: list[ToolSpec] = [
                 "cid": {"type": "string", "description": "Note CID, stem, or relative path"},
                 "method": {
                     "type": "string",
-                    "default": "automated-check",
+                    "default": "source-crosscheck",
                     "description": "Verification method label (e.g. 'source-crosscheck')",
                 },
             },
@@ -411,10 +417,11 @@ def _schema_violation(name: str, value: Any, schema: dict[str, Any]) -> str | No
     code runs -- never an INTERNAL from deep inside, never written to disk.
     """
     expected = schema.get("type")
-    if expected is not None:
-        # bool is an int subclass in Python, and never a JSON integer.
-        if not isinstance(value, _JSON_TYPES[expected]) or (expected in ("integer", "number") and isinstance(value, bool)):
-            return f"'{name}' must be {'an' if expected[0] in 'aeiou' else 'a'} {expected}"
+    # bool is an int subclass in Python, and never a JSON integer.
+    if expected is not None and (
+        not isinstance(value, _JSON_TYPES[expected]) or (expected in ("integer", "number") and isinstance(value, bool))
+    ):
+        return f"'{name}' must be {'an' if expected[0] in 'aeiou' else 'a'} {expected}"
     if "enum" in schema and value not in schema["enum"]:
         return f"'{name}' must be one of {schema['enum']}"
     if "minimum" in schema and value < schema["minimum"]:
@@ -473,10 +480,8 @@ class McpServer:
 
     def __del__(self) -> None:
         # Finalizers must not raise; stray stderr tracebacks confuse MCP harnesses.
-        try:
+        with contextlib.suppress(Exception):
             self.close()
-        except Exception:  # noqa: BLE001
-            pass
 
     def handle_initialize(self, params: dict[str, Any]) -> dict[str, Any]:
         """Negotiate capabilities and identify client."""
@@ -563,7 +568,7 @@ class McpServer:
             vault=self.vault,
             cid_or_path=args["cid"],
             actor=self.client_id,
-            method=args.get("method") or "automated-check",
+            method=args.get("method") or "source-crosscheck",
             is_human_authorized=False,
             cache=self.cache,
         )
@@ -597,7 +602,9 @@ class McpServer:
             )
         )
 
-    _TOOL_HANDLERS = {
+    # ClassVar: the eight-entry dispatch table is shared, never per-instance
+    # state, and §5.1 fixes its size (see `test_mcp_tool_count_is_eight`).
+    _TOOL_HANDLERS: ClassVar[dict[str, Callable[..., dict[str, Any]]]] = {
         "vault_search": _tool_search,
         "vault_ground": _tool_ground,
         "vault_scaffold_note": _tool_scaffold_note,
@@ -763,7 +770,10 @@ class McpServer:
             return None
         req_id = req["id"]
         if isinstance(req_id, bool) or not isinstance(req_id, (str, int)):
-            return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request: 'id' must be a string or an integer"}}
+            return {
+                "jsonrpc": "2.0", "id": None,
+                "error": {"code": -32600, "message": "Invalid Request: 'id' must be a string or an integer"},
+            }
 
         method = req.get("method")
         params = req.get("params")

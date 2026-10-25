@@ -799,6 +799,38 @@ class TestEightToolSurface(unittest.TestCase):
                 self.assertIn("cadabby verify", err["message"])
         self.assertEqual((self.root / "wiki" / "guessed.md").read_bytes(), before)
 
+    def test_mcp_verify_without_a_method_defaults_to_source_crosscheck(self):
+        _note(self.root, "wiki/unsourced.md", "Drafted from a conversation, grounded in nothing.")
+        _note(
+            self.root,
+            "wiki/sourced.md",
+            "Grounded in a raw file.",
+            extra="sources:\n  - raw/karpathy-llm-wiki-gist.md",
+        )
+        before = (self.root / "wiki" / "unsourced.md").read_bytes()
+
+        err = self._call("vault_verify_note", {"cid": "unsourced"})
+        self.assertEqual((err["code"], err["retryable"]), ("VERIFICATION_REFUSED", False))
+        self.assertIn("source-crosscheck", err["message"])
+        self.assertEqual((self.root / "wiki" / "unsourced.md").read_bytes(), before)
+
+        # The default is strict, not a ban: naming a method that claims no
+        # source check still attests an unsourced note (§3.4 item 2).
+        self.assertEqual(
+            self._ok("vault_verify_note", {"cid": "unsourced", "method": "synthetic-test"})["trust_tier"],
+            "machine-confirmed",
+        )
+        # And a method-less call on a sourced note is unaffected.
+        self.assertEqual(
+            self._ok("vault_verify_note", {"cid": "sourced"})["trust_tier"],
+            "machine-confirmed",
+        )
+
+    def test_verify_schema_advertises_the_strict_default(self):
+        tools = {t["name"]: t for t in self.server.handle_tools_list()["tools"]}
+        method = tools["vault_verify_note"]["inputSchema"]["properties"]["method"]
+        self.assertEqual(method["default"], "source-crosscheck")
+
     # -- C70: retired arguments ---------------------------------------------
 
     def test_retired_arguments_name_their_replacement(self):

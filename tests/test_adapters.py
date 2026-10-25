@@ -43,6 +43,13 @@ class TestAdaptersProtocolConformance(unittest.TestCase):
         passes, and nothing noticed. Names, kinds and defaults are compared;
         return annotations are not, since an adapter's `list[X]` legitimately
         narrows a port's `Sequence[X]`.
+
+        That variance argument covers the container and not the element, which
+        is how `entry_point_rows` sat at `Sequence[Mapping[str, Any]]` while
+        returning `list[sqlite3.Row]` -- a Row is not a Mapping, having neither
+        `.get()` nor `.items()`. Return types are mypy's job now (it reads the
+        real call sites in `ops` and `mcp`, where the cache is passed as the
+        port), and CI runs it; do not reimplement a type checker here.
         """
         import inspect
 

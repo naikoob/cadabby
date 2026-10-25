@@ -47,7 +47,7 @@ Run `vault_status(lint=true)` when `finding_counts` is non-zero and resolve find
 
 ### Gate 6: Epistemic & Verification Integrity
 - `VERIFICATION_STALE`: Use `vault_status` `queues.verification_debt`:
-  - *`agent_payable`* (latest attestation is `agent:*` or `process:*`): Re-audit the note against its primary `raw/` sources (`vault_ground`) and call `vault_verify_note(cid, method="source-crosscheck")`.
+  - *`agent_payable`* (latest attestation is `agent:*` or `process:*`): Re-audit the note against its primary `raw/` sources (`vault_ground`) and call `vault_verify_note(cid, method="source-crosscheck")`. If the note cites no sources the debt is not agent-payable despite the queue label — nothing exists to re-audit against, and the call is refused `VERIFICATION_REFUSED`. Report it and give the user `cadabby verify <cid> --human`; never retry under a method that claims less.
   - *`human_owed`* (latest attestation is `human:*`): **Do not call `vault_verify_note`** (`AGENTS.md` §3). Explain that their prior sign-off bound to the earlier wording (`stale-verified` is a drift indicator, not a penalty) and give them `cadabby verify <cid> --human`.
 - `ACTOR_MALFORMED` & `VERIFICATION_UNBOUND`: **Never edit or delete the entry** — attestation history is append-only and `patch_frontmatter` refuses `verified`. Report the finding to the user. If the note needs attesting and its latest entry is not `human:*`, re-audit against its sources and append a fresh entry with `vault_verify_note`; if it looks like a person's sign-off (`by: owner`), ask them to run `cadabby verify <cid> --human`.
 

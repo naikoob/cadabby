@@ -17,14 +17,14 @@ from cadabby.errors import AmbiguousNoteError, InvalidArgumentError, NotFoundErr
 from cadabby.frontmatter import serialize_frontmatter
 from cadabby.graph import LinkTargetIndex, split_link_target_and_anchor, strip_link_wrapper
 from cadabby.markdown import extract_headings, extract_markdown_section, split_markdown_sections
+from cadabby.paths import cid_to_path, path_to_layer
+from cadabby.ports import IndexCachePort, NoteStoragePort, VaultLayoutPort
 from cadabby.resolve import (
     _default_layout,
     _match_listed_path,
     _strip_dot_slash,
     resolve_note_cid,
 )
-from cadabby.ports import IndexCachePort, NoteStoragePort, VaultLayoutPort
-from cadabby.vault import cid_to_path, path_to_layer
 
 # The most of a raw/ file vault_ground reads; more is reported as truncated.
 RAW_GROUND_MAX_BYTES = 1024 * 1024

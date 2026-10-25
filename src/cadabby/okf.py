@@ -232,9 +232,14 @@ def latest_stale_actor(verified_list: list[Any] | None, current_body_hash: str |
         if not isinstance(item, dict):
             continue
         actor, of_hash = item.get("by"), item.get("of")
-        if isinstance(actor, str) and is_valid_actor(actor) and isinstance(of_hash, str) and of_hash.strip():
-            if of_hash != current_body_hash:
-                latest = actor
+        if (
+            isinstance(actor, str)
+            and is_valid_actor(actor)
+            and isinstance(of_hash, str)
+            and of_hash.strip()
+            and of_hash != current_body_hash
+        ):
+            latest = actor
     return latest
 
 

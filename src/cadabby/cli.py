@@ -11,6 +11,7 @@ import json
 import os
 import secrets
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -214,7 +215,7 @@ def cmd_ground(args: argparse.Namespace) -> int:
         if item.get("section_error"):
             print(f"Note: {item['section_error']}; showing the whole note.")
         print(f"Title: {item['title']} | Type: {item['type']} | Status: {item['status']}")
-        print(f"Links ({len(item['links'])}): {', '.join(l['target'] for l in item['links'])}")
+        print(f"Links ({len(item['links'])}): {', '.join(link['target'] for link in item['links'])}")
         print(f"Backlinks ({len(item['backlinks'])}): {', '.join(b['source_cid'] for b in item['backlinks'])}")
         print(f"Sources: {', '.join(s['path'] for s in item['sources'])}")
         print("-" * 80)
@@ -258,7 +259,7 @@ def cmd_scaffold(args: argparse.Namespace) -> int:
     return _report_write(args, result.to_dict(), f"Scaffolded note: {result.rel_path}")
 
 
-def _report_write(args: argparse.Namespace, payload: dict[str, Any], line: str) -> int:
+def _report_write(args: argparse.Namespace, payload: Mapping[str, Any], line: str) -> int:
     """Print a write's result: the MCP payload with --json, else one line; warnings go to stderr."""
     if getattr(args, "json", False):
         print(json.dumps(payload, indent=2))
@@ -779,12 +780,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("--status", help="Filter by note status")
     p_search.add_argument("--trust", help="Filter by trust tier")
     p_search.add_argument("--tag", help="Filter by tag")
-    p_search.add_argument("--limit", type=_positive_int, default=DEFAULT_LIMIT, help=f"Maximum results, at least 1 (default: {DEFAULT_LIMIT})")
+    p_search.add_argument(
+        "--limit", type=_positive_int, default=DEFAULT_LIMIT, help=f"Maximum results, at least 1 (default: {DEFAULT_LIMIT})"
+    )
     p_search.add_argument("--json", action="store_true", help="Output as JSON")
     p_search.set_defaults(func=cmd_search)
 
     # ground
-    p_ground = subparsers.add_parser("ground", parents=[vault_parent], help="Read notes (with 1-hop graph) or raw/ sources (with citing notes)")
+    p_ground = subparsers.add_parser(
+        "ground", parents=[vault_parent], help="Read notes (with 1-hop graph) or raw/ sources (with citing notes)"
+    )
     p_ground.add_argument(
         "targets",
         nargs="+",
@@ -809,7 +814,9 @@ def build_parser() -> argparse.ArgumentParser:
     graph_what = p_graph.add_mutually_exclusive_group(required=True)
     graph_what.add_argument("target", nargs="?", type=_non_blank, help="Note CID, stem, path or wikilink to centre on")
     graph_what.add_argument("--mocs", action="store_true", help="Every MOC's link counts and overlaps, for splits and merges")
-    p_graph.add_argument("--limit", type=_positive_int, default=DEFAULT_LIMIT, help=f"Max entries per list, at least 1 (default: {DEFAULT_LIMIT})")
+    p_graph.add_argument(
+        "--limit", type=_positive_int, default=DEFAULT_LIMIT, help=f"Max entries per list, at least 1 (default: {DEFAULT_LIMIT})"
+    )
     p_graph.add_argument("--json", action="store_true", help="Output as JSON")
     p_graph.set_defaults(func=cmd_graph)
 
@@ -889,7 +896,9 @@ def build_parser() -> argparse.ArgumentParser:
     # Operator commands, never exposed over MCP (§5.1).
     # init
     p_init = subparsers.add_parser("init", parents=[vault_parent], help="Scaffold a new vault")
-    p_init.add_argument("target_path", nargs="?", type=Path, help="Target directory for new vault (defaults to --vault or current directory)")
+    p_init.add_argument(
+        "target_path", nargs="?", type=Path, help="Target directory for new vault (defaults to --vault or current directory)"
+    )
     p_init.add_argument("--name", help="Name of the vault")
     p_init.add_argument("--force", action="store_true", help="Overwrite existing files")
     p_init.add_argument("--obsidian", action="store_true", help="Scaffold Obsidian configuration")

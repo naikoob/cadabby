@@ -19,21 +19,21 @@ from cadabby.constants import (
     FILE_OBSIDIAN_TEMPLATES,
 )
 from cadabby.domain import DomainDefinition, Note
-from cadabby.errors import InvalidArgumentError, NotFoundError
+from cadabby.errors import InvalidArgumentError, NotFoundError, VaultConflictError
 from cadabby.frontmatter import split_frontmatter
-from cadabby.fsutil import VaultConflictError, check_expected_hash, compute_bytes_sha256
+from cadabby.fsutil import check_expected_hash, compute_bytes_sha256
 from cadabby.okf import ledger_line
-from cadabby.ports import LedgerPort, NoteStoragePort, VaultLayoutPort
-from cadabby.vault import (
+from cadabby.paths import (
     cid_to_path,
     is_excluded_dir,
     normalize_rel,
     note_path_violation,
-    parse_domain_manifest,
     path_to_cid,
     source_path_violation,
     template_rel_filename,
 )
+from cadabby.ports import LedgerPort, NoteStoragePort, VaultLayoutPort
+from cadabby.vault import parse_domain_manifest
 
 
 def _content_hash(note: Note) -> str:

@@ -242,16 +242,12 @@ def _remove_if_unchanged(target: Path, expected: bytes) -> bool:
     try:
         if grave.read_bytes() == expected:
             return True
-        try:
+        with contextlib.suppress(OSError):
             os.link(grave, target)  # restore, unless someone has since taken the slot
-        except OSError:
-            pass
         return False
     finally:
-        try:
+        with contextlib.suppress(OSError):
             grave.unlink()
-        except OSError:
-            pass
 
 
 # How far ahead of our clock a lock's timestamp may be before it counts as forged.
@@ -282,7 +278,7 @@ def advisory_lock(
 
     while not acquired:
         now = time.time()
-        lock_bytes = f"{os.getpid()}:{now:.3f}\n".encode("utf-8")
+        lock_bytes = f"{os.getpid()}:{now:.3f}\n".encode()
 
         try:
             fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
@@ -327,7 +323,9 @@ def advisory_lock(
                 pass
 
             if time.monotonic() - start_time >= timeout:
-                raise LockTimeoutError(f"Could not acquire vault lock at {target} within {timeout}s")
+                # `from None`: the FileExistsError we are inside is the normal
+                # contended path, not a cause worth printing under the timeout.
+                raise LockTimeoutError(f"Could not acquire vault lock at {target} within {timeout}s") from None
 
             time.sleep(poll_interval)
 
@@ -336,7 +334,5 @@ def advisory_lock(
     finally:
         # Only remove the lock this holder wrote, byte for byte: matching the
         # pid prefix alone also matched a later lock by the same process.
-        try:
+        with contextlib.suppress(OSError):
             _remove_if_unchanged(target, lock_bytes)
-        except OSError:
-            pass

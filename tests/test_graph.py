@@ -23,7 +23,8 @@ from cadabby.graph import (
     strip_code_spans,
 )
 from cadabby.queries import get_note_graph
-from cadabby.vault import Vault, note_path_violation
+from cadabby.vault import Vault
+from cadabby.paths import note_path_violation
 from tests.helpers import temp_dir
 
 

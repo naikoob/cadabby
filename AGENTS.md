@@ -19,7 +19,8 @@ Each rule is cheap to break and hard to see once broken.
 - **The MCP tool count is fixed by §5.1.** New capability goes into an existing tool's parameters or an MCP resource; adding a tool is a spec change first, never a code-only change.
 - **Persona behavior lives only in `src/cadabby/assets/skills/<persona>/SKILL.md`** (installed as `.agents/skills/` in a vault). Agent manifests, slash commands, and plugin files are thin pointers (§7.1).
 - **Anything shipped into a vault lives under `src/cadabby/assets/`.** Outside it, the file is missing from the wheel (§9).
-- **Use cases go through ports.** `ops.py` depends on `ports.py` protocols; the storage, layout, and ledger ports each have a disk adapter and an in-memory twin for hermetic tests, while the cache port deliberately has none (§9.1).
+- **Use cases go through ports.** `ops.py` depends on `ports.py` protocols; the storage, layout, and ledger ports each have a disk adapter and an in-memory twin for hermetic tests, while the cache port deliberately has none (§9.1). `isinstance` against these protocols proves only that the member *names* exist — parameters are checked by `test_every_adapter_takes_the_parameters_its_port_declares`, and return types by `mypy`.
+- **`paths.py` and `markdown.py` are leaves.** Pure string work, no filesystem, no `cadabby` imports beyond `constants`/`errors`. `graph`, `ground`, `move`, `resolve` and `search` reach the path algebra there and must not import `cadabby.vault` (§9.1).
 - **No human attestation without a human.** MCP refuses `human:*` outright, and CLI writes default to `process:cli` even on a TTY (§3.5, §5.3).
 - **No engine-generated files inside cognitive domains**, including no `{domain}/index.md` (§2.2, §2.5).
 - **Templates seed the body only, and `templates/` is never reserved by default.** The reasons are in §7.5; read it before touching either.
@@ -32,6 +33,8 @@ Each rule is cheap to break and hard to see once broken.
 | Search, ranking, the FTS5 tables, scanning | `cache.py`, `search.py` | §4, `test_cache.py` |
 | Queues, graph views, status counts, lint row queries | `queries.py` | §2.5, §4.5, `test_cache.py`, `test_indexer.py` |
 | Wikilink / Markdown-link parsing, resolution, backlinks | `graph.py` | §2.5, `test_graph.py` |
+| Path/CID mapping, or which paths may hold a note or a source | `paths.py` | §2.1, §2.2, `test_vault.py`, `test_architecture.py` |
+| Vault discovery, `.cadabby.json` config, domain manifests | `vault.py` | §2.2, §2.7, `test_vault.py`, `test_domains.py` |
 | `index.md` or `log.md` output | `indexer.py` | §2.5, `test_indexer.py` |
 | A lint gate's codes or severities | `lint.py` | §6.3, `test_lint.py` |
 | Scaffold / update / move / verify / ground, or the search / status / graph facades | `ops.py`, `move.py`, `ground.py`, `resolve.py` (+ `ports.py`, `adapters/`) | §9.1, `test_ops.py`, `test_move.py`, `test_domain_model.py` |
@@ -52,9 +55,17 @@ python3 tests/run_parallel.py                               # full suite, parall
 python3 tests/run_parallel.py test_cache                    # filter by module
 PYTHONPATH=src python3 -m unittest tests.test_acceptance.TestAcceptanceTraceability  # one class or method
 
+uvx ruff check src/                                         # must be clean; CI runs it
+uvx mypy                                                    # strict, configured in pyproject.toml
+
 PYTHONPATH=src python3 -m cadabby status --vault examples/demo-vault   # CLI without installing
 uv build                                                    # verify the wheel builds
 ```
+
+Run `ruff` before you call a task done. The suite cannot see a name that is
+never imported on a branch no test takes — that is how a `NameError` reached
+`update_note` in 0.5.4 — and `ruff` reports it as `F821` in under a second.
+Both tools run through `uvx`, so neither is a declared dependency.
 
 ## Traceability and Releases
 

@@ -29,8 +29,8 @@ from cadabby.errors import (
     VaultConflictError,
     classify,
 )
-from cadabby.fsutil import compute_bytes_sha256
 from cadabby.frontmatter import FrontmatterParseError, split_frontmatter
+from cadabby.fsutil import compute_bytes_sha256
 from cadabby.graph import LINK_KIND_WIKI, LinkTargetIndex, iter_link_spans, strip_link_wrapper
 from cadabby.ground import (
     RAW_GROUND_MAX_BYTES,
@@ -50,11 +50,13 @@ from cadabby.move import (
     _stable_wiki_target,
     _write_steps,
 )
+from cadabby.paths import cid_to_path, path_to_cid
 from cadabby.ports import IndexCachePort, LedgerPort, NoteStoragePort, VaultLayoutPort
 from cadabby.resolve import (
+    _FORBIDDEN_NAME_CHARS,
+    _check_domain_type,
     _check_new_location,
     _default_layout,
-    _FORBIDDEN_NAME_CHARS,
     _match_listed_path,
     _name_violation,
     _parse_relative_target,
@@ -67,18 +69,19 @@ from cadabby.resolve import (
     with_md_suffix,
 )
 from cadabby.search import SearchResult
-from cadabby.vault import Vault, cid_to_path, path_to_cid
+from cadabby.vault import Vault
 
 __all__ = [
     "EDIT_OPS",
     "ENGINE_OWNED_FIELDS",
-    "EditOp",
     "GRAPH_VIEWS",
+    "QUEUE_ITEM_CAP",
+    "RAW_GROUND_MAX_BYTES",
+    "_FORBIDDEN_NAME_CHARS",
+    "EditOp",
     "GroundNotesUseCase",
     "MoveNoteUseCase",
     "MovePlan",
-    "QUEUE_ITEM_CAP",
-    "RAW_GROUND_MAX_BYTES",
     "ReplaceTextEdit",
     "ScaffoldNoteUseCase",
     "SectionEdit",
@@ -86,7 +89,6 @@ __all__ = [
     "VerifyNoteUseCase",
     "VerifyPayload",
     "WriteResult",
-    "_FORBIDDEN_NAME_CHARS",
     "_MovedNote",
     "_Rewrite",
     "_apply_spans",
@@ -354,12 +356,7 @@ class UpdateNoteUseCase:
 
         note = load_existing_note(self.storage, cid_or_path)
         if frontmatter_patch and frontmatter_patch.get("type") is not None:
-            domain = path_to_layer(note.rel_path)
-            domain_def = self.vault.discover_domains().get(domain)
-            if domain_def and domain_def.allowed_types is not None and frontmatter_patch["type"] not in domain_def.allowed_types:
-                raise InvalidArgumentError(
-                    f"Invalid note type '{frontmatter_patch['type']}'. In domain '{domain}', allowed types are {domain_def.allowed_types}"
-                )
+            _check_domain_type(self.vault, note.rel_path, frontmatter_patch["type"])
         before = (copy.deepcopy(note.frontmatter), note.body)
 
         if frontmatter_patch:

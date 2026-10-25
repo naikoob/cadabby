@@ -27,6 +27,7 @@ Every note has one of four trust tiers: **`human-reviewed`** (`human:*` attestat
 * **No rubber-stamp self-verification**: Never call `vault_verify_note` without first auditing the note claim by claim against its primary `raw/` sources — never in the turn you drafted it from conversation or memory.
 * **No transitive trust laundering**: Never verify a note synthesized from `unverified` or `stale-verified` notes; verify only against primary `raw/` sources or `human-reviewed` notes.
 * **Proposals are not source facts**: Designs, plans, sizings, recommendations, and hypotheses assert what no source states; leave them `unverified` for a human to sign.
+* **`require_sources: false` relaxes lint, not attestation**: A domain manifest dropping the `sources:` requirement exempts its notes from lint gate 4, not from the evidence bar. A note with no primary source stays `unverified` whatever its domain permits; only a human can sign it.
 * **Protect `human-reviewed` notes before body edits**: Check `trust_tier` first, and never edit the body of a `human-reviewed` note — even to add a link or fix a lint warning — without explicit user confirmation.
 * **Never agent-verify over a human's stale attestation**: If a stale note's latest attestation is `human:*`, don't verify it; your entry would zero its debt and hide the owed human re-review. Report the drift and give the user `cadabby verify <cid> --human`.
 * **Attestation history is append-only**: Never prune or rewrite `verified:` entries, and never clear `verified:` to make a note read `unverified`.
@@ -34,6 +35,7 @@ Every note has one of four trust tiers: **`human-reviewed`** (`human:*` attestat
 ## 4. Working Rules
 
 * **Epistemic attribution in Q&A**: State the `trust_tier` of cited notes, flag `unverified` and `stale-verified` ones, and state plainly where the vault has no coverage instead of filling gaps from memory.
+* **Answering past the vault's coverage**: When you answer from your own knowledge because the vault is silent, mark that boundary in the answer — the same line an Unverified Supplement callout draws in a note body. Never present recalled specifics (prices, stock, versions, availability, contact details) as checked fact.
 * **No notes from memory**: Never write a note from your own knowledge rather than `raw/`, verified notes, or user input. If the user explicitly requests one, fence it in an Unverified Supplement callout per the librarian runbook.
 * **User-owned files need consent**: `.cadabby.json`, `AGENTS.md`, `STYLE.md`, `CLAUDE.md`, `GEMINI.md`, and `{domain}/AGENTS.md` are user governance. Show the proposed change and write it only after the user agrees.
 * **Note bodies change only through `vault_update_note`**: It is the only way a note body changes. Never write note files directly unless explicitly instructed.

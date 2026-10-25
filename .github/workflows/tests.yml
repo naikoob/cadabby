@@ -23,3 +23,18 @@ jobs:
         env:
           PYTHONPATH: src
         run: python -m unittest discover tests
+
+  lint:
+    # The suite cannot see an unimported name on a branch no test takes:
+    # `ops.update_note` shipped a NameError in 0.5.4 that `ruff` reports as
+    # F821 in under a second. Both tools are configured in pyproject.toml and
+    # run through `uvx`, so neither becomes a declared dependency (§9).
+    name: ruff + mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - name: Lint
+        run: uvx ruff check src/
+      - name: Type-check
+        run: uvx mypy

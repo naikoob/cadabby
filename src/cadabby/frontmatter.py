@@ -10,9 +10,9 @@ import re
 from typing import Any
 
 from cadabby.constants import SCHEMA_KEY_ORDER
-from cadabby.errors import CadabbyError
 from cadabby.errors import FRONTMATTER_UNPARSEABLE as _CODE_UNPARSEABLE
 from cadabby.errors import FRONTMATTER_UNSERIALIZABLE as _CODE_UNSERIALIZABLE
+from cadabby.errors import CadabbyError
 from cadabby.okf import canonicalize_aliases, canonicalize_tags, split_lines
 
 RE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")

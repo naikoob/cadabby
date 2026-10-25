@@ -13,8 +13,8 @@ from cadabby.cache import VaultCache
 from cadabby.domain import DomainDefinition
 from cadabby.lint import run_vault_lint
 from cadabby.mcp import McpServer
-from cadabby.ops import ground_notes, scaffold_note, verify_note
-from cadabby.vault import cid_to_path, path_to_cid, path_to_layer
+from cadabby.ops import ground_notes, scaffold_note, update_note, verify_note
+from cadabby.paths import cid_to_path, path_to_cid, path_to_layer
 from tests.helpers import create_test_vault, temp_dir
 
 
@@ -632,6 +632,41 @@ require_sources: false
                 domain="customers",
             )
         self.assertIn("allowed types are ['account', 'contract']", str(ctx.exception))
+
+    def test_update_note_enforces_domain_allowed_types(self):
+        """Patching `type` is bound by `allowed_types` exactly as scaffold is (§2.2, §5.1).
+
+        Without this the domain is only half closed: scaffold refuses the type
+        and a follow-up `update_note` puts it back. The accepted-type case is
+        here too because only it reaches the check -- the refusal path alone
+        once passed while the check itself raised `NameError`.
+        """
+        scaffold_note(
+            vault=self.vault,
+            title="Acme Corporation",
+            type_="account",
+            description="Leading industrial client",
+            domain="customers",
+            actor="agent:ops-test",
+        )
+        with self.assertRaises(ValueError) as ctx:
+            update_note(self.vault, "customers/acme-corporation", {"type": "invalid_type"}, actor="agent:ops-test")
+        self.assertIn("allowed types are ['account', 'contract']", str(ctx.exception))
+
+        update_note(self.vault, "customers/acme-corporation", {"type": "contract"}, actor="agent:ops-test")
+        self.assertIn("type: contract", (self.vault_dir / "customers" / "acme-corporation.md").read_text("utf-8"))
+
+    def test_update_note_keeps_open_typing_in_wiki(self):
+        """`wiki/` declares no `allowed_types`, so a patch may name any type (§2.2)."""
+        scaffold_note(
+            vault=self.vault,
+            title="Flat Note",
+            type_="concept",
+            description="Open typing",
+            actor="agent:ops-test",
+        )
+        update_note(self.vault, "wiki/flat-note", {"type": "anything-goes"}, actor="agent:ops-test")
+        self.assertIn("type: anything-goes", (self.vault_dir / "wiki" / "flat-note.md").read_text("utf-8"))
 
     def test_ground_notes_enriches_domain_and_directives(self):
         note_path = self.vault_dir / "customers" / "Acme.md"

@@ -37,6 +37,7 @@ from cadabby.graph import (
     resolve_markdown_target,
 )
 from cadabby.okf import canonical_tag, compute_body_hash, derive_trust_tier, utc_now_iso
+from cadabby.paths import cid_to_path, note_path_violation, path_to_cid, path_to_layer, path_to_stem
 from cadabby.queries import DebtRow
 from cadabby.search import (
     SearchResult,
@@ -44,7 +45,7 @@ from cadabby.search import (
     execute_search,
     extract_camelcase_subwords,
 )
-from cadabby.vault import Vault, cid_to_path, note_path_violation, path_to_cid, path_to_layer, path_to_stem
+from cadabby.vault import Vault
 
 
 def _can_be_note(target_cid: str | None, template_rel: str | None) -> bool:
@@ -110,9 +111,11 @@ _INSERT_NOTE_SQL = f"INSERT INTO notes (rel_path, {', '.join(_NOTE_COLUMNS)}) VA
 
 def _is_unchanged(cached: sqlite3.Row, st: os.stat_result, f_hash: str | None, integrity_mode: str) -> bool:
     """Whether a file still matches its cached row under the vault's integrity mode."""
+    # bool(): sqlite3.Row indexing is typed Any, so these comparisons would
+    # otherwise widen the declared -> bool return back to Any.
     if integrity_mode == "hash":
-        return cached["file_hash"] == f_hash
-    return abs(cached["mtime"] - st.st_mtime) <= 1e-4 and cached["file_size"] == st.st_size
+        return bool(cached["file_hash"] == f_hash)
+    return bool(abs(cached["mtime"] - st.st_mtime) <= 1e-4 and cached["file_size"] == st.st_size)
 
 
 _RAW_EXTS_META_KEY = "raw_text_extensions"
@@ -423,15 +426,16 @@ class VaultCache:
         ).fetchone()
 
         if existing is not None:
-            row_id = existing["id"]
+            row_id = int(existing["id"])  # sqlite3.Row indexing is Any; this function promises int
             # 1. Retract the old terms using the OLD values, then update in place
             # so the rowid the FTS5 tables key on is preserved.
             self._retract_fts(conn, existing)
             conn.execute(_UPDATE_NOTE_SQL, (*values, row_id))
         else:
             cur = conn.execute(_INSERT_NOTE_SQL, (record.rel_path, *values))
-            row_id = cur.lastrowid
-            assert row_id is not None
+            inserted = cur.lastrowid  # int | None in the stubs; always set after a successful INSERT
+            assert inserted is not None
+            row_id = inserted
 
         # 2. Index everything that parsed, into the index for its corpus. Raw
         # sources are indexed at all so that the full text of a collected source
@@ -953,10 +957,8 @@ class VaultCache:
     def close(self) -> None:
         """Close SQLite database connection if open."""
         if self._conn is not None:
-            try:
+            with contextlib.suppress(sqlite3.Error, OSError):
                 self._conn.close()
-            except (sqlite3.Error, OSError):
-                pass
             self._conn = None
 
     def __enter__(self) -> Self:

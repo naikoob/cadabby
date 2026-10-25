@@ -6,7 +6,7 @@ Defines the contracts between the domain/application core and external infrastru
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from cadabby.constants import DEFAULT_LIMIT
@@ -18,6 +18,24 @@ if TYPE_CHECKING:
     # layer, and a port must not import its own adapter's modules (§9.1).
     from cadabby.queries import DebtRow
     from cadabby.search import SearchResult
+
+
+@runtime_checkable
+class IndexRow(Protocol):
+    """One read-side row, addressed by column name and nothing else.
+
+    These rows were typed `Mapping[str, Any]`, which the only implementation
+    does not satisfy: the disk cache returns `sqlite3.Row`, and that has no
+    `.get()` and no `.items()`. The mismatch survived because
+    `isinstance(cache, IndexCachePort)` against a `runtime_checkable` protocol
+    compares method *names* and ignores signatures, so `test_adapters` passed
+    while the declared contract promised an interface callers would crash on.
+
+    `__getitem__` is the whole promise because it is the whole usage; widen it
+    only alongside the adapters that must then provide it.
+    """
+
+    def __getitem__(self, key: str, /) -> Any: ...
 
 
 @runtime_checkable
@@ -114,11 +132,11 @@ class IndexCachePort(Protocol):
         """Every MOC outside archive/ with its link counts, and the largest overlaps between MOCs (§5.1)."""
         ...
 
-    def entry_point_rows(self) -> Sequence[Mapping[str, Any]]:
+    def entry_point_rows(self) -> Sequence[IndexRow]:
         """Every MOC outside archive/ (cid, stem, rel_path, layer, description), wiki MOCs first (§2.5)."""
         ...
 
-    def unfiled_note_rows(self) -> Sequence[Mapping[str, Any]]:
+    def unfiled_note_rows(self) -> Sequence[IndexRow]:
         """Wiki notes no MOC reaches by forward link at any depth, sorted by stem (§2.5)."""
         ...
 

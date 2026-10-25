@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -33,6 +32,8 @@ from cadabby.graph import (
 )
 from cadabby.markdown import (
     anchor_matches as _anchor_matches,
+)
+from cadabby.markdown import (
     extract_headings as _extract_headings,
 )
 from cadabby.okf import (
@@ -42,7 +43,8 @@ from cadabby.okf import (
     is_valid_timestamp,
     tag_has_whitespace,
 )
-from cadabby.vault import Vault, cid_to_path
+from cadabby.paths import cid_to_path
+from cadabby.vault import Vault
 
 
 @dataclass
@@ -419,7 +421,7 @@ def _verification_findings(
         actor = v_entry.get("by")
         of_hash = v_entry.get("of")
 
-        actor_valid = bool(actor and is_valid_actor(actor))
+        actor_valid = isinstance(actor, str) and bool(actor) and is_valid_actor(actor)
         if not actor_valid:
             yield _error(code="ACTOR_MALFORMED", rel_path=rel_path, message=f"Malformed actor identity: '{actor}'")
 
@@ -430,7 +432,7 @@ def _verification_findings(
                 message=f"Verification entry by '{actor}' missing 'of:' body hash binding",
             )
         elif actor_valid and of_hash != body_hash:
-            actor_is_human = is_actor_human(actor)
+            actor_is_human = is_actor_human(str(actor))  # actor_valid already proved it a str
             superseded = tier == "human-reviewed" or (tier == "machine-confirmed" and not actor_is_human)
             if not superseded:
                 stale.append((str(actor), of_hash))

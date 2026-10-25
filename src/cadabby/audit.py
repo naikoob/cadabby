@@ -8,8 +8,8 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 
 from cadabby.constants import ACTOR_PATTERN
 from cadabby.frontmatter import FrontmatterParseError, split_comment, split_frontmatter

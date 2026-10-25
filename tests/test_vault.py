@@ -9,15 +9,13 @@ from pathlib import Path
 from unittest import mock
 
 from cadabby.constants import FILE_CONFIG
+from cadabby.paths import cid_to_path, path_to_cid, path_to_layer
 from cadabby.vault import (
     Vault,
     VaultConfigError,
-    cid_to_path,
     default_vault_config,
     find_vault_root,
     load_vault_config,
-    path_to_cid,
-    path_to_layer,
 )
 from tests.helpers import temp_dir  # importing helpers also scrubs CADABBY_VAULT (T1)
 
@@ -202,7 +200,7 @@ class TestVault(unittest.TestCase):
             self.assertEqual(found_env, env_vault.resolve())
 
     def test_note_path_violation_normalizes_slashes_and_rejects_leading_slash(self):
-        from cadabby.vault import note_path_violation
+        from cadabby.paths import note_path_violation
 
         self.assertIsNotNone(note_path_violation("/wiki/Note.md"))
         self.assertIsNotNone(note_path_violation("\\wiki\\Note.md"))

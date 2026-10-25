@@ -25,7 +25,6 @@ from cadabby.okf import (
     utc_now_iso,
 )
 
-
 # Written by the engine alone: `verified` only by vault_verify_note / cadabby
 # verify, `generated` only at scaffold. A patch able to set them could mint a
 # `human:*` attestation that vault_verify_note refuses, or erase the audit trail.
@@ -195,9 +194,11 @@ class Note:
 
         Two contradictions the engine can see: the body fences text as
         unattested (an Unverified Supplement callout, under any method, since
-        the MCP default `automated-check` would otherwise walk past it), and
+        an explicit `automated-check` would otherwise walk past it), and
         `source-crosscheck` claimed for a note that cites no source. Other
-        methods on an unsourced note (a CI test of a runbook) are legitimate.
+        methods on an unsourced note (a CI test of a runbook) are legitimate,
+        but must be named explicitly: MCP defaults the method to
+        `source-crosscheck` so an unconsidered call fails safe.
         `cadabby verify --human` shows the same reason as a warning.
         """
         if lines := unverified_supplement_lines(self.body):

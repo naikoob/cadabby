@@ -13,7 +13,7 @@ from typing import Any
 from cadabby.constants import DEFAULT_LIMIT, DIR_RAW, FTS_COLUMN_WEIGHTS, FTS_FIELD_HIT_FLOOR
 from cadabby.errors import InvalidArgumentError
 from cadabby.okf import canonical_tag
-from cadabby.vault import path_to_layer
+from cadabby.paths import path_to_layer
 
 
 def sanitize_fts5_query(query: str) -> str:

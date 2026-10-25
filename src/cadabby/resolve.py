@@ -15,8 +15,8 @@ from cadabby.domain import Note
 from cadabby.errors import AlreadyExistsError, AmbiguousNoteError, InvalidArgumentError, NotFoundError
 from cadabby.graph import LinkTargetIndex, normalize_link_target
 from cadabby.okf import is_valid_actor
+from cadabby.paths import cid_to_path, normalize_rel, path_to_cid, path_to_layer
 from cadabby.ports import NoteStoragePort, VaultLayoutPort
-from cadabby.vault import cid_to_path, normalize_rel, path_to_cid, path_to_layer
 
 
 def sanitize_filename(title: str) -> str:
@@ -178,6 +178,26 @@ def _default_layout(storage: NoteStoragePort, vault: VaultLayoutPort | None) -> 
     return InMemoryVaultLayout()
 
 
+def _check_domain_type(vault: VaultLayoutPort, rel_path: str, type_: str) -> None:
+    """Refuse a `type` the note's domain does not list in `allowed_types` (§2.2).
+
+    Creating the note and patching its type are the same claim about the
+    domain, so scaffold (through `_check_new_location`) and update share this
+    rather than each spelling it out: a second copy drifted once already, and
+    the one in `ops` referred to a name it had never imported.
+
+    The broken-manifest refusal stays in `_check_new_location`: a domain whose
+    manifest does not parse is open, and only *new* notes are refused there
+    until it is fixed (§6.3).
+    """
+    domain = path_to_layer(rel_path)
+    domain_def = vault.discover_domains().get(domain)
+    if domain_def and domain_def.allowed_types is not None and type_ not in domain_def.allowed_types:
+        raise InvalidArgumentError(
+            f"Invalid note type '{type_}'. In domain '{domain}', allowed types are {domain_def.allowed_types}"
+        )
+
+
 def _check_new_location(
     storage: NoteStoragePort,
     vault: VaultLayoutPort,
@@ -208,10 +228,7 @@ def _check_new_location(
             f"Cannot {verb} into domain '{domain}': its {FILE_AGENTS} is invalid "
             f"({domain_def.manifest_error}). Fix the manifest first"
         )
-    if domain_def and domain_def.allowed_types is not None and type_ not in domain_def.allowed_types:
-        raise InvalidArgumentError(
-            f"Invalid note type '{type_}'. In domain '{domain}', allowed types are {domain_def.allowed_types}"
-        )
+    _check_domain_type(vault, rel_path, type_)
 
     cid = path_to_cid(rel_path)
     excluded = replacing_group | ({replacing} if replacing is not None else set())

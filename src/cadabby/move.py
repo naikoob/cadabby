@@ -34,6 +34,8 @@ from cadabby.graph import (
     resolve_markdown_target,
     resolve_relative_path,
 )
+from cadabby.paths import cid_to_path, normalize_rel, path_to_cid
+from cadabby.ports import LedgerPort, NoteStoragePort, VaultLayoutPort
 from cadabby.resolve import (
     _check_new_location,
     _default_layout,
@@ -45,8 +47,6 @@ from cadabby.resolve import (
     resolve_note_cid,
     with_md_suffix,
 )
-from cadabby.ports import LedgerPort, NoteStoragePort, VaultLayoutPort
-from cadabby.vault import cid_to_path, normalize_rel, path_to_cid
 
 
 def _stable_wiki_target(cid: str) -> str:
@@ -439,7 +439,15 @@ class MoveNoteUseCase:
 
     def _retire_source(self, source: Note, undo: list[Callable[[], None]]) -> None:
         self.storage.delete_note(source.cid, expected_hash=source.source_hash, prune_empty_dirs=True)
-        undo.append(lambda s=source: self.storage.save_note(s))
+
+        # A named closure over `source`, not `lambda s=source:`. The default-argument
+        # form was there to snapshot the loop variable, but each call gets its own
+        # `source` parameter already, so the binding was never needed -- and the
+        # default made the lambda's type uninferable.
+        def restore() -> None:
+            self.storage.save_note(source)
+
+        undo.append(restore)
 
     @staticmethod
     def _parse_destination_path(to: str) -> tuple[str, list[str]]:

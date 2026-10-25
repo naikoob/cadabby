@@ -326,7 +326,7 @@ def get_note_graph(conn: sqlite3.Connection, target_cid: str, *, limit: int | No
         "bibliographic_coupling": (bibliographic_coupling, "cid"),
     }
     result: dict[str, Any] = {"note": note_info}
-    for name, (entries, key) in lists.items():
+    for name, (entries, _key) in lists.items():  # the key is read in the comprehension below, not here
         kept = entries if limit is None else entries[:limit]
         result[name] = kept
         if limit is not None:

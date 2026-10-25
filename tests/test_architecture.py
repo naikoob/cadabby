@@ -91,6 +91,39 @@ class TestArchitecture(unittest.TestCase):
         )
         self.assertEqual(internal, [])
 
+    def test_paths_is_a_leaf_module(self):
+        """paths.py is pure string algebra: it may import constants and errors, nothing else.
+
+        It was carved out of vault.py, where `graph`, `ground`, `move`,
+        `resolve` and `search` each imported only the path functions and got
+        config loading, vault discovery and manifest parsing with them. A
+        `cadabby.vault` import here would undo that in one line, and a
+        filesystem call would make the five depend on a real vault again.
+        """
+        path = Path(__file__).resolve().parent.parent / "src" / "cadabby" / "paths.py"
+        tree = ast.parse(path.read_text("utf-8"), filename=str(path))
+        internal = sorted(
+            {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("cadabby")}
+            | {a.name for node in ast.walk(tree) if isinstance(node, ast.Import) for a in node.names if a.name.startswith("cadabby")}
+        )
+        self.assertEqual(internal, ["cadabby.constants", "cadabby.errors"])
+
+    def test_the_path_algebra_consumers_do_not_import_the_vault(self):
+        """The five modules the paths.py split was for stay off cadabby.vault (§9.1).
+
+        Each of them needs path strings and no vault at all. Re-importing
+        `cadabby.vault` for one more helper is how the hub reforms, so the
+        rule is pinned per-module rather than left to review.
+        """
+        src_root = Path(__file__).resolve().parent.parent / "src" / "cadabby"
+        offenders: list[str] = []
+        for name in ("graph.py", "ground.py", "move.py", "resolve.py", "search.py"):
+            tree = ast.parse((src_root / name).read_text("utf-8"), filename=name)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module == "cadabby.vault":
+                    offenders.append(f"{name}:{node.lineno}")
+        self.assertEqual(offenders, [])
+
     def test_queries_never_import_the_cache_or_vault(self):
         """queries.py is the read side: it takes a connection and knows no config.
 

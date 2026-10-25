@@ -14,8 +14,9 @@ from cadabby.errors import InvalidArgumentError, NotFoundError
 from cadabby.frontmatter import FrontmatterParseError
 from cadabby.fsutil import atomic_replace_checked, check_expected_hash, compute_bytes_sha256
 from cadabby.indexer import append_vault_log
+from cadabby.paths import cid_to_path, path_to_cid, source_path_violation
 from cadabby.ports import LedgerPort, NoteStoragePort
-from cadabby.vault import Vault, cid_to_path, path_to_cid, source_path_violation
+from cadabby.vault import Vault
 
 
 class DiskNoteStorage(NoteStoragePort):

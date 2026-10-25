@@ -142,7 +142,7 @@ def _entry_points(cache: IndexCachePort) -> list[str]:
         f"| {_note_link(r['stem'] if r['layer'] == DIR_WIKI else r['cid'], r['rel_path'])} | {_cell(r['description'])} |"
         for r in rows
     ]
-    return lines + [""]
+    return [*lines, ""]
 
 
 def _unfiled(cache: IndexCachePort) -> list[str]:
@@ -173,7 +173,7 @@ def _unfiled(cache: IndexCachePort) -> list[str]:
         "| :--- | :--- |",
     ]
     lines += [f"| {_note_link(r['stem'], r['rel_path'])} | {_cell(r['description'])} |" for r in rows]
-    return lines + [""]
+    return [*lines, ""]
 
 
 def _raw_queue(cache: IndexCachePort) -> list[str]:
@@ -190,7 +190,7 @@ def _raw_queue(cache: IndexCachePort) -> list[str]:
         "| :--- |",
     ]
     lines += [f"| `{path}` |" for path in pending]
-    return lines + [""]
+    return [*lines, ""]
 
 
 def _verification_debt(cache: IndexCachePort) -> list[str]:
@@ -213,7 +213,7 @@ def _verification_debt(cache: IndexCachePort) -> list[str]:
         "| :--- |",
     ]
     lines += [f"| `{r.cid}` |" for r in rows]
-    return lines + [""]
+    return [*lines, ""]
 
 
 def _build_index_lines(vault: Vault, cache: IndexCachePort) -> str:
