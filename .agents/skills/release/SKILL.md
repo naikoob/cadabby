@@ -63,16 +63,18 @@ changing it, because historical mentions (e.g. "added in 0.3.2") must stay.
 
 Run all of these. Stop on any failure.
 
-1. **Tests, both runners.** Run them from the repo root:
+1. **Tests, linter, and type-checker.** Run them from the repo root:
    ```bash
    python3 tests/run_parallel.py
    PYTHONPATH=src python3 -m unittest discover tests   # require "Ran N tests ... OK"
+   uvx ruff check src/
+   uvx mypy
    ```
    The suite also enforces spec §10 traceability, the §9 repository tree, version
    parity, and that no machine-specific paths appear in published files.
 2. **Build and inspect the wheel.** Clear out stale artifacts first:
    ```bash
-   rm -rf dist && uv build
+   rm -rf dist && uv build --offline
    python3 -m zipfile -l dist/cadabby-X.Y.Z-py3-none-any.whl | grep -c assets/
    ```
    Compare the file list with the previous wheel (`pip download cadabby==<prev>
@@ -80,11 +82,12 @@ Run all of these. Stop on any failure.
    everything under `src/cadabby/assets/` must be inside the wheel.
 3. **Smoke-test the built wheel in a clean venv:**
    ```bash
-   python3 -m venv /tmp/rc && /tmp/rc/bin/pip install -q dist/cadabby-X.Y.Z-py3-none-any.whl
+   python3 -m venv /tmp/rc && /tmp/rc/bin/pip install --no-deps -q dist/cadabby-X.Y.Z-py3-none-any.whl
    /tmp/rc/bin/cadabby init /tmp/rc-vault && /tmp/rc/bin/cadabby status --vault /tmp/rc-vault
    printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
                  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
      | /tmp/rc/bin/cadabby mcp --vault /tmp/rc-vault
+   rm -rf dist /tmp/rc /tmp/rc-vault
    ```
    Expect `serverInfo.version` to be X.Y.Z and exactly 8 tools.
 4. **Upgrade path.** Do this only when the tool surface, the shipped assets, or the

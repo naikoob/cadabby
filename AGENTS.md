@@ -24,6 +24,7 @@ Each rule is cheap to break and hard to see once broken.
 - **No human attestation without a human.** MCP refuses `human:*` outright, and CLI writes default to `process:cli` even on a TTY (§3.5, §5.3).
 - **No engine-generated files inside cognitive domains**, including no `{domain}/index.md` (§2.2, §2.5).
 - **Templates seed the body only, and `templates/` is never reserved by default.** The reasons are in §7.5; read it before touching either.
+- **Review skills, runbooks, and docs against the code, not in isolation.** When asked to review a skill (`SKILL.md`), constitution (`AGENTS.md`), or spec section, trace every tool call, parameter default, error code, and state transition it mentions into the implementation and tests. Prioritize finding code/doc divergence, unstated edge cases (e.g., empty fields, default arguments that bypass a guard), and untested branches over praising prose structure.
 
 ## Where to Start
 
